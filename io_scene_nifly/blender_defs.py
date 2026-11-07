@@ -1,0 +1,852 @@
+"""Common definitions for the Blender plugin"""
+
+from contextlib import contextmanager
+import os
+from enum import IntFlag
+import re
+import logging
+from mathutils import Matrix, Vector, Quaternion, Euler
+import bpy
+from math import pi, radians
+from .pyn.nifdefs import NiKeyType
+from .pyn.nifconstants import game_traits
+from .pyn.niflytools import VNearEqual, NearEqual, gameSkeletons, fo4FaceDict, texture_path
+from .gamefinder import find_game
+from . import __package__ as base_package
+from .pyn.niflydll import pynifly_dev_path, pynifly_addon_path
+from .pyn.pynifly import NiTransformData, NiShape, TransformBuf, MATRIX3
+
+import ctypes
+from ctypes import wintypes
+_GetShortPathNameW = ctypes.windll.kernel32.GetShortPathNameW
+_GetShortPathNameW.argtypes = [wintypes.LPWSTR, wintypes.LPWSTR, wintypes.DWORD]
+_GetShortPathNameW.restype = wintypes.DWORD
+
+
+if pynifly_dev_path:
+    asset_path = os.path.join(pynifly_dev_path, "blender_assets")
+else:
+    asset_path = os.path.join(pynifly_addon_path, "blender_assets")
+
+
+log = logging.getLogger("pynifly")
+
+# Magic vertex group names used to communicate issues
+NO_PARTITION_GROUP = "*NO_PARTITIONS*"
+MULTIPLE_PARTITION_GROUP = "*MULTIPLE_PARTITIONS*"
+UNWEIGHTED_VERTEX_GROUP = "*UNWEIGHTED_VERTICES*"
+
+LOD_GROUP_NAMES = ("LOD0", "LOD1", "LOD2")
+
+ALPHA_MAP_NAME = "VERTEX_ALPHA"
+COLOR_MAP_NAME = "VERTEX_COLOR"
+GLOSS_SCALE = 100
+
+
+name_pat = re.compile(r'(.+)\.\d\d\d')
+
+def nonunique_name(obj):
+    """
+    Returns the root name of an object, before Blender added '.00n' to make it unique.
+    Accepts either an object or a string.
+    """
+    if type(obj) is str:
+        s = obj
+    else:
+        s = obj.name
+    m = name_pat.search(s)
+    if m:
+        return m.group(1)
+    return s
+
+
+def name_from_root(obj):
+    """Given a root object, returns a nif name"""
+    n = obj.name[0:-5] if obj.name.endswith(":ROOT") else obj.name
+    return nonunique_name(n)
+
+
+@contextmanager
+def stashed_animation(obj):
+    """Context manager that temporarily stashes and restores animation data on an object"""
+    saved_anim_action = saved_anim_slot = None
+    saved_mat_action = saved_mat_slot = None
+    
+    try:
+        yield
+
+    finally:
+        # Restore the animation data
+        if saved_anim_action:
+            if not obj.animation_data:
+                obj.animation_data_create()
+            obj.animation_data.action = saved_anim_action
+            obj.animation_data.action_slot = saved_anim_slot
+
+        if saved_mat_action:
+            if not obj.active_material.animation_data:
+                obj.active_material.animation_data_create()
+            obj.active_material.animation_data.action = saved_mat_action
+            obj.active_material.animation_data.action_slot = saved_mat_slot
+
+
+def ObjectSelect(objlist, deselect=True, active=True):
+    """Select all the objects in the list"""
+    try:
+        bpy.ops.object.mode_set(mode = 'OBJECT')
+    except RuntimeError:
+        pass
+    if deselect:
+        bpy.ops.object.select_all(action='DESELECT')
+    if hasattr(objlist, "__iter__"):
+        for o in objlist:
+            try:
+                o.select_set(True)
+            except (RuntimeError, ReferenceError):
+                pass
+        o1 = objlist[0] if len(objlist) > 0 else None
+    else:
+        try:
+            objlist.select_set(True)
+        except (RuntimeError, ReferenceError):
+            pass
+        o1 = objlist
+    if active and objlist:
+        try:
+            bpy.context.view_layer.objects.active = o1
+        except (RuntimeError, ReferenceError):
+            pass
+    # Say which objects didn't take. Swallowed silently, the failure surfaces much later as an
+    # unrelated-looking "mode_set.poll() Context missing active object".
+    for o in (objlist if hasattr(objlist, "__iter__") else [objlist]):
+        try:
+            if not o.select_get():
+                log.warning(f"Could not select {o.name}: {_unselectable_reason(o)}")
+        except (RuntimeError, ReferenceError):
+            pass
+
+
+def hide_viewport_animated(obj):
+    """True if `obj`'s hide_viewport is keyed in its active action -- a nif visibility
+    controller, imported -- rather than set by the user."""
+    ad = obj.animation_data
+    if not ad or not ad.action:
+        return False
+    act = ad.action
+    try:
+        bag = act.layers[0].strips[0].channelbag(ad.action_slot) if ad.action_slot else None
+        curves = bag.fcurves if bag else []
+    except (IndexError, AttributeError):
+        curves = getattr(act, 'fcurves', [])
+    return any(fc.data_path == 'hide_viewport' for fc in curves)
+
+
+def export_visible(obj):
+    """Whether export treats `obj` as shown. Hidden any way Blender hides it counts as hidden,
+    except visibility its own animation sets: a light's glow node is keyed off in the light's
+    'off' sequence, and is still part of the nif. The eye icon still hides such an object."""
+    if obj.visible_get():
+        return True
+    if hide_viewport_animated(obj) and not obj.hide_get():
+        vl = bpy.context.view_layer
+        return obj.name in vl.objects
+    return False
+
+
+def _unselectable_reason(obj):
+    """Why Blender won't select `obj`, in the UI's terms."""
+    vl = bpy.context.view_layer
+    if obj.name not in vl.objects:
+        return "it isn't in the view layer (its collection is excluded)"
+    if obj.hide_viewport:
+        return "it's disabled in viewports"
+    if obj.hide_get():
+        return "it's hidden"
+    if not obj.visible_get():
+        return "its collection is hidden"
+    if obj.hide_select:
+        return "it's marked unselectable"
+    return "unknown reason"
+
+
+def ObjectActive(obj):
+    """Set the given object active"""
+    obj.select_set(True)
+    bpy.context.view_layer.objects.active = obj
+
+
+def MatrixLocRotScale(loc, rot, scale=None):
+    """Same as Matrix.LocRotScale, For backwards compatibility."""
+    if scale == None: scale = Vector((1,1,1,))
+    return Matrix.LocRotScale(loc, rot, scale)
+
+
+def transform_to_matrix(xf: TransformBuf) -> Matrix:
+    """ Extends TransformBuf to get/give contents as a Blender Matrix """
+    return MatrixLocRotScale(xf.translation[:], 
+                             Matrix([xf.rotation[0][:],
+                                     xf.rotation[1][:], 
+                                     xf.rotation[2][:] ]), 
+                             [xf.scale]*3)
+
+
+def transform_from_matrix(buf: TransformBuf, m: Matrix):
+    t, q, s, = m.decompose()
+    buf.translation = t[:]
+    r = q.to_matrix()
+    buf.rotation = MATRIX3(r[0][:], r[1][:], r[2][:])
+    buf.scale = max(s[:])
+
+
+def matrices_differ(a: Matrix, b: Matrix, tol=0.0001) -> bool:
+    """Return True if a and b differ in any element by more than tol."""
+    for i in range(4):
+        for j in range(4):
+            if abs(a[i][j] - b[i][j]) > tol:
+                return True
+    return False
+
+
+def make_transformbuf(m: Matrix) -> TransformBuf:
+    """ Return a new TransformBuf filled with the data in the matrix """
+    buf = TransformBuf()
+    transform_from_matrix(buf, m)
+    return buf
+
+
+def key_rotation(ti:NiTransformData, frame):
+    """
+    Return the rotation element at the given frame as a quaternion.
+    """
+    if ti.properties.rotationType == NiKeyType.XYZ_ROTATION_KEY:
+        f0 = [ti.xrotations[frame].value, ti.yrotations[frame].value, ti.zrotations[frame].value]
+        td_rot_euler = Euler(f0, 'XYZ')
+        td_rot_quat = td_rot_euler.to_quaternion()
+    elif ti.properties.rotationType == NiKeyType.LINEAR_KEY:
+        td_rot_quat = Quaternion(ti.qrotations[frame].value)
+    return td_rot_quat
+
+
+def append_if_new(theList, theVector, errorfactor):
+    """ Append vector to list if not already present (to within errorfactor) """
+    for a in theList:
+        if VNearEqual(a, theVector, epsilon=errorfactor):
+            return
+    theList.append(theVector)
+
+
+def orthogonal_faces(m):
+    """
+    Return 3 orthogonal faces of mesh m.
+    Returns: (faces, opposites)
+    Opposites corrospond 1:1 with faces.
+    """
+    faces = [m.polygons[0]] # Faces, all orthogonal to each other
+    opposites = [None] # Opposing faces, 1:1
+
+    for p in m.polygons:
+        pn = p.normal
+        if p not in faces and p not in opposites:
+            # Only keep p if it's orthogonal to faces we have OR parallel to them.
+            is_orth = True
+            for i, f in enumerate(faces):
+                dp = abs(f.normal.dot(pn))
+                if NearEqual(dp, 1.0): 
+                    # Capture opposite (parallel) faces as we go
+                    opposites[i] = p
+                    is_orth = False
+                elif not NearEqual(dp, 0):
+                    is_orth = False
+                if not is_orth: break
+
+            if is_orth:
+                faces.append(p)
+                opposites.append(None)
+
+    return faces, opposites
+
+
+def find_box_info(box):
+    """
+    Given a cube (cuboid, really), return the dimensions and transform. Cube must not be
+    triangularized.
+    Returns:
+    center = centerpoint of box (may not match the object origin) in wolrd coordinates
+    dimensions = (width, height, depth) of cube in world scale
+    rotation = rotation necessary to align dimensions with box's local frame of reference
+    """
+    faces, opposites = orthogonal_faces(box.data)
+
+    ctr = []
+    dimv = Vector([
+        (f2.center-f1.center).length for f1, f2 in zip(faces, opposites)
+    ])
+    
+    # In an unrotated cube, the first face points along -X.
+    xrot = Vector((-1, 0, 0,)).rotation_difference(faces[0].normal)
+    # Second face points to +Y, so rotate around X to fix it.
+    yn = faces[1].normal.copy()
+    yn.rotate(xrot.inverted())
+    yrot = Vector((0, 1, 0, )).rotation_difference(yn)
+    # Need to return the rotation from neutral, so add the box's local rotation.
+    rot = (xrot @ yrot)
+
+    # Calculate the centerpoint 
+    ctr =  box.matrix_world @ (faces[0].center + (opposites[0].center - faces[0].center)/2)
+
+    return ctr, box.matrix_world.to_scale() * dimv, rot
+
+
+# ------ Bone handling ------
+
+def apply_scale_xf(xf:Matrix, sf:float):
+    """Apply the scale factor sf to the matrix but NOT to the scale component of the matrix.
+    When importing with a scale factor, verts and other elements are scaled already by the scale factor
+    so it doesn't need to be part of the transform as well.
+    """
+    loc, rot, scale = (xf * sf).decompose()
+    return MatrixLocRotScale(loc, rot, xf.to_scale())
+
+
+def apply_scale_transl(xf:Matrix, sf:float) -> Matrix:
+    """Apply the scale factor sf to the translation component of the matrix only."""
+    loc, rot, scale = xf.decompose()
+    return MatrixLocRotScale(loc*sf, rot, scale)
+
+
+def get_pose_blender_xf(node_xf: Matrix, game: str, scale_factor):
+    """Take the given bone transform and add in the transform for a blender bone.
+    Must match get_bone_blender_xf so pose position equals rest position when the
+    underlying NIF transforms are the same."""
+    return Matrix.Scale(scale_factor, 4) @ node_xf @ game_rotations[game_axes[game]][0]
+
+
+def get_bone_global_xf(arma, bone_name, game:str, use_pose, rotations=None) -> Matrix:
+    """ Return the global transform represented by the bone. `rotations` is the bone
+    rotation table to undo (game_rotations_pretty or _none); default, the current one. """
+    # Scale applied at this level on import, but by callor on export. Should be here for
+    # cosistency? 
+    # TODO -- CHECK this fix, apply everyWHERE
+    R = (rotations if rotations is not None else game_rotations)[game_axes[game]][1]
+    if use_pose:
+        bmx = arma.pose.bones[bone_name].matrix @ R
+    else:
+        bmx = arma.data.bones[bone_name].matrix_local @ R
+    return bmx
+
+def get_bone_xform(arma, bone_name, game, preserve_hierarchy, use_pose,
+                   rotations=None) -> Matrix:
+    """Return the local or global transform represented by the bone"""
+    bonexf = get_bone_global_xf(arma, bone_name, game, use_pose, rotations)
+
+    if preserve_hierarchy:
+        bparent = arma.data.bones[bone_name].parent
+        if bparent:
+            # Calculate the relative transform from the parent
+            parent_xf = get_bone_global_xf(arma, bparent.name, game, use_pose, rotations)
+            loc_xf = parent_xf.inverted() @ bonexf
+
+            return loc_xf
+
+    return bonexf
+
+
+def matrix_from_repr(text):
+    """A Matrix from its repr ("Matrix(((1, 0, ...), ...))"), as older PyNifly stored it in
+    the PYN_TRANSFORM property, or None if the text is anything else. Read as numbers only:
+    the text comes from a .blend file, so it is never evaluated."""
+    import ast
+    m = re.fullmatch(r'\s*Matrix\((.*)\)\s*', str(text), re.S)
+    if not m:
+        return None
+    try:
+        rows = ast.literal_eval(m.group(1))
+        return Matrix(rows)
+    except (ValueError, SyntaxError, TypeError):
+        return None
+
+
+def bind_position(shape:NiShape, bone: str) -> Matrix:
+    """Return the bind position for a bone in a shape."""
+    return transform_to_matrix(shape.get_shape_skin_to_bone(bone)).inverted()
+
+
+def pose_transform(shape:NiShape, bone: str):
+    """Return the pose transform for the given bone.
+    
+    This is the transform from pose position to bind position for a bone.
+    It's the same for all bones in a nif, unless the nif has the shape in a posed
+    position--changing bone positions relative to each other.
+    """
+    bonexf = transform_to_matrix(shape.file.nodes[bone].global_transform)
+    sk2b = transform_to_matrix(shape.get_shape_skin_to_bone(bone))
+    return (bonexf @ sk2b).inverted()
+
+def arma_name(n):
+    """Return the name for the armature given the name of the root node."""
+    return n + ":ARMATURE"
+
+
+BONE_LEN = 5
+FACEBONE_LEN = 2
+
+# Game rotations rotate the bones so they look like a skeleton. This is a convenience for
+# the modder but mucks up anything that depends on those rotations: FO4 connection points, 
+# QUADRATIC_KEY animation data, maybe collisions? 
+
+game_rotations_pretty = {
+    'X': (Quaternion(Vector((0,0,1)), radians(-90)).to_matrix().to_4x4(), 
+          Quaternion(Vector((0,0,1)), radians(90)).to_matrix().to_4x4()), 
+    'Z': (Quaternion(Vector((1,0,0)), radians(90)).to_matrix().to_4x4(),
+          Quaternion(Vector((1,0,0)), radians(-90)).to_matrix().to_4x4())} 
+
+# What if we don't add a rotation--just use what the nif has. Not so pretty for the user
+# but arguably more correct?
+game_rotations_none = {'X': (Matrix.Identity(4), Matrix.Identity(4)),
+                       'Z': (Matrix.Identity(4), Matrix.Identity(4))}
+
+game_rotations = game_rotations_pretty
+
+bone_vectors = {'X': Vector((1,0,0)), 'Z': Vector((0,0,1))}
+game_axes = {'FO3': 'X', 'FONV': 'X', 'FO4': 'X', 'FO76': 'X', 'SF': 'X', 'SKYRIM': 'Z', 'SKYRIMSE': 'Z'}
+
+def is_facebone(bname):
+    return bname.startswith("skin_bone_")
+
+
+def get_bone_blender_xf(node_xf: Matrix, game: str, scale_factor):
+    """Take the given bone transform and add in the transform for a blender bone"""
+    return Matrix.Scale(scale_factor, 4) @ node_xf @ game_rotations[game_axes[game]][0]
+    #return apply_scale_transl(node_xf @ game_rotations[game_axes[game]][0], scale_factor)
+
+
+def create_bone(armdata, bone_name, node_xf:Matrix, game:str, scale_factor, roll):
+    """Creates a bone in the armature with the given transform.
+    Must be in edit mode.
+        armdata = data block for armature
+        node_xf = bone transform (4x4 Matrix) - this is bind position
+        game = game we are making the bone for
+        is_fb = is a facebone (we make them shorter)
+        scale_factor = scale factor to apply
+    """
+    bone = armdata.edit_bones.new(bone_name)
+    bone.head = Vector((0,0,0))
+    if is_facebone(bone_name):
+        bone.tail = Vector((FACEBONE_LEN,0,0))
+    else:
+        bone.tail = Vector((BONE_LEN,0,0))
+
+    # Direction of tail doesn't matter. It will get set by the bone_blender transform.
+    bone.matrix = get_bone_blender_xf(node_xf, game, scale_factor)
+    bone.roll += roll
+
+    return bone
+
+
+def best_game_fit(bonelist):
+    """ Find the game that best matches the skeleton """
+    boneset = set([b.name for b in bonelist])
+    maxmatch = 0
+    matchgame = ""
+    for g, s in gameSkeletons.items():
+        n = s.matches(boneset)
+        if n > maxmatch:
+            maxmatch = n
+            matchgame = g
+    n = fo4FaceDict.matches(boneset)
+    if n > maxmatch:
+        matchgame = "FO4"
+    return matchgame
+
+
+def pack_xf_to_buf(xf, scale_factor: float):
+    """Pack a transform to a TransformBuf, applying a scale fator to translation"""
+    xf_loc, xf_rot, xf_scale = xf.decompose()
+    tb = TransformBuf()
+    tb.store(xf_loc/scale_factor, xf_rot.to_matrix(), xf_scale)
+    return tb
+
+
+# Per-game prefix identifying a face-bone. FO4/FO76 rename face bones to 'skin_bone_*';
+# Starfield keeps them as 'faceBone_*' (see the vanilla malehead_facebones.nif rig).
+FACEBONE_PREFIXES = ('skin_bone_', 'faceBone_')
+
+
+def is_facebones(bone_names):
+    """Determine whether the list of bone names indicates a facebones skeleton"""
+    #return (fo4FaceDict.matches(set(list(arma.data.bones.keys()))) > 20)
+    return len([x for x in bone_names
+                if x.startswith(FACEBONE_PREFIXES)]) > 5
+
+
+def is_facebones_armature(arma):
+    """Whether `arma` is a facebones armature. Its 'pyn_facebones' flag decides when it has been
+    set (import sets it on a _facebones nif's armature; the user can set it either way);
+    unset, the bone names decide."""
+    if arma.is_property_set('pyn_facebones'):
+        return arma.pyn_facebones
+    return is_facebones(arma.data.bones.keys())
+
+
+def facebones_explicit(arma):
+    """True if `arma` was explicitly marked as the facebones armature, not just named like one."""
+    return arma.is_property_set('pyn_facebones') and arma.pyn_facebones
+
+
+def find_armatures(obj):
+    """Find armatures associated with obj. 
+    Returns (regular armature, facebones armature)
+    Only returns the first regular amature it finds--there might be more than one.
+    Looks at armature modfiers and also at the parent.
+    """
+    arma = None
+    fb_arma = None
+    for skel in [m.object for m in obj.modifiers if m.type == "ARMATURE"]:
+        if skel:
+            if is_facebones_armature(skel):
+                if fb_arma is None or facebones_explicit(skel):
+                    fb_arma = skel
+            else:
+                if not arma:
+                    arma = skel
+
+    if obj.parent and obj.parent.type == "ARMATURE":
+        if is_facebones_armature(obj.parent):
+            if fb_arma == None:
+                fb_arma = obj.parent
+        else:
+            if arma == None:
+                arma = obj.parent
+
+    return arma, fb_arma
+
+
+def get_export_objects(ctxt:bpy.types.Context) -> list:
+    """Collect list of objects to export from the given context. 
+    
+    * Any selected object is exported
+    * Any armatures referenced in an armature modifier of a selected object is
+        exported;
+    * If an armature is selected all its children are exported.
+
+    We don't add the active object because it's too confusing to have it be
+    exported when it's not selected. But if it is selected, it goes first.
+    """
+
+    # Doing this at the ImportNif level so why do it here? 
+    return ctxt.selected_objects
+
+
+class Warns:
+    """warn() for the import and export handlers. Every warning goes to the pynifly log,
+    where the operator's LogHandler counts it for the end-of-run report."""
+    def warn(self, msg):
+        logging.getLogger("pynifly").warning(msg)
+
+
+class LogHandler(logging.Handler):
+    def __init__(self):
+        super().__init__()
+        self.max_error = 0
+        self.log = None
+
+
+    def __del__(self):
+        if self.log:
+            self.log.removeHandler(self)
+
+
+    def emit(self, record):
+        self.max_error = max(self.max_error, record.levelno)
+
+
+    def start(self, bl_info, action, importtype):
+        """
+        Start logging for an operation. Return the log and its handler.
+        """
+        self.log = logging.getLogger("pynifly")
+        self.log.addHandler(self)
+        self.log.info(f"""
+
+
+====================================
+PYNIFLY {action} {importtype} V{bl_info['version'][0]}.{bl_info['version'][1]}.{bl_info['version'][2]}
+
+""")
+
+
+    def finish(self, action, files):
+        if self.max_error >= logging.ERROR:
+            errmsg = "WITH ERRORS"
+        elif self.max_error >= logging.WARNING:
+            errmsg = "WITH WARNINGS"
+        else:
+            errmsg = "SUCCESSFULLY"
+
+        if type(files) == str:
+            fn = os.path.basename(files)
+        else:
+            s = set()
+            for f in files:
+                try:
+                    if type(f) == str:
+                        s.add(os.path.basename(f))
+                    else:
+                        s.add(f.name)
+                except AttributeError:
+                    pass
+            fn = str(s)
+
+        log.info(f"""
+
+PyNifly {action} of {fn} completed {errmsg} 
+====================================
+
+""")
+        
+
+    @classmethod
+    def New(cls, bl_info, action, importtype):
+        lh = LogHandler()
+        lh.start(bl_info, action, importtype)
+        return lh
+
+
+def get_short_path_name(long_name):
+    """
+    Gets the short path name of a given long path. Leave the filename itself untouched
+    unless it has spaces.
+    http://stackoverflow.com/a/23598461/200291
+    """
+    pname = os.path.dirname(long_name)
+    bname = os.path.basename(long_name).replace(' ', '_')
+    output_buf_size = len(long_name)
+    while True:
+        output_buf = ctypes.create_unicode_buffer(output_buf_size)
+        needed = _GetShortPathNameW(pname, output_buf, output_buf_size)
+        if output_buf_size >= needed:
+            break
+        else:
+            output_buf_size = needed
+    return os.path.join(output_buf.value, bname)
+
+
+CAMERA_NEUTRAL = MatrixLocRotScale((0, 100, 0), Euler((-pi/2,pi,0), 'XYZ'), (1,1,1))
+
+def cam_to_inv(mx, focal_len):
+    """Given a camera object world matrix, returns an inventory marker 3-tuple:
+        [x-rot, y-rot, z-rot], zoom
+    """
+    res = mx @ CAMERA_NEUTRAL 
+    eu = res.to_euler()
+    eu_out = [round((v * 1000)) % round(2000*pi) for v in eu[0:3]]
+    f = ((focal_len-38)/231.79487)+1.4
+    return eu_out, f
+
+def inv_to_cam(im_rot, zoom):
+    """Given an inventory marker rotation triple and zoom factor, return
+    a Blender world matrix and focal length appropriate for a camera object.
+    """
+    focal_len = 231.79487 * (zoom-1.4) + 38 
+    cammx = MatrixLocRotScale(
+        (0,0,0),
+        Euler([v/1000 for v in im_rot], 'XYZ'),
+        (1,1,1) )
+    return cammx.inverted() @ CAMERA_NEUTRAL, focal_len
+
+
+def highlight_objects(objlist, context, is_callback=False):
+    """
+    Highlight the given objects in the viewports. Select them, make sure
+    they are visible in the 3D view, make sure they are visible in the outliner.
+    """
+    ObjectSelect(objlist, active=True)
+
+    context.view_layer.update()
+    for a in context.screen.areas: 
+        if a.type in ['OUTLINER', 'VIEW_3D']:
+            for r in a.regions:
+                if r.type == 'WINDOW':
+                    try:
+                        with context.temp_override(area=a, region=r):
+                            try:
+                                if a.type == 'OUTLINER':
+                                    # On Blender 4, outliner.show_active doesn't work from the
+                                    # import call. Let Blender set state and then repeat the
+                                    # call.
+                                    bpy.ops.outliner.show_active()
+                                    if not is_callback:
+                                        bpy.app.timers.register(highlight_selected, first_interval=0.5)
+                                else:
+                                    bpy.ops.view3d.view_selected()
+                            except (RuntimeError, TypeError):
+                                pass
+                    except (RuntimeError, TypeError):
+                        pass
+
+
+def highlight_selected():
+    highlight_objects([x for x in bpy.context.selected_objects if x.type=="MESH"], bpy.context, is_callback=True)
+
+
+def color_mapping(colormap):
+    """
+    Determine what type of mapping scheme a color attribute uses, in a
+    blender-version-independent way.
+    """
+    try:
+        mapping_scheme = colormap.domain
+    except AttributeError:
+        # Older
+        mapping_scheme = 'CORNER'
+    return mapping_scheme
+    
+def find_node(socket, nodetype, nodelist=None):
+    """
+    Find all shader nodes of the given type that feed the given socket.
+    Found nodes are appended to the list passed in and it is returned.
+    """
+    if nodelist is None:
+        nodes = []
+    else:
+        nodes = nodelist
+
+    if not socket.is_linked:
+        return nodes
+    
+    n = socket.links[0].from_node
+    if n.bl_idname == nodetype:
+        # This is what we're looking for. Don't look for any more behind this node.
+        if n not in nodes:
+            nodes.append(n)
+        return nodes
+    
+    elif n.bl_idname == "ShaderNodeGroup":
+        # Dive into the group and see if it's in there.
+        gnodes = n.node_tree.nodes
+        goutputs = [x for x in n.node_tree.nodes if x.bl_idname == 'NodeGroupOutput']
+        if goutputs:
+            find_node(goutputs[0].inputs[0], nodetype, nodelist=nodes)
+
+    # Check the inputs for more results.
+    for ns in n.inputs:
+        find_node(ns, nodetype, nodelist=nodes) 
+    
+    return nodes
+
+
+def link_to_collection(coll, obj):
+    if obj.users_collection:
+        c = obj.users_collection[0]
+        c.objects.unlink(obj)
+    coll.objects.link(obj)
+
+
+def mesh_create_uv(the_mesh, uv_points):
+    """ Create UV in Blender to match UVpoints from Nif
+        uv_points = [(u, v)...] indexed by vertex index
+        """
+    flat_uv = [0.0] * (len(the_mesh.loops) * 2)
+    for lp_idx, lp in enumerate(the_mesh.loops):
+        vert_targeted = lp.vertex_index
+        flat_uv[lp_idx * 2] = uv_points[vert_targeted][0]
+        flat_uv[lp_idx * 2 + 1] = 1 - uv_points[vert_targeted][1]
+    new_uvlayer = the_mesh.uv_layers.new(do_init=False)
+    new_uvlayer.data.foreach_set("uv", flat_uv)
+
+
+def get_setting_from(name, objlist, default):
+    """
+    Get a setting from the first object in the list that has it, or return the default if
+    none have it.
+    """
+    for obj in objlist:
+        if obj:
+            if name in obj:
+                return obj[name]
+    return default
+
+
+def action_fcurves(action):
+    """Generator to yield all fcurves in an action."""
+    for lay in action.layers:
+        for strip in lay.strips:
+            for cb in strip.channelbags:
+                for fc in cb.fcurves:
+                    yield fc
+
+
+# Standard transformations to display things correctly in Blender
+
+blender_import_xf = MatrixLocRotScale(Vector((0,0,0)),
+                                      Quaternion(Vector((0,0,1)), pi),
+                                      (0.1, 0.1, 0.1))
+blender_export_xf = blender_import_xf.inverted()
+
+fo4_bodypart_xf = MatrixLocRotScale(Vector((0, -0.9342, 120.841,)),
+                                    Quaternion(),
+                                    (1, 1, 1,))
+
+
+def TEST_CAM():
+    print('TEST_CAM')
+    # Camera at [0, 100, 0] pointed back at origin. This is the default position. 
+    # Camera is behind Suzanne. 
+    mx = Matrix((
+            (-1.0000,  0.0000, 0.0000,   0.0000),
+            ( 0.0000, -0.0000, 1.0000, 100.0000),
+            ( 0.0000,  1.0000, 0.0000,   0.0000),
+            ( 0.0000,  0.0000, 0.0000,   1.0000) ))
+    inv, z = cam_to_inv(mx, 38) 
+    assert inv == [0, 0, 0], f"Cam at default position: {inv}"
+
+    # Camera at [0, -100, 0], pointed at origin. This puts the cam on the other side.
+    # Camera pointed at Suzanne's face.
+    mx = Matrix((
+            ( 1.0000, -0.0000,  0.0000,  0),
+            (-0.0000, -0.0000, -1.0000, -100),
+            ( 0.0000,  1.0000, -0.0000,  0),
+            ( 0.0000,  0.0000,  0.0000,  1.0000)))
+    inv, z = cam_to_inv(mx, 38)
+    assert VNearEqual(inv, [0, 0, 3142], epsilon=2), f"Cam on opposite side of model: {inv}"
+
+    # Camera on negative X axis, pointed at origin. Shows Suzanne looking to the right.
+    mx = Matrix((
+            ( 0.0000, 0.0000, -1.0000, -100.0000),
+            (-1.0000, 0.0000, -0.0000,   -0.0000),
+            ( 0.0000, 1.0000,  0.0000,    0.0000),
+            ( 0.0000, 0.0000,  0.0000,    1.0000)))
+    inv, z = cam_to_inv(mx, 38)
+    assert VNearEqual(inv, [0, 0, 1570], epsilon=2), f"Cam shows right profile: {inv}"
+
+
+def alt_texture_paths(game):
+    """Build the alternate-path list used to locate textures and material files.
+
+    Includes Blender's texture directory, the user's per-game texture path prefs,
+    and a registry-derived game data folder as a last resort.
+    """
+    prefs = bpy.context.preferences.addons[base_package].preferences
+    altpaths = []
+
+    if bpy.context.preferences.filepaths.texture_directory:
+        altpaths.append(bpy.context.preferences.filepaths.texture_directory)
+
+    if game_traits(game).skyrim:
+        path_prefs = [prefs.sky_texture_path_1, prefs.sky_texture_path_2,
+                      prefs.sky_texture_path_3, prefs.sky_texture_path_4]
+    elif game == 'SF':
+        path_prefs = [prefs.sf_texture_path_1, prefs.sf_texture_path_2,
+                      prefs.sf_texture_path_3, prefs.sf_texture_path_4]
+    else:
+        path_prefs = [prefs.fo4_texture_path_1, prefs.fo4_texture_path_2,
+                      prefs.fo4_texture_path_3, prefs.fo4_texture_path_4]
+    for path_pref in path_prefs:
+        if path_pref and (cleaned_path := texture_path(path_pref)):
+            altpaths.append(cleaned_path)
+
+    game_data = find_game(game)
+    if game_data:
+        altpaths.append(game_data)
+
+    return altpaths

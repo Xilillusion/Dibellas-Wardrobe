@@ -1,0 +1,3151 @@
+"""
+Export Blender meshes to NIF files.
+"""
+
+import os
+from functools import lru_cache
+from contextlib import suppress
+from mathutils import Matrix, Vector, Euler, Color
+import numpy as np
+import codecs
+import logging
+import json
+from pathlib import Path
+import bpy
+from bpy_extras.io_utils import ExportHelper
+from .. import __package__ as base_package
+from ..tri.trifile import TriFile
+from ..tri.tripfile import TripFile
+from ..pyn.niflytools import (NearEqual, MatNearEqual, mesh_split_by_uv, fo4FaceDict, 
+                              truncate_filename)
+from ..pyn.nifdefs import (BSXFlagsValues, NiAVFlags, VertexFlags, NO_SHADER_REF)
+
+# Flags on a vanilla Starfield BSGeometry with external geometry: 2,490 of 2,548 shapes. The
+# other 58 add SAVE_EXT_GEOM_DATA (526), meaning the geometry is embedded in the nif.
+BSGEOMETRY_FLAGS = (NiAVFlags.SELECTIVE_UPDATE | NiAVFlags.SELECTIVE_UPDATE_TRANSF
+                    | NiAVFlags.SELECTIVE_UPDATE_CONTR)
+from .. import blender_defs as BD
+from ..blender_defs import ObjectSelect, ObjectActive
+from ..gamefinder import wrong_game_folder_warning
+from ..util.settings import (ExportSettings,
+    PYN_BLENDER_XF_PROP,
+    PYN_GAME_PROP, 
+    PYN_PRESERVE_HIERARCHY_PROP,
+    PYN_RENAME_BONES_NIFTOOLS_PROP, 
+    PYN_RENAME_BONES_PROP, 
+    PYN_ROTATE_BONES_PRETTY_PROP,
+    PYN_WRITE_BODYTRI_ED_PROP,
+    PYN_EXPORT_POSE_PROP,
+    PYN_CHARGEN_EXT_PROP,
+    )
+from ..util.reprobj import ReprObject, ReprObjectCollection
+from ..pyn import pynifly
+from .. import bl_info
+from . import shader_io 
+from . import controller 
+from . import collision 
+from . import connectpoint
+from . import cloth_viz
+from ..pyn import sf_cloth
+from ..pyn.triangulate import triangulate
+
+log = logging.getLogger("pynifly")
+
+
+class ShapeTooBigError(Exception):
+    """A shape exceeds the nif format's 16-bit vertex/triangle limits and can't be
+    written correctly. Raised to abort the export with a clear message."""
+    pass
+
+
+def clean_filename(fn):
+    s = fn.strip()
+    if s.endswith(":ROOT"): s = s[0:-5]
+    return "".join(c for c in s if (c.isalnum() or c in "._- "))
+
+def select_all_faces(mesh):
+    """ Make sure all mesh elements are visible and all faces are selected """
+    bpy.ops.object.mode_set(mode = 'OBJECT') # Have to be in object mode
+
+    for v in mesh.vertices:
+        v.hide = False
+    for e in mesh.edges:
+        e.hide = False
+    for p in mesh.polygons:
+        p.hide = False
+        p.select = True
+
+
+def check_partitions(vi1, vi2, vi3, weights):
+    """ Chcek whether the = 3 verts (specified by index) all have the same partitions 
+        weights = [dict[group-name: weight], ...] vertex weights, 1:1 with verts
+       """
+    p1 = set([k for k in weights[vi1].keys() if is_partition(k)])
+    p2 = set([k for k in weights[vi2].keys() if is_partition(k)])
+    p3 = set([k for k in weights[vi3].keys() if is_partition(k)])
+    return len(p1.intersection(p2, p3)) > 0
+
+
+def trim_weights(weights, arma, max_weights=4, bone_names=None):
+    """ Trim to the `max_weights` heaviest weights in the armature (4 for Skyrim/FO4; Starfield
+        allows more per vertex -- see extract_mesh_data).
+        weights = [(group_name: weight), ...]
+        bone_names = the armature's bone names, if the caller has them (saves a lookup per
+        weight) """
+    if arma:
+        bones = bone_names if bone_names is not None else arma.data.bones
+        lst = filter(lambda p: p[0] in bones, weights)
+        notlst = filter(lambda p: p[0] not in bones, weights)
+        sd = sorted(lst, reverse=True, key=lambda item: item[1])[0:max_weights]
+        sd.extend(notlst)
+        return dict(sd)
+    else:
+        return dict(weights)
+
+
+def nif_root_above(obj):
+    """The nif root (pynRoot) `obj` sits under, reached through nodes and armatures only, or None.
+    A mesh in the way stops the walk: a shape parented to another mesh belongs to its own export,
+    not the other mesh's nif (FSFFox_Ruff04 under CanineMaleHead)."""
+    p = obj.parent
+    while p is not None and p.type in ('EMPTY', 'ARMATURE'):
+        if 'pynRoot' in p:
+            return p
+        p = p.parent
+    return None
+
+
+def with_nif_roots(objs):
+    """`objs` with the nif root each sits under (nif_root_above) put first. A selected shape
+    exports its whole root, so the root is what the game, the settings and the file name come
+    from -- found up front, not only once the exporter pulls the root in."""
+    roots = []
+    for o in objs:
+        r = o if 'pynRoot' in o else nif_root_above(o)
+        if r is not None and BD.export_visible(r) and r not in roots:
+            roots.append(r)
+    return roots + [o for o in objs if o not in roots]
+
+
+def mesh_ancestor(obj):
+    """The nearest mesh `obj` is parented under, or None. A nif can't hold a shape under a shape,
+    so export drops it from the chain and places `obj` relative to that mesh's parent."""
+    p = obj.parent
+    while p is not None and p.type != 'MESH':
+        p = p.parent
+    return p
+
+
+def has_uniform_scale(obj):
+    """ Determine whether an object has uniform scale """
+    return NearEqual(obj.scale[0], obj.scale[1]) and NearEqual(obj.scale[1], obj.scale[2])
+
+
+def extract_vert_info(obj, mesh, arma, target_key='', scale_factor=1.0, max_weights=4):
+    """Returns 3 lists of equal length with one entry each for each vertex
+    *   verts = [(x, y, z)... ] - base or as modified by target-key if provided
+    *   weights = [{group-name: weight}... ] - 1:1 with verts list
+    *   dict = {shape-key: [verts...], ...} - verts list for each shape which is valid for export.
+            shape-key is the blender name.
+        """
+    weights = []
+    morphdict = {}
+    msk = mesh.shape_keys
+    error_groups = set()
+
+    sf = Vector((1,1,1))
+    if not has_uniform_scale(obj):
+        # Apply non-uniform scale to verts directly
+        sf = obj.scale
+
+    def coords(data):
+        """An (n, 3) array of a vertex collection's coordinates, read in one call."""
+        a = np.empty(len(data) * 3, dtype=np.float64)
+        data.foreach_get('co', a)
+        return a.reshape(-1, 3)
+
+    scale = np.array(sf[:], dtype=np.float64)
+    if target_key != '' and msk and target_key in msk.key_blocks.keys():
+        base = coords(msk.key_blocks[target_key].data)
+    else:
+        base = coords(mesh.vertices)
+    verts = [tuple(v) for v in (base * scale / scale_factor).tolist()]
+
+    # Group names and bone names looked up once, not once per vertex weight.
+    group_names = [g.name for g in obj.vertex_groups]
+    bone_names = set(arma.data.bones.keys()) if arma else None
+    for v in mesh.vertices:
+        vert_weights = []
+        for vg in v.groups:
+            if vg.group >= len(group_names):
+                if vg.group not in error_groups:
+                    log.error(f"Object {obj.name} vertex #{v.index} (and possibly others) references invalid group #{vg.group}")
+                error_groups.add(vg.group)
+                continue
+            vgn = group_names[vg.group]
+            if vgn.startswith('*'):
+                continue                    # the user's own helper, as with shape keys
+            vert_weights.append([vgn, vg.weight])
+        weights.append(trim_weights(vert_weights, arma, max_weights, bone_names))
+
+    if msk:
+        # We return shape key locations for all interesting shape keys.
+        # target_key specifies the base shape for this export. The other shape keys are
+        # relative to "basis", not target_key. So if target_key is provided, we need to
+        # adjust.
+        if target_key == '': target_key = 0
+
+        cache = {}
+
+        def key_coords(kb):
+            if kb.name not in cache:
+                cache[kb.name] = coords(kb.data)
+            return cache[kb.name]
+        targ = key_coords(msk.key_blocks[target_key])
+        for sk in msk.key_blocks:
+            co = (key_coords(sk) + (targ - key_coords(sk.relative_key))) * scale
+            morphdict[sk.name] = [tuple(v) for v in co.tolist()]
+
+    return verts, weights, morphdict
+
+
+def tag_unweighted(obj, bones):
+    """ Find and return verts that are not weighted to any of the given bones
+        result = (v_index, ...) list of indices into the vertex list
+    """
+    unweighted_verts = []
+    for v in obj.data.vertices:
+        maxweight = 0.0
+        if len(v.groups) > 0:
+            maxweight = max([g.weight for g in v.groups])
+        if maxweight < 0.0001:
+            unweighted_verts.append(v.index)
+    return unweighted_verts
+
+
+def create_group_from_verts(obj, name, verts):
+    """ Create a vertex group from the list of vertex indices.
+    Use the existing group if any """
+    if name in obj.vertex_groups.keys():
+        g = obj.vertex_groups[name]
+    else:
+        g = obj.vertex_groups.new(name=name)
+    g.add(verts, 1.0, 'ADD')
+
+
+def expected_game(nif, bonelist):
+    """ Check whether the nif's game is the best match for the given bonelist """
+    matchgame = BD.best_game_fit(bonelist)
+    return matchgame == "" or matchgame == nif.game or \
+        (BD.game_traits(matchgame).skyrim and BD.game_traits(nif.game).skyrim)
+
+
+@lru_cache(maxsize=None)
+def is_partition(name):
+    """ Check whether <name> is a valid partition or segment name.
+    Cached: vertex group names form a tiny bounded set, but this is called per-loop
+    in the export hot path (millions of calls per shape). lru_cache turns it into
+    one regex match per distinct group name.
+    """
+    if pynifly.SkyPartition.name_match(name) >= 0:
+        return True
+
+    if pynifly.FO4Segment.name_match(name) >= 0:
+        return True
+
+    parent_name, subseg_id, material = pynifly.FO4Subsegment.name_match(name)
+    if parent_name:
+        return True
+
+    return False
+
+
+def partitions_from_vert_groups(obj, game):
+    """ Return dictionary of Partition objects for all vertex groups that match the partition
+        name pattern. These are all partition objects including subsegments.
+    """
+    val = {}
+    # Cut offsets travel on the object as a JSON dict keyed by subseg vg name
+    # (FO4_CUT_OFFSETS, set on import). Decode once; default to empty so older
+    # objects round-trip with no cuts (the supply step in Phase 4 will fill in).
+    cut_offsets_map = {}
+    if BD.game_traits(game).fallout:
+        raw = obj.get('FO4_CUT_OFFSETS')
+        if raw:
+            import json
+            try:
+                cut_offsets_map = json.loads(raw)
+            except (ValueError, TypeError):
+                cut_offsets_map = {}
+    if obj.vertex_groups:
+        vg_sorted = sorted([g.name for g in obj.vertex_groups])
+        for nm in vg_sorted:
+            vg = obj.vertex_groups[nm]
+            skyid = -1
+            if BD.game_traits(game).skyrim:
+                skyid = pynifly.SkyPartition.name_match(vg.name)
+            if skyid >= 0:
+                val[vg.name] = pynifly.SkyPartition(part_id=skyid, flags=0, name=vg.name)
+            elif BD.game_traits(game).fallout:
+                segid = pynifly.FO4Segment.name_match(vg.name)
+                if segid >= 0:
+                    val[vg.name] = pynifly.FO4Segment(part_id=len(val), index=segid, name=vg.name)
+                else:
+                    # Check if this is a subsegment. All segs sort before their subsegs,
+                    # so it will already have been created if it exists separately
+                    parent_name, subseg_id, material = pynifly.FO4Subsegment.name_match(vg.name)
+                    if parent_name:
+                        if parent_name not in val:
+                            # Create parent segments if not there
+                            val[parent_name] = pynifly.FO4Segment(
+                                part_id=len(val),
+                                index=pynifly.FO4Segment.name_match(parent_name),
+                                name=parent_name)
+                        p = val[parent_name]
+                        ss = pynifly.FO4Subsegment(len(val), subseg_id, material, p, name=vg.name)
+                        co = cut_offsets_map.get(vg.name)
+                        if co:
+                            ss.cut_offsets = list(co)
+                        val[vg.name] = ss
+
+    return val
+
+
+def all_vertex_groups(weightdict):
+    """ Return the set of group names that have non-zero weights """
+    val = set()
+    for g, w in weightdict.items():
+        if w > 0.0001:
+            val.add(g)
+    return val
+
+
+def get_lod_groups(obj):
+    """Return a dict mapping vertex index to LOD level (0, 1, or 2) from LOD vertex groups.
+
+    LOD groups are cumulative: LOD0 has coarsest tris, LOD1 has LOD0+LOD1,
+    LOD2 has all. A vertex's exclusive LOD level is the lowest-numbered group
+    it belongs to. Vertices not in LOD0 or LOD1 default to LOD2.
+
+    Returns None if the object has no LOD vertex groups.
+    """
+    # Only need to check LOD0 and LOD1 — LOD2 is everything else
+    lod_vg_indices = {}
+    for level, name in enumerate(BD.LOD_GROUP_NAMES[:2]):
+        if name in obj.vertex_groups:
+            lod_vg_indices[obj.vertex_groups[name].index] = level
+
+    if not lod_vg_indices:
+        return None
+
+    vert_lod = {}
+    for v in obj.data.vertices:
+        best_level = 2  # default: finest LOD
+        for g in v.groups:
+            if g.group in lod_vg_indices and g.weight > 0.5:
+                level = lod_vg_indices[g.group]
+                if level < best_level:
+                    best_level = level
+        vert_lod[v.index] = best_level
+    return vert_lod
+
+
+def get_face_lod(face, loops, vert_lod):
+    """Determine a face's LOD level from its vertices' LOD assignments.
+
+    All verts of a face should be in the same LOD group. If they disagree,
+    use the lowest (coarsest) LOD level present.
+    Returns the LOD level (0, 1, or 2), or 2 if no assignment found.
+    """
+    levels = set()
+    for i in range(face.loop_start, face.loop_start + face.loop_total):
+        vi = loops[i].vertex_index
+        if vi in vert_lod:
+            levels.add(vert_lod[vi])
+    if not levels:
+        return 2  # Default: finest LOD
+    return min(levels)
+
+
+def sort_tris_by_lod(obj, tris, partition_map):
+    """Sort triangles by LOD level and return (sorted_tris, sorted_partition_map, lod_sizes).
+
+    Returns (tris, partition_map, None) unchanged if the object has no LOD groups.
+    """
+    vert_lod = get_lod_groups(obj)
+    if vert_lod is None:
+        return tris, partition_map, None
+
+    # Determine each tri's LOD level from its vertices
+    tri_lods = []
+    for tri in tris:
+        levels = set()
+        for vi in tri:
+            if vi in vert_lod:
+                levels.add(vert_lod[vi])
+        tri_lods.append(min(levels) if levels else 2)
+
+    # Sort tris (and partition_map if present) by LOD level
+    if partition_map:
+        combined = sorted(zip(tri_lods, tris, partition_map), key=lambda x: x[0])
+        tri_lods_sorted, tris_sorted, pmap_sorted = zip(*combined) if combined else ([], [], [])
+        tris_sorted = list(tris_sorted)
+        pmap_sorted = list(pmap_sorted)
+    else:
+        combined = sorted(zip(tri_lods, tris), key=lambda x: x[0])
+        tri_lods_sorted, tris_sorted = zip(*combined) if combined else ([], [])
+        tris_sorted = list(tris_sorted)
+        pmap_sorted = partition_map
+
+    # Compute LOD sizes
+    lod_sizes = [0, 0, 0]
+    for lod in tri_lods_sorted:
+        if lod < 3:
+            lod_sizes[lod] += 1
+
+    return tris_sorted, pmap_sorted, lod_sizes
+
+
+def get_loop_color(mesh, loopindex, cm, am):
+    """ Return the color of the vertex-in-loop at given loop index using
+        cm = color map to use
+        am = alpha map to use """
+    vc = mesh.vertex_colors
+    alpha = 1.0
+    color = (1.0, 1.0, 1.0)
+    if cm:
+        color = cm[loopindex].color
+    if am:
+        acolor = am[loopindex].color
+        alpha = (acolor[0] + acolor[1] + acolor[2])/3
+
+    return (color[0], color[1], color[2], alpha)
+    
+
+def mesh_from_key(editmesh, verts, target_key):
+    faces = []
+    for p in editmesh.polygons:
+        faces.append([editmesh.loops[lpi].vertex_index for lpi in p.loop_indices])
+    newverts = [v.co[:] for v in editmesh.shape_keys.key_blocks[target_key].data]
+    newmesh = bpy.data.meshes.new(editmesh.name)
+    newmesh.from_pydata(newverts, [], faces)
+    return newmesh
+
+
+def get_common_shapes(obj_list) -> set:
+    """Return the shape keys found in any of the given objects """
+    res = None
+    for obj in obj_list:
+        o_shapes = set()
+        if obj.data.shape_keys:
+            o_shapes = set(obj.data.shape_keys.key_blocks.keys())
+        if res:
+            res = res.union(o_shapes)
+        else:
+            res = o_shapes
+    if res:
+        res = list(res)
+    return res
+
+
+# A shape key named just '_' is the file key for the plain nif: it writes <name>.nif, from its
+# own shape, beside the <name>_thin.nif etc. the other '_' keys write. Without it, file keys
+# mean only the keyed files are written.
+PLAIN_FILE_KEY = '_'
+
+
+def file_key_suffix(key):
+    """What a file key adds to the file and .mesh names: the key itself, nothing for '_'."""
+    return '' if not key or key == PLAIN_FILE_KEY else key
+
+
+def get_with_uscore(str_list):
+    if str_list:
+        return list(filter((lambda x: x[0] == '_'), str_list))
+    else:
+        return []
+
+
+class NifExporter:
+    """ Object that handles the export process independent of Blender's export class """
+    def __init__(self, filepath, game, chargen="chargen", scale=1.0):
+        self.filepath = filepath
+        self.game = game
+        self.nif = None
+        self.trip = None
+        self.warnings = set()
+        self.armature = None
+        self.facebones = None
+        # Track whether the chosen armature/facebones came from a mesh's armature
+        # modifier (authoritative) vs from a bare ARMATURE object encountered during
+        # recursion (fallback). Modifier-discovered armatures override fallbacks.
+        self._armature_via_modifier = False
+        self._facebones_via_modifier = False
+        self.settings = ExportSettings()
+        self.active_obj = None
+        self.scale = scale
+        self.root_object = None
+        self.export_xf = Matrix.Identity(4)
+
+        # Objects that are to be written out
+        self.objects = [] # Ordered list of objects to write--first my have root node info
+        self._cutpoint_disks = []  # selected FO4 cutpoint disks seen during the walk
+        self.bg_data = set()
+        self.str_data = set()
+        self.int_data = set()
+        self.ints_data = set()   # NiIntegersExtraData (plural -- an array of uint32)
+        self.bone_trans = set()  # Starfield BoneTranslations Empties (markers are children)
+        self._matid_written = set()   # nif block ids that already got a MaterialID this export
+        self.cloth_data = set()
+        self.decal_data = set()
+        self.grouping_nodes = set()
+        self.switch_nodes = set()  # NiSwitchNode empties, collected during the walk
+        self.bsx_flag = None
+        # FO4 SSF accumulator: shape_name -> JSON-ready entry dict, built up
+        # across shape exports and written to a single SSF file alongside the
+        # NIF after self.nif.save().
+        self._fo4_ssf_entries = {}
+        self.bone_lod = None
+        self.bound = None
+        self.inv_marker = None
+        self.furniture_markers = set()
+        self.connect_points = connectpoint.ConnectPointCollection()
+        self.trippath = ''
+        self.chargen_ext = chargen
+        self.writtenbones = {}
+        self.shape_bones = {}
+        
+        # Shape keys that start with underscore trigger a separate file export
+        # for each shape key
+        self.file_keys = []  
+        self.objs_unweighted = set()
+        self.objs_scale = set()
+        self.objs_mult_part = set()
+        self.objs_no_part = set()
+        self.arma_game = []
+        self.bodytri_written = False
+        self.objs_written = ReprObjectCollection()
+        # Starfield loose .mat files already written by this export. Every nif of a file set
+        # (file keys, _faceBones) shares its materials; each is written once.
+        self.sf_mats_written = set()
+
+        self.message_log = []
+
+    def __str__(self):
+        flags = []
+        if self.settings.rename_bones: flags.append("RENAME_BONES")
+        if self.settings.rename_bones_niftools: flags.append("RENAME_BONES_NIFTOOLS")
+        if self.settings.preserve_hierarchy: flags.append("PRESERVE_HIERARCHY")
+        if self.settings.export_all_bones: flags.append("EXPORT_ALL_BONES")
+        if self.settings.write_bodytri: flags.append("WRITE_BODYTRI")
+        if self.settings.export_pose: flags.append("EXPORT_POSE")
+        if self.settings.export_modifiers: flags.append("EXPORT_MODIFIERS")
+        if self.settings.export_animations: flags.append("EXPORT_ANIMATIONS")
+        if self.settings.export_colors: flags.append("EXPORT_COLORS")
+        return f"""
+        Exporting objects: {[o.name for o in self.objects]}
+            game: {self.game}
+            flags: {self.settings}
+            string data: {self.str_data}
+            BG data: {self.bg_data}
+            cloth data: {self.cloth_data}
+            armature: {self.armature.name if self.armature else 'None'}
+            facebones: {self.facebones.name if self.facebones else 'None'}
+            connect points: {[x.name for x in self.connect_points.parents]}, {[x.names for x in self.connect_points.child]}
+            orientation: {self.export_xf.to_euler()}
+            scale factor: {round(self.export_scale, 4)}
+            shapes: {self.file_keys}
+            to file: {self.filepath}
+        """
+
+    def warn(self, msg, tags=()):
+        """
+        Report a warning-level error message to the log. `tags` are kept in self.warnings,
+        where export_report turns them into the message the user sees at the end.
+        """
+        log.warning(msg)
+        self.warnings.update(tags)
+
+    @property
+    def export_scale(self):
+        """Return the inverse of the scale factor on the export transform. Returning
+        the inverse because all the scale factors are expected to match the import.
+        """
+        return 1/self.export_xf.to_scale()[0]
+    
+    def nif_name(self, blender_name):
+        if self.settings.rename_bones or self.settings.rename_bones_niftools:
+            return self.nif.nif_name(blender_name)
+        else:
+            return blender_name
+
+    # ---- FO4 dismemberment cut offsets + SSF -------------------------------
+
+    def _fo4_ssf_disk_path(self):
+        """Disk path where we'll write the generated SSF: <nifdir>/<nifbase>.ssf."""
+        return os.path.splitext(self.filepath)[0] + ".ssf"
+
+    def _fo4_ssf_ref_for_nif(self):
+        """Path string to embed in the NIF's segment_file field. Like vanilla,
+        the SSF sits next to the NIF with the same basename (see
+        _fo4_ssf_disk_path). When the NIF is under a 'meshes' directory the
+        engine resolves the ref relative to its Data root, so we emit the chunk
+        starting at 'meshes' with .nif swapped for .ssf. Otherwise there's no
+        Data root to be relative to, so we emit the absolute .ssf path.
+        """
+        parts = self.filepath.replace("\\", "/").split("/")
+        for i, seg in enumerate(parts):
+            if seg.lower() == "meshes":
+                rel = "\\".join(parts[i:])
+                return os.path.splitext(rel)[0] + ".ssf"
+        return os.path.splitext(self.filepath)[0] + ".ssf"
+
+    def _fo4_cutpoints_from_disks(self, obj, arma, partitions, shape_name):
+        """Phase 6: when the mesh has a "<obj>_Cutpoints" collection, the disks
+        in it are authoritative — derive cut offsets and the SSF entry directly
+        from them (overriding the round-trip prop and the supply formula). Each
+        disk gives its bone (parent_bone), its dismember material (FO4_CUT_MATERIAL
+        prop, else the FO4_MATERIAL_TO_BONE inverse, else a synthetic hash), and
+        its cut value (distance from the bone head along the limb axis — +Y when
+        rotate-bones-pretty, else +X, matching import).
+
+        Returns the SSF entry dict (possibly empty), or None when there are no
+        cutpoint disks (the caller then falls back to the Phase 4 supply path).
+        """
+        from io_scene_nifly.pyn import dismember as DM
+        from ..pyn.niflytools import blender_basename
+
+        # Disks from the body's name-matched collection (tolerating Blender's
+        # .001/.002 duplicate suffix on either the object or the collection)
+        # plus any selected disks stashed during the object walk.
+        target = f"{blender_basename(obj.name)}_Cutpoints"
+        disks, seen = [], set()
+        for c in bpy.data.collections:
+            if blender_basename(c.name) == target:
+                for o in c.objects:
+                    if 'FO4_CUTPOINT' in o and o.name not in seen:
+                        seen.add(o.name); disks.append(o)
+        for o in self._cutpoint_disks:
+            if o.name not in seen:
+                seen.add(o.name); disks.append(o)
+        if not disks:
+            return None
+
+        pretty = bool(arma.get(PYN_ROTATE_BONES_PRETTY_PROP, False))
+        axis_col = 1 if pretty else 0
+        arma_inv = arma.matrix_world.inverted()
+        arma_bones = arma.data.bones
+        bone_to_mat = {v: k for k, v in DM.FO4_MATERIAL_TO_BONE.items()}
+
+        # A disk applies only to the shape that carries its material as a
+        # subsegment. Selected disks are global, and a body often exports
+        # alongside eyeball/head shapes that share the armature but have no
+        # dismember subsegments, so non-matching disks are silently skipped.
+        shape_materials = {p.material for p in partitions.values()
+                           if type(p).__name__ == "FO4Subsegment"}
+
+        mat_cuts = {}   # material -> [cut floats]
+        mat_bone = {}   # material -> nif bone name (for the SSF)
+        mat_axis = {}   # material -> (origin, axis) in armature-local space
+        for disk in disks:
+            bone = arma_bones.get(disk.parent_bone)
+            if bone is None:
+                continue  # disk's bone isn't in this body's armature
+            nif_bone = self.nif.nif_name(disk.parent_bone)
+            mat_raw = disk.get('FO4_CUT_MATERIAL')
+            material = int(mat_raw, 0) if mat_raw else bone_to_mat.get(nif_bone)
+            if material is None:
+                log.debug(f"{obj.name}: cut disk '{disk.name}' bone '{nif_bone}' "
+                          "has no FO4_CUT_MATERIAL and no known mapping; skipped.")
+                continue
+            if material not in shape_materials:
+                continue  # belongs to a different shape's subsegments
+            origin = bone.head_local.copy()
+            axis = bone.matrix_local.to_3x3().col[axis_col].normalized()
+            pos = (arma_inv @ disk.matrix_world).translation
+            cut = (pos - origin).dot(axis)
+            mat_cuts.setdefault(material, []).append(cut)
+            mat_bone[material] = nif_bone
+            mat_axis[material] = (origin, axis)
+
+        # Assign each material's cuts to its bearer subseg — the same-material
+        # subseg whose vert centroid (along the bone axis) is nearest the cuts'
+        # mean — and record the SSF bone -> bearer ref.
+        m2arma = arma_inv @ obj.matrix_world
+        encoded = {}
+        def centroid_t(ss, origin, axis):
+            vg = obj.vertex_groups.get(ss.name)
+            if vg is None:
+                return float('inf')
+            gi = vg.index
+            acc = None
+            n = 0
+            for v in obj.data.vertices:
+                if any(g.group == gi and g.weight > 0 for g in v.groups):
+                    p = m2arma @ v.co
+                    acc = p if acc is None else acc + p
+                    n += 1
+            if not n:
+                return float('inf')
+            return ((acc / n) - origin).dot(axis)
+
+        for material, cuts in mat_cuts.items():
+            cuts = sorted(cuts)
+            origin, axis = mat_axis[material]
+            cands = [p for p in partitions.values()
+                     if type(p).__name__ == "FO4Subsegment" and p.material == material]
+            if not cands:
+                continue
+
+            mean_cut = sum(cuts) / len(cuts)
+
+            # origin/axis/mean_cut are rebound every iteration, so bind them at lambda
+            # definition time rather than capturing the loop variables.
+            bearer = min(cands,
+                         key=lambda ss, o=origin, a=axis, mc=mean_cut:
+                             abs(centroid_t(ss, o, a) - mc))
+            bearer.cut_offsets = cuts
+            try:
+                sub_idx = bearer.parent.subsegments.index(bearer)
+            except ValueError:
+                sub_idx = 0
+            encoded[mat_bone[material]] = DM.encode_ssf_ref(bearer.parent.index, sub_idx)
+
+        return DM.build_ssf_shape_entry(encoded) if encoded else {}
+
+    def _fo4_supply_and_ssf(self, obj, arma, partitions, shape_name):
+        """For an FO4 shape: fill missing cut offsets on bearer subsegments
+        and return the SSF entry dict (or None if nothing to write).
+        """
+        from io_scene_nifly.pyn import dismember as DM
+
+        # Build the dismember bone line segments from the armature, using
+        # head_local positions (armature LOCAL space, == bind pose). Each
+        # entry is keyed by *nif* bone name (what the materials table uses) but
+        # looked up in the armature by the (possibly renamed) Blender label.
+        bones = {}
+        arma_bones = arma.data.bones
+        for parent, child in DM.FO4_HUMAN_DISMEMBER_CHILDREN.items():
+            pb = arma_bones.get(self.nif.blender_name(parent)) or arma_bones.get(parent)
+            cb = arma_bones.get(self.nif.blender_name(child)) or arma_bones.get(child)
+            if pb is None or cb is None:
+                continue
+            ph = pb.head_local
+            ch = cb.head_local
+            bones[parent] = ((ph.x, ph.y, ph.z), (ch.x, ch.y, ch.z))
+
+        if not bones:
+            return None
+
+        # Collect vert positions per subsegment vertex group, in armature-local
+        # space (matching the bone positions above).
+        m2arma = arma.matrix_world.inverted() @ obj.matrix_world
+        verts_world = [m2arma @ v.co for v in obj.data.vertices]
+        subseg_verts = {}
+        for name, part in partitions.items():
+            if type(part).__name__ != "FO4Subsegment":
+                continue
+            vg = obj.vertex_groups.get(name)
+            if vg is None:
+                continue
+            grp_idx = vg.index
+            vs = []
+            for vi, v in enumerate(obj.data.vertices):
+                for g in v.groups:
+                    if g.group == grp_idx and g.weight > 0:
+                        p = verts_world[vi]
+                        vs.append((p.x, p.y, p.z))
+                        break
+            if vs:
+                subseg_verts[name] = vs
+
+        bone_to_bearer = DM.supply_for_shape(
+            partitions, subseg_verts, bones, DM.FO4_MATERIAL_TO_BONE)
+        if not bone_to_bearer:
+            return None
+
+        encoded = {bn: DM.encode_ssf_ref(seg_i, sub_i)
+                   for bn, (seg_i, sub_i) in bone_to_bearer.items()}
+        return DM.build_ssf_shape_entry(encoded)
+
+    def _fo4_write_ssf(self):
+        """Write accumulated SSF entries to <nifdir>/<nifbase>.ssf as JSON."""
+        if not self._fo4_ssf_entries:
+            return
+        ssf_path = self._fo4_ssf_disk_path()
+        import json
+        with open(ssf_path, "w", encoding="utf-8") as f:
+            json.dump(self._fo4_ssf_entries, f, indent=3)
+        log.info(f"..Wrote FO4 SSF {ssf_path}")
+
+    def unique_name(self, obj):
+        """
+        Return a unique node name for the Blender object. Use the root of the Blender name
+        if possible, because that might match to a name in a trip file. Otherwise use the
+        full Blender name, and if that fails make a unique name.
+        """
+        names = self.nif.getAllShapeNames()
+        simplename = BD.nonunique_name(obj)
+        if simplename not in names: return simplename
+        if obj.name not in names: return obj.name
+        for i in range(0, 100):
+            n = simplename + "-" + f"{i:03}"
+            if n not in names: return n
+        return obj.name
+
+    def export_shape_data(self, robj:ReprObject):
+        """ Export a shape's extra data """
+        from . import pyn_props
+        edlist = []
+        strlist = []
+        decallist = []
+        for ch in robj.blender_obj.children:
+             if ch.name.startswith("NiStringExtraData"):
+                g = pyn_props.get_group(ch, 'pyn_nistrdata')
+                strlist.append( (g.name, g.value) )
+                self.objs_written.add(ReprObject(ch, None)) # [ch.name] = shape
+             if ch.name.startswith("BSBehaviorGraphExtraData"):
+                g = pyn_props.get_group(ch, 'pyn_bsbehavior')
+                edlist.append( (g.name, g.value, g.cbs) )
+                self.objs_written.add(ReprObject(ch, None)) # [ch.name] = shape
+             if ch.name.startswith("BSDecalPlacementVectorExtraData"):
+                import json
+                g = pyn_props.get_group(ch, 'pyn_bsdecal')
+                decallist.append( (g.name, json.loads(g.value)) )
+                self.objs_written.add(ReprObject(ch, None))
+        
+        if len(strlist) > 0:
+            # Create NiStringExtraData objects using new class
+            for name, value in strlist:
+                from ..pyn.pynifly import NiStringExtraData
+                NiStringExtraData.New(robj.nifnode.file, name=name, string_value=value, parent=robj.nifnode)
+        if len(edlist) > 0:
+            # Create BSBehaviorGraphExtraData objects using new class
+            for name, file_path, controls_skeleton in edlist:
+                from ..pyn.pynifly import BSBehaviorGraphExtraData
+                BSBehaviorGraphExtraData.New(robj.nifnode.file, name=name,
+                                            behavior_graph_file=file_path,
+                                            controls_base_skeleton=controls_skeleton,
+                                            parent=robj.nifnode)
+        if len(decallist) > 0:
+            from ..pyn.pynifly import BSDecalPlacementVectorExtraData
+            for name, blocks in decallist:
+                vector_blocks = [[(tuple(v[0]), tuple(v[1])) for v in block]
+                                 for block in blocks]
+                BSDecalPlacementVectorExtraData.New(
+                    robj.nifnode.file, name=name,
+                    vector_blocks=vector_blocks, parent=robj.nifnode)
+
+
+    def add_armature(self, arma, via_modifier=False):
+        """Add an armature to the export.
+
+        via_modifier=True means the armature was discovered via a mesh's armature
+        modifier and is authoritative — it overrides any prior armature added as a
+        fallback (e.g. a bare ARMATURE child of a root EMPTY).
+        """
+        facebones_arma = (BD.game_traits(self.game).facebones_companion
+                          and BD.is_facebones_armature(arma))
+        if facebones_arma:
+            # An armature marked as the facebones armature beats one only named like one: a
+            # crowd head can carry the chargen face rig yet want its own armature for both nifs.
+            if (self.facebones is None
+                    or (BD.facebones_explicit(arma) and not BD.facebones_explicit(self.facebones))
+                    or (via_modifier and not self._facebones_via_modifier
+                        and BD.facebones_explicit(arma) == BD.facebones_explicit(self.facebones))):
+                self.facebones = arma
+                if via_modifier:
+                    self._facebones_via_modifier = True
+        else:
+            if self.armature is None or (via_modifier and not self._armature_via_modifier):
+                self.armature = arma
+                if via_modifier:
+                    self._armature_via_modifier = True
+
+
+    def add_object(self, obj):
+        """
+        Adds the given object to the objects to export. Object may be mesh, armature,
+        or anything else. 
+        
+        * If an armature is selected, all child objects are exported 
+        * If a skinned mesh is selected, all armatures referenced in armature modifiers
+          are considered for export.
+        """
+        if obj in self.objects or obj in self.grouping_nodes: return
+        # A picture of cloth data (cloth_viz), or a collision shape or bone plane the user added
+        # to one: it goes into the cloth, never out as a shape.
+        # So is any mesh the user models under a cloth empty: it's a piece of the cloth.
+        if obj.get('pynClothViz') or obj.get('cloth_shape') or obj.get('cloth_plane_bone'):
+            return
+        if obj.type == 'MESH' and obj.parent is not None \
+                and cloth_viz.is_cloth_empty(obj.parent):
+            return
+        # A BoneTranslations marker is an entry of its block, written with it, never a node.
+        if obj.parent is not None and obj.parent.name.startswith("BoneTranslations:"):
+            return
+
+        if obj.type == 'ARMATURE':
+            self.add_armature(obj)
+            for c in obj.children:
+                self.add_visible(c)
+
+        elif obj.type == 'MESH':
+            if 'FO4_CUTPOINT' in obj:
+                # FO4 dismember cut-offset visualization disk — never a shape, but
+                # stash it so a selected disk drives the export even when it isn't
+                # in the body's name-matched _Cutpoints collection.
+                if obj not in self._cutpoint_disks:
+                    self._cutpoint_disks.append(obj)
+                return
+            if obj.get('pynMultiBoundOBB'):
+                # OBB bounding-box cube for a BSMultiBoundNode — exported as part of
+                # the node (BSMultiBound -> BSMultiBoundOBB blocks), not a mesh shape.
+                return
+            if not obj.name.startswith("BSBound:") \
+                    and obj.get('pynRigidBody') != 'bhkPhysicsSystem' \
+                    and not obj.rigid_body:
+                # Export the mesh, but use its parent and use any armature modifiers
+                self.objects.append(obj)
+                for mod in obj.modifiers:
+                    if mod.type == 'ARMATURE' and mod.object:
+                        # Don't add any of the armature's other children unless they were
+                        # independently selected.
+                        self.add_armature(mod.object, via_modifier=True)
+            elif obj.name.startswith("BSBound:"):
+                self.bound = obj
+
+        elif obj.type == 'CAMERA':
+            self.inv_marker = obj
+
+        elif obj.type == 'EMPTY':
+            if obj.get('pynHkxSyncOffset'):
+                pass  # A paired HKX animation's sync offset: HKX export writes it
+
+            elif obj.get('pynRigidBody') == 'bhkPhysicsSystem':
+                pass  # Multi-shape collision container: exported via COPY_TRANSFORMS on target
+
+            elif obj.name.startswith("BSBehaviorGraphExtraData"):
+                self.bg_data.add(obj)
+
+            elif obj.name.startswith("NiStringExtraData") and obj.parent \
+                    and obj.parent.get('pynRoot', False):
+                self.str_data.add(obj)
+
+            elif cloth_viz.is_cloth_empty(obj):
+                self.cloth_data.add(obj)
+
+            elif obj.name.startswith("BSDecalPlacementVectorExtraData"):
+                self.decal_data.add(obj)
+
+            elif obj.name.startswith("BoneTranslations:"):
+                self.bone_trans.add(obj)
+
+            elif obj.name.startswith("NiIntegersExtraData"):
+                self.ints_data.add(obj)
+
+            elif obj.name.startswith("NiIntegerExtraData"):
+                self.int_data.add(obj)
+
+            elif obj.name.startswith("BSXFlags"):
+                self.bsx_flag = obj
+
+            elif obj.name.startswith("BSBoneLOD"):
+                self.bone_lod = obj
+
+            elif obj.name.startswith("BSFurnitureMarkerNode"):
+                self.furniture_markers.add(obj)
+
+            elif obj.get('pynBlockName') == 'BSGeometry':
+                # A Starfield BSGeometry container Empty is represented by the shape block
+                # itself, not a separate NiNode (see export_shape_parents) -- so don't emit a
+                # node for it (nifly can't add_block a shape), but still export its LOD-child
+                # meshes. Without this, selecting the object hierarchy (not just the leaf mesh)
+                # routes the Empty through export_node and crashes on add_block(type 1).
+                # LOD1 and up are hidden on import but still slots: their LOD0 collects them by
+                # name (sf_geometry.lod_group) when it's written, so they needn't be added here.
+                for c in obj.children:
+                    self.add_visible(c)
+
+            elif (connectpoint.is_child(obj)) or (not connectpoint.is_connectpoint(obj)):
+                self.grouping_nodes.add(obj)
+                if obj.get('pynBlockName') == 'NiSwitchNode':
+                    self.switch_nodes.add(obj)
+                for c in obj.children:
+                    self.add_visible(c)
+
+        if connectpoint.is_connectpoint(obj):
+            self.connect_points.add(obj)
+
+
+    def add_visible(self, obj):
+        """Add a child object found under an exported one, unless it's hidden. Hidden objects
+        aren't exported -- an old copy kept under the same parent, say -- and Blender can't put a
+        hidden mesh in edit mode, which export needs. A Starfield LOD slot hidden on import is
+        skipped quietly: it exports with its LOD0. Hidden is any way Blender hides it: the eye,
+        disabled in viewports, a hidden collection, a collection excluded from the view layer --
+        but not visibility the object's own animation sets (BD.export_visible)."""
+        if BD.export_visible(obj):
+            self.add_object(obj)
+            return
+        from .sf_geometry import lod_slots
+        slots = lod_slots(obj.name)
+        skipped = self.__dict__.setdefault('_hidden_skipped', set())
+        if not (slots and slots[0] > 0) and obj.name not in skipped:
+            skipped.add(obj.name)
+            log.info(f"Not exporting hidden object {obj.name}")
+
+
+    def set_objects(self, objects:list):
+        """ 
+        Set the objects to export from the given list of objects 
+        """
+        for x in objects:
+            if BD.export_visible(x):
+                self.add_object(x)
+                root = x if "pynRoot" in x else nif_root_above(x)
+                if root is not None and BD.export_visible(root):
+                    self.add_object(root)
+                    self.root_object = root
+        self.connect_points.add_all(objects)
+        self.file_keys = get_with_uscore(get_common_shapes(self.objects))
+
+
+    # --------- DO THE EXPORT ---------
+
+    def export_sf_morphs(self, robj:ReprObject, verts, morphdict):
+        """Starfield: write the shape's chargen + performance morph.dat files (split by expression
+        classification) alongside the exported nif, re-homed under the nif's meshes root. Uses the
+        export's SPLIT morphdict (absolute positions per render vertex, 1:1 with the exported .mesh)
+        so the morph matches the .mesh's post-split vertex set -- not the raw Blender vertices, which
+        would mismatch the .mesh wherever seams split verts and fail the game's ApplyChargenMorph."""
+        obj = robj.blender_obj
+        if obj.type != 'MESH' or obj.data.shape_keys is None:
+            return
+        if self.file_suffix == '_faceBones':
+            # Morphs belong to the head part, not to either nif of the pair; the base nif's pass
+            # already wrote them to the same paths.
+            return
+        from ..sfmorph.export_sfmorph import write_sf_morphs
+        wrote = write_sf_morphs(obj, self.nif.filepath, morphdict=morphdict,
+                                used_paths=self._sf_morph_paths)
+        for w in wrote:
+            log.info(f"Wrote Starfield morph: {w}")
+
+    def export_tris(self, robj:ReprObject, verts, tris, uvs, morphdict):
+        """ Export a tri file to go along with the given nif file, if there are shape keys
+            and it's not a faceBones nif.
+            dict = {shape-key: [verts...], ...} - verts list for each shape which is valid for export.
+        """
+        result = {'FINISHED'}
+
+        obj = robj.blender_obj
+        if obj.data.shape_keys is None or len(morphdict) == 0:
+            return result
+
+        fpath = os.path.split(self.nif.filepath)
+        fname = os.path.splitext(fpath[1])
+
+        if fname[0].endswith('_faceBones'):
+            return result
+
+        fname_tri = os.path.join(fpath[0], fname[0] + ".tri")
+        fname_chargen = os.path.join(fpath[0], fname[0] + self.chargen_ext + ".tri")
+        if self.chargen_ext != ExportSettings().chargen_extension: 
+            obj['PYN_CHARGEN_EXT'] = self.chargen_ext 
+
+        # Don't export anything that starts with an underscore or asterisk
+        objkeys = obj.data.shape_keys.key_blocks.keys()
+        export_keys = set(filter((lambda n: n[0] not in ('_', '*') and n != 'Basis'), objkeys))
+        expression_morphs = self.nif.dict.expression_filter(export_keys)
+        trip_morphs = set(filter((lambda n: n[0] == '>'), objkeys))
+        # Leftovers are chargen candidates
+        leftover_morphs = export_keys.difference(expression_morphs).difference(trip_morphs)
+        chargen_morphs = self.nif.dict.chargen_filter(leftover_morphs)
+
+        if len(expression_morphs) > 0 and len(trip_morphs) > 0:
+            log.warning(f"Found both expression morphs and BS tri morphs in shape {obj.name}. May be an error.")
+            result = {'WARNING'}
+
+        if len(expression_morphs) > 0:
+            tri = TriFile()
+            tri.vertices = verts
+            tri.faces = tris
+            tri.uv_pos = uvs
+            tri.face_uvs = tris # (because 1:1 with verts)
+            for m in expression_morphs:
+                if m in self.nif.dict.morph_dic_game:
+                    triname = self.nif.dict.morph_dic_game[m]
+                else:
+                    triname = m
+                if m in morphdict:
+                    tri.morphs[triname] = morphdict[m]
+    
+            log.info(f"Generating tri file '{fname_tri}'")
+            tri.write(fname_tri) # Only expression morphs to write at this point
+
+        if len(chargen_morphs) > 0:
+            tri = TriFile()
+            tri.vertices = verts
+            tri.faces = tris
+            tri.uv_pos = uvs
+            tri.face_uvs = tris # (because 1:1 with verts)
+            for m in chargen_morphs:
+                if m in morphdict:
+                    tri.morphs[m] = morphdict[m]
+    
+            log.info(f"Generating tri file '{fname_chargen}'")
+            tri.write(fname_chargen, chargen_morphs)
+
+        if len(trip_morphs) > 0:
+            expdict = {}
+            for k, v in morphdict.items():
+                if k[0] == '>':
+                    n = k[1:]
+                    expdict[n] = v
+            self.trip.set_morphs(robj.nifnode.name, expdict, verts)
+            if self.osd is not None:
+                self.osd.set_morphs(robj.nifnode.name, expdict, verts)
+
+        return result
+
+
+    def export_string_data(self):
+        """Export strings previously cached in self.str_data."""
+        from ..pyn.pynifly import NiStringExtraData
+        from . import pyn_props
+        for st in self.str_data:
+            g = pyn_props.get_group(st, 'pyn_nistrdata')
+            sd = NiStringExtraData.New(self.nif,
+                name=g.name,
+                string_value=g.value,
+                parent=self.nif.root)
+            self.objs_written.add_pair(st, sd)
+            self.bodytri_written |= (g.name == 'BODYTRI')
+
+        # if len(sdlist) > 0:
+        #     # Create NiStringExtraData objects using new class
+        #     for name, value in sdlist:
+        #         from ..pyn.pynifly import NiStringExtraData
+        #         NiStringExtraData.New(self.nif, name=name, string_value=value, parent=self.nif.root)
+        
+
+    def export_behavior_graph_data(self):
+        """Export behavior graph data previously cached in self.bg_data."""
+        from ..pyn.pynifly import BSBehaviorGraphExtraData
+        from . import pyn_props
+        for bg in self.bg_data:
+            g = pyn_props.get_group(bg, 'pyn_bsbehavior')
+            bged = BSBehaviorGraphExtraData.New(self.nif,
+                name=g.name,
+                behavior_graph_file=g.value,
+                controls_base_skeleton=g.cbs,
+                parent=self.nif.root)
+            self.objs_written.add(ReprObject(bg, bged)) # [bg.name] = self.nif
+
+
+    def export_cloth_data(self):
+        """Export cloth data previously cached in self.cloth_data."""
+        cdlist = []
+        for cd in self.cloth_data:
+            value = cd.get('BSClothExtraData_Value')
+            blob = codecs.decode(value, "base64") if value else None
+            if self.game == 'SF':
+                # The cloth is built from its pictures; with no blob, from scratch.
+                blob = cloth_viz.apply_edits(cd, blob, self.scale, self.armature,
+                                             self.nif.reference_skel, self.nif_name)
+            if blob is None:
+                if self.game != 'SF':
+                    log.warning(f"{cd.name} has no cloth data; only Starfield cloth can be "
+                                f"made from scratch")
+                continue
+            cdlist.append((cd.get('BSClothExtraData_Name', sf_cloth.NEW_CLOTH_NAME), blob))
+            self.objs_written.add(ReprObject(cd, self.nif.rootNode)) # [cd.name] = self.nif
+
+        if len(cdlist) > 0:
+            self.nif.cloth_data = cdlist
+
+
+    def export_decal_data(self):
+        """Export decal placement data for root-level decal empties."""
+        import json
+        from . import pyn_props
+        for obj in self.decal_data:
+            if obj in [ro.blender_obj for ro in self.objs_written]:
+                continue  # already exported as shape child
+            g = pyn_props.get_group(obj, 'pyn_bsdecal')
+            name = g.name
+            blocks = json.loads(g.value)
+            vector_blocks = [[(tuple(v[0]), tuple(v[1])) for v in block]
+                             for block in blocks]
+            pynifly.BSDecalPlacementVectorExtraData.New(
+                self.nif, name=name,
+                vector_blocks=vector_blocks, parent=self.nif.rootNode)
+            self.objs_written.add(ReprObject(obj, self.nif.rootNode))
+
+
+    def export_bsx_flag(self):
+        """Write the BSX flags onto the root, updating the block if one is already there.
+
+        Creating a Starfield shape makes the DLL give the root a default BSXFlags if it hasn't got
+        one (a multi-part body skins several shapes but needs a single BSX). Adding ours on top of
+        that left every imported-and-re-exported SF nif with TWO BSXFlags blocks. Matched on the
+        block type rather than the name, because a block added this session reports an empty name
+        until the file is written and read back."""
+        if not self.bsx_flag:
+            return
+        from . import pyn_props
+        g = pyn_props.get_group(self.bsx_flag, 'pyn_bsxflags')
+        flags = BSXFlagsValues.parse(g.value)
+        existing = next((ed for ed in self.nif.rootNode.extra_data()
+                         if ed.blockname == 'BSXFlags'), None)
+        if existing is not None:
+            existing.flags = flags
+            bsx = existing
+        else:
+            bsx = pynifly.BSXFlags.New(self.nif, name=g.name, flags=flags,
+                                       parent=self.nif.rootNode)
+        self.objs_written.add(ReprObject(self.bsx_flag, bsx))
+
+
+    def export_integer_data(self):
+        """NiIntegerExtraData attaches to whatever block its Empty is parented to, not always
+        the root: Starfield's MaterialID hangs off the BSGeometry shape itself, and the engine
+        looks for it there. Runs after the shapes are written so objs_written can resolve them.
+
+        The value is a decimal string (see pyn_props) because the nif field is a uint32 and
+        Blender's IntProperty can't hold the top half of that range."""
+        from . import pyn_props
+        for intdat in self.int_data:
+            g = pyn_props.get_group(intdat, 'pyn_niintdata')
+            try:
+                value = int(g.value or 0) & 0xFFFFFFFF
+            except ValueError:
+                log.warning(f"NiIntegerExtraData '{g.name}' on {intdat.name} has a "
+                            f"non-numeric value '{g.value}'; writing 0")
+                value = 0
+            parent = self.nif.rootNode
+            if intdat.parent:
+                parent_repr = self.objs_written.find_blend(intdat.parent)
+                if parent_repr and parent_repr.nifnode:
+                    parent = parent_repr.nifnode
+            ed = pynifly.NiIntegerExtraData.New(self.nif,
+                name=g.name,
+                integer_value=value,
+                parent=parent)
+            self.objs_written.add_pair(intdat, ed)
+            # Remember what we put where: export_sf_material_ids can't tell by reading names
+            # back, because a block added this session reports an empty one.
+            if g.name == 'MaterialID' and parent is not None:
+                self._matid_written.add(parent.id)
+
+
+    def export_bone_translations(self):
+        """Starfield BoneTranslations, from its Empty: one entry per marker child, the marker's
+        position relative to the export armature's C_Head, in metres in C_Head's frame. Written
+        onto the root only when Blender has the Empty -- nothing is generated. Every vanilla crowd
+        head carries 'BoneTrn' for L_Eye and R_Eye; the facebones companion gets it too."""
+        if not self.bone_trans:
+            return
+        from . import pyn_props
+        from ..pyn.nifconstants import HAVOC_SCALE_FACTOR
+        arma = self.armature or self.facebones
+        head = next((b for b in arma.data.bones if self.nif_name(b.name) == 'C_Head'), None) \
+            if arma else None
+        for ed in self.bone_trans:
+            name = pyn_props.get_group(ed, 'pyn_bonetrans').name \
+                or BD.nonunique_name(ed.name).split(':', 1)[1]
+            if head is None:
+                log.warning(f"{ed.name}: its positions are relative to C_Head, and the export "
+                            f"armature has no C_Head bone; not writing BoneTranslations '{name}'")
+                continue
+            head_world = arma.matrix_world @ BD.get_bone_xform(
+                arma, head.name, self.game, False, self.settings.export_pose)
+            to_head = head_world.inverted()
+            entries = []
+            for m in sorted(ed.children, key=lambda c: c.name):
+                bone = BD.nonunique_name(m.name).split(':', 1)[-1]
+                local = to_head @ m.matrix_world.translation
+                entries.append((bone, tuple(c / (HAVOC_SCALE_FACTOR * self.scale) for c in local)))
+            pynifly.BoneTranslations.New(self.nif, name=name, translations=entries,
+                                         parent=self.nif.rootNode)
+
+
+    def export_integers_data(self):
+        """NiIntegersExtraData -- PLURAL, an ARRAY of uint32, attached like the singular block to
+        whatever its Empty is parented to. Starfield's 'AnimationFlagExtra' rides on the BSGeometry
+        shape; 273 of the 373 vanilla shape nifs surveyed carry one. Authored data, not derived
+        like MaterialID, so it is written back verbatim."""
+        from . import pyn_props
+        for intdat in self.ints_data:
+            g = pyn_props.get_group(intdat, 'pyn_niintsdata')
+            values = []
+            for piece in (g.value or '').split(','):
+                piece = piece.strip()
+                if not piece:
+                    continue
+                try:
+                    values.append(int(piece) & 0xFFFFFFFF)
+                except ValueError:
+                    log.warning(f"NiIntegersExtraData '{g.name}' on {intdat.name} has a "
+                                f"non-numeric value '{piece}'; skipping it")
+            parent = self.nif.rootNode
+            if intdat.parent:
+                parent_repr = self.objs_written.find_blend(intdat.parent)
+                if parent_repr and parent_repr.nifnode:
+                    parent = parent_repr.nifnode
+            ed = pynifly.NiIntegersExtraData.New(self.nif, name=g.name, values=values,
+                                                 parent=parent)
+            self.objs_written.add_pair(intdat, ed)
+
+
+    def export_bone_lod(self):
+        if self.bone_lod:
+            from . import pyn_props
+            g = pyn_props.get_group(self.bone_lod, 'pyn_bonelod')
+            ext = pynifly.BSBoneLODExtraData.New(
+                self.nif,
+                name=BD.nonunique_name(self.bone_lod.name.split(":", 1)[1]),
+                lodlist=json.loads(g.value),
+                parent=self.nif.rootNode)
+            self.objs_written.add(ReprObject(self.bone_lod, ext))
+
+
+    def export_bound(self):
+        if self.bound:
+            bnd = pynifly.BSBound.New(self.nif, 
+                name=BD.nonunique_name(self.bound.name.split(":", 1)[1]),
+                center=self.bound.location,
+                half_extents=(max(v.co.x for v in self.bound.data.vertices),
+                              max(v.co.y for v in self.bound.data.vertices),
+                              max(v.co.z for v in self.bound.data.vertices)),
+                parent=self.nif.rootNode)
+            self.objs_written.add(ReprObject(self.bound, bnd)) 
+
+
+    def export_inv_marker(self):
+        if self.inv_marker:
+            inv_rot, inv_zoom = BD.cam_to_inv(self.inv_marker.matrix_world, self.inv_marker.data.lens)
+
+            from ..pyn.pynifly import BSInvMarker
+            from . import pyn_props
+            g = pyn_props.get_group(self.inv_marker, 'pyn_invmarker')
+            invm = BSInvMarker.New(self.nif,
+                name=g.name or 'INV',
+                rotation=(inv_rot[0], inv_rot[1], inv_rot[2]),
+                zoom=inv_zoom,
+                parent=self.nif.rootNode)
+            self.objs_written.add(ReprObject(self.inv_marker, invm))
+
+
+    def export_furniture_markers(self):
+        # Have to group furniture marker positions by furniture marker name.
+        fm_pos_list = []
+        name = 'FRN'
+        fm_list = sorted(self.furniture_markers, key=lambda fm: fm.name)
+        for fm in fm_list:
+            this_name = (BD.nonunique_name(fm.name.split(":", 1)[1]) 
+                            if ":" in fm.name 
+                            else name)
+            if name != this_name:
+                if fm_pos_list:
+                    pynifly.BSFurnitureMarkerNode.New(
+                        self.nif, name=name, 
+                        furniture_markers=fm_pos_list, 
+                        parent=self.nif.rootNode)
+                    fm_pos_list = []
+                name = this_name
+
+            marker = pynifly.FurnitureMarkerDataBuf()
+            marker.offset[0] = (fm.location / self.scale)[0]
+            marker.offset[1] = (fm.location / self.scale)[1]
+            marker.offset[2] = (fm.location / self.scale)[2]
+            marker.heading = fm.rotation_euler.z
+            from . import pyn_props
+            g = pyn_props.get_group(fm, 'pyn_furniture')
+            marker.animation_type_name = g.animation_type
+            marker.entry_points_list = g.entry_points
+            fm_pos_list.append(marker)
+        
+        if fm_pos_list:
+            pynifly.BSFurnitureMarkerNode.New(
+                self.nif, name=name, 
+                furniture_markers=fm_pos_list, 
+                parent=self.nif.rootNode)
+
+
+    def export_extra_data(self):
+        """ 
+        Export any top-level extra data represented as Blender objects. 
+        Sets self.bodytri_done if one of the extra data nodes represents a bodytri
+        """
+        self.export_string_data()
+        self.export_behavior_graph_data()
+        self.export_cloth_data()
+        self.export_decal_data()
+        self.export_bsx_flag()
+        self.export_bone_translations()
+        self.export_bone_lod()
+        self.export_bound()
+        self.export_inv_marker()
+        self.export_furniture_markers()
+        self.export_integer_data()
+        self.export_integers_data()
+        self.export_sf_material_ids()
+
+
+    def export_sf_material_ids(self):
+        """Give every Starfield shape a MaterialID if it doesn't already have one.
+
+        SF shapes carry NiIntegerExtraData 'MaterialID' on the BSGeometry -- 372 of the 373
+        vanilla/mod shape nifs surveyed have it. It's a CRC of the shader's material path, so
+        it's derived data: a shape authored in Blender has no imported extra-data Empty to
+        write, and hand-maintaining a hash isn't reasonable. Runs after export_integer_data so
+        an Empty that DID come in from an import wins and we never write the block twice.
+
+        The "already has one" test reads what THIS export wrote, not the block's name: a block
+        added during the session reports an empty name until the file has been written and read
+        back, so a name comparison silently never matches and every imported head got two
+        MaterialID blocks.
+        """
+        if self.nif.game != 'SF':
+            return
+        from ..pyn.sf_materials import material_id
+        for shape in self.nif.shapes:
+            if shape.id in self._matid_written:
+                continue
+            matpath = shape.shader.name if shape.shader else ''
+            if not matpath:
+                continue
+            pynifly.NiIntegerExtraData.New(self.nif,
+                name='MaterialID',
+                integer_value=material_id(matpath),
+                parent=shape)
+
+
+    def get_loop_partitions(self, face, loops, weights):
+        vi1 = loops[face.loop_start].vertex_index
+        p = set([k for k in weights[vi1].keys() if is_partition(k)])
+        for i in range(face.loop_start+1, face.loop_start+face.loop_total):
+            vi = loops[i].vertex_index
+            p = p.intersection(set([k for k in weights[vi].keys() if is_partition(k)]))
+    
+        if len(p) != 1:
+            face_verts = [lp.vertex_index for lp in loops[face.loop_start:face.loop_start+face.loop_total]]
+            if len(p) == 0:
+                self.warnings.add('NO_PARTITION')
+                if not self.objs_no_part:
+                    log.warning(f"Face {face.index} on object {self.active_obj.name} is in no partition")
+                self.objs_no_part.add(self.active_obj)
+                create_group_from_verts(self.active_obj, BD.NO_PARTITION_GROUP, face_verts)
+                return None
+            elif len(p) > 1:
+                self.warnings.add('MANY_PARITITON')
+                if not self.objs_mult_part:
+                    log.warning("Some faces have been assigned to more than one partition")
+                self.objs_mult_part.add(self.active_obj)
+                create_group_from_verts(self.active_obj, BD.MULTIPLE_PARTITION_GROUP, face_verts)
+                None
+
+        return p.pop()
+
+
+    def extract_face_info(self, mesh, uvlayer, loopcolors, weights, obj_partitions, use_loop_normals=False):
+        """ Extract triangularized face info from the mesh. 
+            Return 
+            loops = [vert-index, ...] list of vert indices in loops. Triangularized, 
+                so these are to be read in triples.
+            uvs = [(u,v), ...] list of uv coordinates 1:1 with loops
+            norms = [(x,y,z), ...] list of normal vectors 1:1 with loops
+                --Normal vectors come from the loops, because they reflect whether the edges
+                are sharp or the object has flat shading
+            colors = [(r,g,b,a), ...] 1:1 with loops
+            partition_map = [n, ...] list of partition IDs, 1:1 with tris 
+
+        """
+        loops = []
+        uvs = []
+        orig_uvs = []
+        norms = []
+        colors = []
+        partition_map = []
+
+        # Calculating normals messes up the passed-in UV, so get the data out of it first.
+        # Read the UVs in bulk: a UV layer is a generic mesh attribute, and indexing it
+        # per-element is pathologically slow -- on a 127K-loop body that loop cost 122s
+        # against 0.05s for foreach_get. (Per-element access on vertices/loops is fine;
+        # it's the attribute layer that's slow.) orig_uvs is indexed by loop index.
+        uvflat = [0.0] * (len(mesh.loops) * 2)
+        uvlayer.foreach_get("uv", uvflat)
+        orig_uvs = [(uvflat[i*2], uvflat[i*2+1]) for i in range(len(mesh.loops))]
+
+        # CANNOT figure out how to get the loop normals correctly.  They seem to follow the
+        # face normals even on smooth shading.  (TEST_NORMAL_SEAM tests for this.) So use the
+        # vertex normal except when there are custom split normals.
+        bpy.ops.object.mode_set(mode='OBJECT') #required to get accurate normals
+
+        # Before Blender 4.0 have to calculate normals. 4.0 doesn't need it and throws
+        # an error.
+        if hasattr(mesh, "calc_normals_split"):
+            # Blender 4.0+ has normals in the loops, so no need to calculate them
+            mesh.calc_normals_split()
+        if hasattr(mesh, "calc_normals"):
+            # Blender 3.0+ has normals in the vertices, so no need to calculate them
+            mesh.calc_normals()
+
+        # Everything per loop and per vertex read in bulk, once: indexing mesh.loops and
+        # mesh.vertices element by element costs an RNA lookup each time.
+        nloops, nverts = len(mesh.loops), len(mesh.vertices)
+        loop_vert = np.empty(nloops, dtype=np.int32)
+        mesh.loops.foreach_get('vertex_index', loop_vert)
+        loop_vert = loop_vert.tolist()
+        vco = np.empty(nverts * 3, dtype=np.float64)
+        mesh.vertices.foreach_get('co', vco)
+        vco = [tuple(v) for v in vco.reshape(-1, 3).tolist()]
+        if use_loop_normals:
+            ln = np.empty(nloops * 3, dtype=np.float64)
+            mesh.loops.foreach_get('normal', ln)
+            loop_norm = [tuple(v) for v in ln.reshape(-1, 3).tolist()]
+        else:
+            vn = np.empty(nverts * 3, dtype=np.float64)
+            mesh.vertices.foreach_get('normal', vn)
+            vert_norm = [tuple(v) for v in vn.reshape(-1, 3).tolist()]
+
+        def write_loop_vert(li):
+            """ Write one vert, given as a loop index """
+            loops.append(loop_vert[li])
+            uvs.append(orig_uvs[li])
+            if loopcolors:
+                colors.append(loopcolors[li])
+            if use_loop_normals:
+                norms.append(loop_norm[li])
+            else:
+                norms.append(vert_norm[loop_vert[li]])
+
+        # Write out the loops as triangles, and partitions to match
+        have_partitions = True
+        partition_err = False
+        for f in mesh.polygons:
+            if f.loop_total < 3:
+                log.warning(f"Degenerate polygon on {mesh.name} with {f.loop_total} verts")
+            else:
+                if obj_partitions and len(obj_partitions) > 0:
+                    loop_partition = self.get_loop_partitions(f, mesh.loops, weights)
+                    if not loop_partition: partition_err = True
+                face_loops = range(f.loop_start, f.loop_start + f.loop_total)
+                coords = [vco[loop_vert[li]] for li in face_loops]
+                for i, j, k in triangulate(coords):
+                    write_loop_vert(face_loops[i])
+                    write_loop_vert(face_loops[j])
+                    write_loop_vert(face_loops[k])
+                    if obj_partitions and len(obj_partitions) > 0:
+                        if loop_partition:
+                            partition_map.append(obj_partitions[loop_partition].id)
+                        else:
+                            have_partitions = False
+                            partition_map.append(next(iter(obj_partitions.values())).id)
+
+        if not have_partitions:
+            log.warning(f"Wrote faces without partitions on {mesh}")
+        if partition_err:
+            log.warning("Some faces are in multiple partitions, or no partition")
+
+        return loops, uvs, norms, colors, partition_map
+
+
+    def find_colormaps(self, mesh):
+        """
+        Find the color maps for the given mesh. Use the VERTEX_ALPHA color map for alpha
+        values if it exists.
+
+        Returns [color map, alpha map] -- Either may be None
+        """
+        try:
+            vc = mesh.color_attributes
+            active_color = vc.active_color
+        except Exception:
+            vc = mesh.vertex_colors
+            active_color = vc.active
+        alphamap = None
+        colormap = None
+        if BD.ALPHA_MAP_NAME in vc.keys():
+            alphamap = vc[BD.ALPHA_MAP_NAME]
+        if alphamap and active_color and active_color.data == alphamap.data:
+            # Alpha map is active--see if there's another map to use for colors. If not,
+            # colors will be set to white
+            for c in vc:
+                if c.data != alphamap.data:
+                    colormap = c
+                    break
+        elif active_color:
+            colormap = active_color
+
+        # Prefer the canonically-named color map (VERTEX_COLOR) when present -- resolves the
+        # ambiguity of multiple non-alpha color attributes. Falls back to the active-color
+        # heuristic above for files authored before the convention.
+        if BD.COLOR_MAP_NAME in vc.keys():
+            colormap = vc[BD.COLOR_MAP_NAME]
+
+        # Say so when that overrides what the user has selected. Colors edited in some
+        # other attribute are simply not exported, and without this the only symptom is
+        # the old colors coming back out (issue #425).
+        if (colormap and active_color and colormap.name != active_color.name
+                and not (alphamap and active_color.name == alphamap.name)):
+            self.warn(f"Exporting vertex colors from '{colormap.name}'"
+                      f", not the active color attribute '{active_color.name}'."
+                      f" Colors to export have to be in '{BD.COLOR_MAP_NAME}'.")
+
+        return colormap, alphamap
+
+
+    def extract_colors(self, mesh):
+        """
+        Extract vertex color data from the given mesh. Use the VERTEX_ALPHA color map for
+        alpha values if it exists.
+
+        Returns [(r, g, b, a)...], 1:1 with loops whether the color map is using corners
+        or points.
+        """
+        colormap, alphamap = self.find_colormaps(mesh)
+        if colormap == None and alphamap == None: return
+
+        # Read in bulk: a color attribute indexed element by element costs an RNA lookup each.
+        nloops = len(mesh.loops)
+        loop_vert = np.empty(nloops, dtype=np.int64)
+        mesh.loops.foreach_get('vertex_index', loop_vert)
+
+        def per_loop(cmap):
+            """The map's colors, one row per loop (n, 4); None for a domain we don't read."""
+            a = np.empty(len(cmap.data) * 4, dtype=np.float32)
+            cmap.data.foreach_get('color', a)
+            a = a.reshape(-1, 4).astype(np.float64)
+            scheme = BD.color_mapping(cmap)
+            if scheme == "CORNER":
+                return a[:nloops]
+            if scheme == "POINT":
+                return a[loop_vert]
+            return None
+
+        colors = np.zeros((nloops, 4), dtype=np.float64)
+        if colormap:
+            c = per_loop(colormap)
+            if c is not None:
+                colors[:len(c)] = c
+        if alphamap:
+            a = per_loop(alphamap)
+            if a is not None:
+                colors[:len(a), 3] = (a[:, 0] + a[:, 1] + a[:, 2]) / 3
+
+        return [tuple(c) for c in colors.tolist()]
+
+
+    def extract_mesh_data(self, obj, arma, target_key):
+        """ 
+        Extract the triangularized mesh data from the given object
+            obj = object being exported
+            arma = controlling armature, if any. Needed so we can limit bone weights.
+            target_key = shape key to export
+        returns
+            verts = list of XYZ vertex locations
+            norms_new = list of XYZ normal values, 1:1 with verts
+            uvmap_new = list of (u, v) values, 1:1 with verts
+            colors_new = list of RGBA color values 1:1 with verts. May be None.
+            tris = list of (t1, t2, t3) vert indices to define triangles
+            weights_by_vert = [dict[group-name: weight], ...] 1:1 with verts
+            morphdict = {shape-key: [verts...], ...} XXX>only if "target_key" is NOT specified
+            paretitions = list of Partition objects, one for each partition
+            partition_map = [n, ...] list of partition IDs, 1:1 with verts
+        
+        NOTE this routine changes selection and switches to edit mode and back
+        """
+        loopcolors = None
+        saved_sk = obj.active_shape_key_index
+        
+        ObjectSelect([obj], active=True)
+            
+        # This next little dance ensures the mesh.vertices locations are correct
+        if self.settings.export_modifiers:
+            depsgraph = bpy.context.evaluated_depsgraph_get()
+            obj1 = obj.evaluated_get(depsgraph) 
+        else:
+            obj1 = obj           
+        obj1.active_shape_key_index = 0
+        bpy.ops.object.mode_set(mode = 'EDIT')
+        bpy.ops.object.mode_set(mode = 'OBJECT')
+        editmesh = obj1.data
+        editmesh.update()
+        
+        # Skyrim/FO4 GPU-skin at 4 bones/vertex; Starfield allows more (vanilla body 6, hair 7).
+        # For SF, the per-shape pyn_sf_geometry.weights_per_vertex (recorded from the source on
+        # import, user-editable) caps it; 0 = auto (the shape's true max, up to the hard ceiling).
+        max_weights = 4
+        if self.game == 'SF':
+            from .sf_geometry import SF_MAX_WEIGHTS_PER_VERTEX
+            sfg = getattr(obj, 'pyn_sf_geometry', None)
+            recorded = getattr(sfg, 'weights_per_vertex', 0) if sfg else 0
+            max_weights = recorded if recorded > 0 else SF_MAX_WEIGHTS_PER_VERTEX
+        verts, weights_by_vert, morphdict \
+            = extract_vert_info(obj1, editmesh, arma, target_key, self.scale, max_weights)
+    
+        # Pull out vertex colors first because trying to access them later crashes
+        bpy.ops.object.mode_set(mode = 'OBJECT') # Required to get vertex colors
+        if self.settings.export_colors:
+            export = False
+            try:
+                c = editmesh.color_attributes.active_color
+                export = True
+            except Exception:
+                export = (len(editmesh.vertex_colors) > 0)
+            if export: loopcolors = self.extract_colors(editmesh)
+    
+        # Apply shape key verts to the mesh so normals will be correct.  If the mesh has
+        # custom normals, fukkit -- use the custom normals and assume the deformation
+        # won't be so great that it looks bad.
+        bpy.ops.object.mode_set(mode = 'OBJECT') 
+        uvlayer = editmesh.uv_layers.active.data
+        if target_key != '' and \
+            editmesh.shape_keys and \
+            target_key in editmesh.shape_keys.key_blocks.keys() and \
+            not editmesh.has_custom_normals:
+            editmesh = mesh_from_key(editmesh, verts, target_key)
+                
+        # Extracting and triangularizing
+        partitions = partitions_from_vert_groups(obj1, self.game)
+        loops, uvs, norms, loopcolors, partition_map = \
+            self.extract_face_info(
+                editmesh, uvlayer, loopcolors, weights_by_vert, partitions,
+                use_loop_normals=editmesh.has_custom_normals)
+    
+        mesh_split_by_uv(verts, loops, norms, uvs, weights_by_vert, morphdict)
+
+        # Make uv and norm lists 1:1 with verts (rather than with loops)
+        uvmap_new = [(0.0, 0.0)] * len(verts)
+        norms_new = [(0.0, 0.0, 0.0)] * len(verts)
+        for i, vi in enumerate(loops):
+            assert vi < len(verts), f"Error: Invalid vert index in loops: {vi} >= {len(verts)}"
+            uvmap_new[vi] = uvs[i]
+            norms_new[vi] = norms[i]
+    
+        ## Our "loops" list matches 1:1 with the mesh's loops. So we can use the polygons
+        ## to pull the loops
+        tris = []
+        for i in range(0, len(loops), 3):
+            tris.append((loops[i], loops[i+1], loops[i+2]))
+    
+        colors_new = None
+        if len(loopcolors) > 0:
+            colors_new = [(0.0, 0.0, 0.0, 0.0)] * len(verts)
+            for i, lp in enumerate(loops):
+                colors_new[lp] = loopcolors[i]
+        
+        obj.active_shape_key_index = saved_sk
+
+        return verts, norms_new, uvmap_new, colors_new, tris, weights_by_vert, \
+            morphdict, partitions, partition_map
+
+
+    def export_node(self, obj:bpy.types.Object, parent:ReprObject=None) -> pynifly.NiNode:
+        """Export a NiNode for the given Blender object."""
+        ref = None
+        with BD.stashed_animation(obj):
+            nodetype = obj.get('pynBlockName', 'NiNode')
+            from . import pyn_props
+            blockcls = pynifly.NiObject.block_types[nodetype]
+            props = blockcls.getbuf(values=pyn_props.block_values(obj, blockcls))
+            xf = BD.make_transformbuf(BD.apply_scale_xf(obj.matrix_local, 1))
+            props.transform = xf
+            if nodetype == 'BSMultiBoundNode':
+                self._export_multibound(obj, props)
+            if "pynNodeFlags" in obj:
+                try:
+                    props.flags = NiAVFlags.parse(obj["pynNodeFlags"]).value
+                except Exception as e:
+                    log.warning(f"Error setting node flags for {obj.name}: {e}")
+            # Strip the ":<blocktype>" suffix that import adds to special nodes
+            # (e.g. "FadeNode Anim:BSMultiBoundNode" -> "FadeNode Anim").
+            node_name = BD.nonunique_name(obj.name)
+            if nodetype != 'NiNode' and node_name.endswith(":" + nodetype):
+                node_name = node_name[:-(len(nodetype) + 1)]
+            ninode = self.nif.add_block(
+                name=node_name,
+                buf=props,
+                parent=parent.nifnode if parent else None)
+            # ninode = self.nif.add_node(obj.name, xf, parent.nifnode if parent else None)
+            ref = ReprObject(obj, ninode) 
+            self.objs_written.add(ref) 
+            collision.CollisionHandler.export_collisions(self, obj)
+            
+        if self.settings.export_animations:
+            controller.ControllerHandler.export_animated_obj(self, ref)
+        return ref
+
+    def _reorder_switch_children(self):
+        """Enforce the NiSwitchNode invariant on export: the second child must
+        have no skinned descendants. Put the skinned-descendant branch first so
+        the engine renders it; warn if neither child is skinned (order arbitrary).
+        """
+        # Switch nodes are collected during the export walk (self.switch_nodes),
+        # so there's no need to go hunting for them in the nif -- if none were
+        # exported there's nothing to do.
+        if not self.switch_nodes:
+            return
+
+        from ctypes import c_int
+        h = self.nif._handle
+        shape_skin = {sh.id: bool(sh.bone_names) for sh in self.nif.shapes}
+
+        def children(nid):
+            # getNodeChildren returns the real child count, which can exceed any
+            # fixed buffer. Size the buffer to the reported count.
+            n = pynifly.nifly.getNodeChildren(h, nid, 0, None)
+            if n <= 0:
+                return []
+            buf = (c_int * n)()
+            pynifly.nifly.getNodeChildren(h, nid, n, buf)
+            return [buf[i] for i in range(n)]
+
+        def subtree_skinned(nid):
+            if nid in shape_skin:
+                return shape_skin[nid]
+            return any(subtree_skinned(c) for c in children(nid))
+
+        for obj in self.switch_nodes:
+            repr = self.objs_written.find_blend(obj)
+            if repr is None:
+                continue
+            sid = repr.nifnode.id
+            ch = children(sid)
+            if len(ch) != 2:
+                continue
+            sk = [subtree_skinned(c) for c in ch]
+            if not any(sk):
+                log.warning(f"NiSwitchNode {sid} has no skinned child; "
+                            f"child order left as-is")
+                continue
+            if sk[1] and not sk[0]:
+                ordered = (c_int * 2)(ch[1], ch[0])
+                pynifly.nifly.setNodeChildren(h, sid, ordered, 2)
+
+    def _export_bstreenode_bones(self):
+        """If the root is a BSTreeNode, resolve its Bones1/Bones2 nif-name lists
+        (stashed on import) to the exported bone nodes and write the pointer
+        arrays. Run after the armature bones are written so they exist."""
+        root_obj = self.root_object
+        if root_obj is None or root_obj.get('pynBlockName') != 'BSTreeNode':
+            return
+        treenode = pynifly.BSTreeNode(file=self.nif, id=0)
+        for which, prop in ((1, 'pynBSTreeBones1'), (2, 'pynBSTreeBones2')):
+            if prop not in root_obj:
+                continue
+            ids = []
+            for nm in json.loads(root_obj[prop]):
+                h = pynifly.nifly.findNodeByName(self.nif._handle, nm.encode('utf-8'))
+                if h:
+                    ids.append(pynifly.nifly.getBlockID(self.nif._handle, h))
+                else:
+                    log.warning(f"BSTreeNode bone '{nm}' not in exported nif")
+            treenode.set_bone_ids(which, ids)
+
+    def _export_multibound(self, obj, node_props):
+        """Build the BSMultiBound -> BSMultiBoundOBB chain from the OBB cube child
+        and point the BSMultiBoundNode's multiBoundRef (node_props.multiBoundID)
+        at it. The cube's local transform encodes the OBB: center = location,
+        rotation = the 3x3, half-extents = scale.
+        """
+        cube = next((c for c in obj.children if c.get('pynMultiBoundOBB')), None)
+        if cube is None:
+            node_props.multiBoundID = pynifly.NODEID_NONE
+            return
+        loc, rot, scale = cube.matrix_local.decompose()
+        rm = rot.to_matrix()
+        obb_buf = pynifly.BSMultiBoundOBBBuf()
+        obb_buf.center = pynifly.VECTOR3(*loc)
+        obb_buf.size = pynifly.VECTOR3(*scale)
+        obb_buf.rotation = pynifly.MATRIX3(pynifly.VECTOR3(*rm[0]),
+                                           pynifly.VECTOR3(*rm[1]),
+                                           pynifly.VECTOR3(*rm[2]))
+        obb_id = pynifly.nifly.addBlock(
+            self.nif._handle, None, pynifly.byref(obb_buf), pynifly.NODEID_NONE)
+        mb_buf = pynifly.BSMultiBoundBuf()
+        mb_buf.dataID = obb_id
+        mb_id = pynifly.nifly.addBlock(
+            self.nif._handle, None, pynifly.byref(mb_buf), pynifly.NODEID_NONE)
+        node_props.multiBoundID = mb_id
+
+
+    def export_shape_parents(self, obj) -> pynifly.NiNode:
+        """Export any parent NiNodes the shape might need 
+
+        Returns the handle of the nif node that should be the parent of the shape (may be
+        None).
+        """
+        # ancestors list contains all parents from root to obj's immediate parent -- above any
+        # mesh it's parented to, which can't be a nif node (see mesh_ancestor).
+        ancestors = []
+        p = obj.parent
+        m = mesh_ancestor(obj)
+        if m is not None:
+            warned = self.__dict__.setdefault('_mesh_parent_warned', set())
+            if obj.name not in warned:
+                warned.add(obj.name)
+                log.warning(f"{obj.name} is parented to mesh {m.name}, which a nif can't do; "
+                            f"exporting it without {m.name}, at the same position")
+            p = m.parent
+        while p:
+            if p.type != 'ARMATURE': ancestors.insert(0, p)
+            p = p.parent
+
+        last_parent = None
+        ref = None
+        ninode = None
+        for this_parent in ancestors:
+            # A Starfield BSGeometry container Empty is represented by the shape block itself,
+            # not by a separate NiNode -- skip it so the BSGeometry parents to the Empty's own
+            # parent (root or a real NiNode above it).
+            if this_parent.get('pynBlockName') == 'BSGeometry':
+                continue
+            ref = self.objs_written.find_blend(this_parent)
+            if (not ref) and  ('pynRoot' not in this_parent):
+                ref = self.export_node(this_parent, last_parent)
+            last_parent = ref
+
+        return ref
+
+
+    def get_bone_xforms(self, arma, bone_names, shape):
+        """Return transforms for the bones in list. Checks the "preserve_hierarchy" flag to 
+        determine whether to return global or local transforms.
+            arma = armature
+            bone_names = list of names
+            shape = shape being exported
+            result = dict{bone-name: MatTransform, ...}
+        """
+        result = {}
+        for b in arma.data.bones:
+            result[b.name] = BD.get_bone_xform(arma, b.name, self.game, 
+                                            self.settings.preserve_hierarchy,
+                                            self.settings.export_pose)
+    
+        return result
+
+
+    def write_bone(self, shape:pynifly.NiShape, arma, bone_name, bones_to_write):
+        """ 
+        Write a shape's bone, writing all parent bones first if necessary Returns the name
+        of the node in the target nif for the new bone. 
+        
+        * shape - bone is added to shape's skin. May be None, if only writing a skeleton.
+        * arma - parent armature
+        * bone_name - bone to write (blender name)
+        * bones_to_write - list of bones that the shape needs. If the bone isn't in this
+          list, only write it if it's needed for the hierarchy.
+        """
+        if bone_name in self.shape_bones:
+            return self.shape_bones[bone_name]
+
+        if (bone_name not in bones_to_write and not self.settings.preserve_hierarchy
+                and not self.settings.export_all_bones):
+            return None
+
+        nifname = self.nif_name(bone_name)
+        self.shape_bones[bone_name] = nifname
+        
+        bone_parent = arma.data.bones[bone_name].parent
+        parname = None
+        if bone_parent and bone_name not in self.writtenbones:
+            parname = self.write_bone(shape, arma, bone_parent.name, bones_to_write)
+
+        xf = BD.get_bone_xform(arma, bone_name, self.game,
+                            self.settings.preserve_hierarchy,
+                            self.settings.export_pose)
+        tb = BD.pack_xf_to_buf(xf, self.scale)
+
+        if bone_name in bones_to_write and shape:
+            shape.add_bone(nifname, tb,
+                           (parname if self.settings.preserve_hierarchy else None))
+        elif bone_name not in self.writtenbones and (self.settings.preserve_hierarchy
+                                                     or self.settings.export_all_bones
+                                                     or not shape):
+            # NIF node transforms are parent-relative. When preserve_hierarchy
+            # is off, get_bone_xform returns the global transform; convert it
+            # to local so add_node stores the correct parent-relative values.
+            if parname and not self.settings.preserve_hierarchy and bone_parent:
+                parent_xf = BD.get_bone_global_xf(
+                    arma, bone_parent.name, self.game,
+                    self.settings.export_pose)
+                local_xf = parent_xf.inverted() @ xf
+                tb = BD.pack_xf_to_buf(local_xf, 1.0)
+            self.nif.add_node(nifname, tb, parname)
+
+        self.writtenbones[bone_name] = nifname
+        
+        return nifname
+
+
+    def write_all_bones(self, arma):
+        """Write every bone in the armature as a node, whether or not anything uses it.
+
+        The normal rule is that a bone earns a node by being skinned to or animated. That
+        suits armor, where an external skeleton supplies everything else. A nif that
+        carries its own skeleton also owns nodes that exist purely to be positioned --
+        weapon and camera attachment points, animation-object markers, the head of a
+        chain nothing is weighted to -- and those vanish under the normal rule. Passing
+        shape=None takes write_bone's node branch, so nothing is added to a skin.
+        """
+        bones = arma.data.bones.keys()
+        for bone_name in bones:
+            self.write_bone(None, arma, bone_name, bones)
+
+
+    def write_bone_hierarchy(self, shape:pynifly.NiShape, arma, used_bones:list):
+        """Write the bone hierarchy to the nif. Do this first so that transforms 
+        and parent/child relationships are correct. Do not assume that the skeleton is fully
+        connected (do Blender armatures have to be fully connected?). 
+        used_bones - list of bone names to write. 
+        """
+        for bone_name in used_bones:
+            if bone_name in arma.data.bones:
+                self.write_bone(shape, arma, bone_name)
+
+
+    def export_skin(self, obj, arma, new_shape, new_xform, weights_by_vert):
+        """
+        Export the skin for a shape, including bones used by the skin.
+        """
+        log.info(f"Skinning {obj.name}")
+        new_shape.skin()
+
+        # The block transform is parent-relative (new_xform). The SKIN frame
+        # (global-to-skin and skin-to-bone) is relative to the armature, where the
+        # bones live -- NOT the shape's immediate parent. For a shape parented to the
+        # root these coincide, but a shape skinned under a non-identity node (e.g. an
+        # FO4 workbench mesh under the offset 'WorkstationArmor' node) must fold that
+        # node's offset into the skin transforms, or the skinned placement won't match
+        # the unskinned one (NifSkope/engine render the shape offset with skinning on).
+        #
+        # Half-precision recentering shifts the verts and bakes a compensating offset
+        # into new_xform (new_xform = base_xf @ T(offset)); that same offset must ride
+        # along in the skin frame. base_xf.inverted() @ new_xform recovers it (identity
+        # when no recentering happened), applied on top of the armature-relative
+        # placement.
+        base_xf = self._export_shape_transform(obj)
+        skin_xf = (arma.matrix_world.inverted() @ obj.matrix_world) \
+            @ (base_xf.inverted() @ new_xform)
+
+        new_shape.transform = BD.make_transformbuf(new_xform)
+        new_shape.set_global_to_skin(BD.make_transformbuf(skin_xf.inverted()))
+    
+        weights_by_bone = pynifly.get_weights_by_bone(weights_by_vert, arma.data.bones.keys())
+
+        for bone_name in  weights_by_bone.keys():
+            self.write_bone(new_shape, arma, bone_name, weights_by_bone.keys())
+
+        for bone_name, bone_weights in weights_by_bone.items():
+            nifname = self.nif_name(bone_name)
+            if self.settings.export_pose:
+                # Bind location is different from pose location
+                xf = BD.get_bone_xform(arma, bone_name, self.game, False, False)
+                xfoffs = obj.matrix_world.inverted() @ xf
+                xfinv = xfoffs.inverted()
+                tb_bind = BD.pack_xf_to_buf(xfinv, self.scale)
+                new_shape.set_skin_to_bone_xform(nifname, tb_bind)
+            else:
+                # Have to set skin-to-bone again because adding the bones nuked it.
+                # Use the armature-relative skin frame (skin_xf), not the parent-
+                # relative block transform, so a shape skinned under a non-identity
+                # node folds that node's offset into skin-to-bone (matches vanilla and
+                # keeps skinned == unskinned placement).
+                xf = BD.get_bone_xform(arma, bone_name, self.game, False, self.settings.export_pose)
+                xfoffs = skin_xf.inverted() @ xf
+                xfinv = xfoffs.inverted()
+                tb = BD.pack_xf_to_buf(xfinv, self.scale)
+
+                new_shape.set_skin_to_bone_xform(nifname, tb)
+
+            self.writtenbones[bone_name] = nifname
+            new_shape.setShapeWeights(nifname, bone_weights)
+
+
+    def apply_shape_key(self, key_name):
+        pass
+
+
+    def _export_shape_transform(self, obj):
+        """The transform the exported shape carries: the object's local
+        transform, adjusted for export scale and non-uniform scale (both of
+        which are baked into the verts instead).
+        """
+        # Using local transform because the shapes will be parented in the nif. A mesh parent
+        # isn't written (export_shape_parents), so then it's relative to that mesh's parent.
+        local = obj.matrix_local
+        m = mesh_ancestor(obj)
+        if m is not None:
+            local = (m.parent.matrix_world.inverted() @ obj.matrix_world if m.parent
+                     else obj.matrix_world)
+        new_xform = local * (1/self.scale)
+        if not has_uniform_scale(obj):
+            # Non-uniform scale was applied to the verts, so use 1.0 for the scale.
+            l, r, s = new_xform.decompose()
+            new_xform = BD.MatrixLocRotScale(l, r, Vector((1,1,1)))
+        elif not NearEqual(self.scale, 1.0):
+            # Export scale factor applied to verts, so scale obj translation but not obj scale.
+            l, r, s = new_xform.decompose()
+            new_xform = BD.MatrixLocRotScale(l, r, local.to_scale())
+        return new_xform
+
+
+    def _fo4_recenter_half_precision(self, obj, verts, morphdict, new_xform, is_skinned):
+        """Optionally pull FO4 skinned verts near the bodypart origin so the
+        16-bit half-precision vertex storage doesn't quantize them badly.
+
+        FO4 bodyparts are authored ~120 units up; stored as half floats that far
+        from the origin loses precision. When enabled, subtract a local-space
+        offset from every vert (and morph vert) to recenter them and bake that
+        offset into the shape transform, so the world placement is unchanged.
+
+        No-op unless the option is set, the game is FO4, the shape is skinned,
+        and recentering actually reduces how far the verts sit from the origin
+        (a body already centered around the origin is left alone). Returns the
+        possibly-shifted (verts, morphdict, new_xform).
+        """
+        if not (self.settings.export_recenter_half_precision
+                and self.game == 'FO4' and is_skinned and verts
+                and not self.settings.export_pose):
+            return verts, morphdict, new_xform
+
+        def max_abs(vs):
+            return max(max(abs(v[0]), abs(v[1]), abs(v[2])) for v in vs) if vs else 0.0
+
+        # The local-space point that new_xform maps to the bodypart world origin;
+        # subtracting it recenters the verts there.
+        offset = new_xform.inverted() @ BD.fo4_bodypart_xf.to_translation()
+
+        def shift(v):
+            return (v[0] - offset[0], v[1] - offset[1], v[2] - offset[2])
+
+        recentered = [shift(v) for v in verts]
+        if max_abs(recentered) >= max_abs(verts):
+            # Recentering wouldn't help (verts already near origin); leave as-is.
+            return verts, morphdict, new_xform
+
+        morphdict = {k: [shift(v) for v in mv] for k, mv in morphdict.items()}
+        new_xform = new_xform @ Matrix.Translation(offset)
+        log.info(f"Recentered FO4 half-precision verts for {obj.name}: "
+                 f"offset=({offset[0]:.3f}, {offset[1]:.3f}, {offset[2]:.3f})")
+        return recentered, morphdict, new_xform
+
+
+    def _sf_lod_data(self, obj, arma, lead_xform, obj_space_normals):
+        """The geometry of a further Starfield LOD object, ready for a slot of its LOD0's
+        BSGeometry: a dict of obj, verts, uvs, norms, tris, colors, weights. Verts are moved
+        into LOD0's space if the object sits elsewhere, since the slots share one transform and
+        one set of binds. A LOD hidden on import is shown while its mesh is read."""
+        hidden = obj.hide_get()
+        obj.hide_set(False)
+        try:
+            if arma is not None and not any(vg.name in arma.data.bones
+                                            for vg in obj.vertex_groups):
+                arma = None
+            verts, norms, uvs, colors, tris, weights, *_ = \
+                self.extract_mesh_data(obj, arma, '')
+        finally:
+            obj.hide_set(hidden)
+        my_xform = self._export_shape_transform(obj)
+        if not MatNearEqual(my_xform, lead_xform):
+            to_lead = lead_xform.inverted() @ my_xform
+            rot = to_lead.to_3x3()
+            verts = [tuple(to_lead @ Vector(v)) for v in verts]
+            norms = [tuple((rot @ Vector(n)).normalized()) for n in norms]
+        return dict(obj=obj, verts=verts, tris=tris, colors=colors, weights=weights,
+                    uvs=[(u, 1.0 - v) for u, v in uvs],
+                    norms=None if obj_space_normals else norms)
+
+
+    def export_shape(self, obj, target_key='', arma=None):
+        """ Export given blender object to the given NIF file; also writes any associated
+            tri file. Checks to make sure the object wasn't already written.
+            obj = blender object
+            target_key = shape key to export
+            arma = armature to skin to
+            """
+        if self.objs_written.find_blend(obj) or BD.nonunique_name(obj) in collision.collision_names:
+            return
+
+        # Starfield LODs: the objects named '<shape>:LOD...' are one BSGeometry, written by the
+        # member that fills slot 0; the others become its further slots. The facebones
+        # companion carries LOD0 only, as vanilla's does.
+        lod_group = None
+        if self.game == 'SF':
+            from . import sf_geometry
+            lod_group = sf_geometry.lod_group(obj)
+            if lod_group and lod_group[0][0] is not obj:
+                if getattr(self, 'file_suffix', '') == '_faceBones':
+                    return
+                return self.export_shape(lod_group[0][0], target_key, arma)
+            if getattr(self, 'file_suffix', '') == '_faceBones':
+                lod_group = None
+        log.info(f"Exporting {obj.name}")
+
+        self.active_obj = obj
+        self.shape_bones = {}
+
+        with BD.stashed_animation(obj):
+            # If there's a hierarchy, export parents (recursively) first
+            my_parent = self.export_shape_parents(obj)
+
+            retval = set()
+
+            # Prepare for reporting any bone weight errors.
+            # A shape with no vertex groups naming armature bones has nothing to skin
+            # with. The exporter hands the file's armature to every shape, so without
+            # this it gets a skin instance with zero bones and every vertex reported
+            # unweighted. The game follows that empty skin instance to a null pointer
+            # and dies in BSSkin::Instance::UpdateModelBound -- e.g. the fire/dirt/
+            # wood/refraction shapes in the vanilla FO4 workbenches, which are static
+            # geometry sharing a nif with a skinned bench.
+            is_skinned = (arma is not None
+                          and any(vg.name in arma.data.bones for vg in obj.vertex_groups))
+            if not is_skinned:
+                arma = None
+            unweighted = []
+            if BD.UNWEIGHTED_VERTEX_GROUP in obj.vertex_groups:
+                obj.vertex_groups.remove(obj.vertex_groups[BD.UNWEIGHTED_VERTEX_GROUP])
+            if BD.MULTIPLE_PARTITION_GROUP in obj.vertex_groups:
+                obj.vertex_groups.remove(obj.vertex_groups[BD.MULTIPLE_PARTITION_GROUP])
+            if BD.NO_PARTITION_GROUP in obj.vertex_groups:
+                obj.vertex_groups.remove(obj.vertex_groups[BD.NO_PARTITION_GROUP])
+            
+            if is_skinned:
+                # Get unweighted bones before we muck up the list by splitting edges
+                unweighted = tag_unweighted(obj, arma.data.bones.keys())
+                if not expected_game(self.nif, arma.data.bones):
+                    log.warning(f"Exporting to game that doesn't match armature: game={self.nif.game}, armature={arma.name}")
+                    retval.add('GAME')
+
+            # Collect key info about the mesh
+            verts, norms_new, uvmap_new, colors_new, tris, weights_by_vert, morphdict, partitions, partition_map = \
+                self.extract_mesh_data(self.active_obj, arma, target_key)
+
+            # Sort triangles by LOD level if LOD vertex groups exist
+            tris, partition_map, lod_sizes = sort_tris_by_lod(obj, tris, partition_map)
+
+            # Compute the shape transform up front so we can optionally recenter
+            # FO4 half-precision verts before the shape geometry is created. This
+            # bakes the recenter offset into new_xform, leaving placement intact.
+            new_xform = self._export_shape_transform(obj)
+            verts, morphdict, new_xform = self._fo4_recenter_half_precision(
+                obj, verts, morphdict, new_xform, is_skinned)
+
+            is_headpart = obj.data.shape_keys \
+                    and len(self.nif.dict.expression_filter(set(obj.data.shape_keys.key_blocks.keys()))) > 0
+
+            obj.data.update()
+            shaderexp = shader_io.ShaderExporter(obj, self.nif.game)
+
+            if shaderexp.is_obj_space:
+                norms_exp = None
+            else:
+                norms_exp = norms_new
+
+            # Make the shape in the nif file. Use the shape's block type, or choose a
+            # reasonable default.
+            if 'pynBlockName' in obj:
+                blocktype = obj['pynBlockName']
+            elif is_headpart and self.game == 'SKYRIMSE':
+                blocktype = 'BSDynamicTriShape'
+            elif partitions and self.game == 'FO4':
+                blocktype = 'BSSubIndexTriShape' 
+            elif self.game == 'SKYRIM':
+                blocktype = 'NiTriShape' 
+            else:
+                blocktype = 'BSTriShape'
+
+            # Hard limit: the nif format stores vertex indices (and, for
+            # NiTriShapeData, the triangle count) as 16-bit. A shape past those caps
+            # can't be written correctly, so fail the export rather than emit a
+            # silently-broken nif.
+            size_err = pynifly.shape_size_error(len(verts), len(tris), blocktype)
+            if size_err:
+                raise ShapeTooBigError(f"Shape '{obj.name}' {size_err}")
+
+            blockclass = pynifly.NiObject.block_types[blocktype]
+            from . import pyn_props
+            props = blockclass.getbuf(pyn_props.block_values(obj, blockclass))
+
+            if lod_sizes is not None and hasattr(props, 'lodSize0'):
+                props.lodSize0 = lod_sizes[0]
+                props.lodSize1 = lod_sizes[1]
+                props.lodSize2 = lod_sizes[2]
+
+            if not obj.active_material:
+                props.shaderPropertyID = NO_SHADER_REF
+
+            # If we're exporting a mesh that is a connect point, export the mesh as the
+            # editor marker for that point. Exported editor markers are always parented
+            # to the root regardless of the connect point's target.
+            if connectpoint.is_connectpoint(obj):
+                obj_name = "EditorMarker"
+                p = None
+            elif self.game == 'SF':
+                # Starfield: the exported object is the LOD-child mesh; the BSGeometry block
+                # takes the base name off its container Empty (not the ':LOD<slot>' child name).
+                from . import sf_geometry
+                obj_name = sf_geometry.sf_base_name(obj)
+                p = my_parent.nifnode if my_parent else None
+            else:
+                obj_name = self.unique_name(obj)
+                p = my_parent.nifnode if my_parent else None
+            # Blender uses v=0 at bottom (OpenGL); nif uses v=0 at top. Flip on the way out.
+            uvmap_nif = [(u, 1.0 - v) for u, v in uvmap_new]
+            new_shape = self.nif.createShapeFromData(obj_name,
+                                                     verts, tris, uvmap_nif, norms_exp,
+                                                     props=props,
+                                                     parent=p)
+            if "pynNodeFlags" in obj:
+                try:
+                    new_shape.flags = NiAVFlags.parse(obj['pynNodeFlags']).value
+                except Exception as e:
+                    log.warning(f"Error setting pynNodeFlags for {obj.name}: pynNodeFlags={obj['pynNodeFlags']}")
+            elif new_shape.blockname == 'BSGeometry':
+                # A modelled mesh has no recorded flags. Give it what every vanilla Starfield
+                # shape with an external .mesh carries -- and export always writes one.
+                new_shape.flags = BSGEOMETRY_FLAGS
+            if "pynVertexDesc" in obj and obj["pynVertexDesc"]:
+                try:
+                    new_shape.properties.vertexDesc = VertexFlags.parse(obj['pynVertexDesc']).value
+                except Exception as e:
+                    log.warning(f"Error setting pynVertexDesc for {obj.name}: pynVertexDesc={obj['pynVertexDesc']}")
+
+            robj = ReprObject(obj, new_shape)
+            self.objs_written.add(robj)
+
+            # Starfield colors go into the .mesh via set_mesh_colors (handled in
+            # export_sf_shape); the generic set_colors writes the wrong array for BSGeometry.
+            if colors_new and self.game != 'SF':
+                new_shape.set_colors(colors_new)
+
+            self.export_shape_data(robj)
+
+            shaderexp.export(new_shape)
+
+            if self.game == 'SF':
+                # Starfield: set the external .mesh path + colors + skin, and queue the .mesh
+                # bytes to be written after nif.save(). Uses the SF skin path (SkinAttach +
+                # BSSkin::BoneData), not the generic export_skin (nifly can't skin a BSGeometry).
+                from . import sf_geometry
+                lods, owners = None, None
+                if lod_group:
+                    owners = sf_geometry.slot_owners(lod_group)
+                    lods = [self._sf_lod_data(o, arma if is_skinned else None, new_xform,
+                                              norms_exp is None)
+                            for o, _ in lod_group[1:]]
+                    ObjectSelect([obj], active=True)
+                    self.active_obj = obj
+                sf_geometry.export_sf_shape(
+                    self, obj, new_shape, verts, uvmap_nif, norms_exp, tris,
+                    colors_new, weights_by_vert, arma if is_skinned else None, new_xform,
+                    lods=lods, owners=owners)
+                # A skinned BSGeometry keeps an IDENTITY transform: the skin-to-bone binds are
+                # computed relative to new_xform (see _export_sf_skin) and already place every
+                # vertex, so writing new_xform onto the shape too would double-apply it and the
+                # mesh explodes under animation. Only an unskinned (static) SF shape carries a
+                # placement transform. (Vanilla skinned bodies have an identity shape transform.)
+                if not is_skinned:
+                    new_shape.transform = BD.make_transformbuf(new_xform)
+            elif is_skinned:
+                self.export_skin(self.active_obj, arma, new_shape, new_xform, weights_by_vert)
+                if len(unweighted) > 0:
+                    create_group_from_verts(obj, BD.UNWEIGHTED_VERTEX_GROUP, unweighted)
+                    log.warning(f"Some vertices are not weighted to the armature in object {obj.name}")
+                    self.objs_unweighted.add(obj)
+
+                if len(partitions) > 0:
+                    if 'FO4_SEGMENT_FILE' in obj.keys():
+                        new_shape.segment_file = obj['FO4_SEGMENT_FILE']
+
+                    # FO4: derive cut offsets + SSF from the edited cutpoint
+                    # disks if present (Phase 6, authoritative); otherwise supply
+                    # missing cuts from bone geometry (Phase 4). Either way record
+                    # the bone->bearer-ref map for the SSF written after save.
+                    if self.game == 'FO4' and arma is not None:
+                        ssf_entry = self._fo4_cutpoints_from_disks(
+                            obj, arma, partitions, new_shape.name)
+                        if ssf_entry is None:
+                            ssf_entry = self._fo4_supply_and_ssf(
+                                obj, arma, partitions, new_shape.name)
+                        if ssf_entry:
+                            self._fo4_ssf_entries[new_shape.name] = ssf_entry
+                            # Override the segment_file ref with our own SSF
+                            # path so the engine finds the file we'll write.
+                            new_shape.segment_file = self._fo4_ssf_ref_for_nif()
+
+                        # After supply/disks, if the shape still has dismember
+                        # segments but no cut offsets it won't sever in game —
+                        # warn rather than write a silently broken outfit.
+                        from ..pyn.dismember import shape_missing_cut_offsets
+                        if shape_missing_cut_offsets(partitions.values()):
+                            log.warning(
+                                f"{obj.name}: FO4 shape '{new_shape.name}' is being "
+                                "exported with dismemberment segments but no cut "
+                                "offsets — it will not dismember in game.")
+
+                    new_shape.set_partitions(
+                        [p for p in partitions.values() if p.id in partition_map],
+                        partition_map)
+
+                skin_type = obj.get("pynSkinInstanceType", "")
+                if skin_type == "NiSkinInstance" or \
+                        (not skin_type and len(partitions) == 0):
+                    new_shape.demote_skin_instance()
+
+                collision.CollisionHandler.export_collisions(self, arma)
+            else:
+                new_shape.transform = BD.make_transformbuf(new_xform)
+
+        # Write other block types
+        collision.CollisionHandler.export_collisions(self, obj)
+        try:
+            if (self.settings.export_animations 
+                    and obj.active_material 
+                    and obj.active_material.node_tree 
+                    and obj.active_material.node_tree.animation_data):
+                controller.ControllerHandler.export_shader_controller(
+                    self, robj, obj.active_material.node_tree)
+        except Exception as e:
+            log.exception(f"Error exporting controller for object {obj.name}: {e}")
+
+        # Write shape-key morphs alongside the nif (gated). Starfield uses morph.dat files split by
+        # expression classification; FO4/Skyrim use .tri files.
+        if self.settings.write_tris:
+            if self.game == 'SF':
+                self.export_sf_morphs(robj, verts, morphdict)
+            else:
+                retval |= self.export_tris(robj, verts, tris, uvmap_new, morphdict)
+
+        # Write TRIP extra data 
+        if self.settings.write_bodytri \
+            and BD.game_traits(self.game).skyrim \
+            and len(self.trip.shapes) > 0:
+            from ..pyn.pynifly import NiStringExtraData
+            NiStringExtraData.New(new_shape.file, name='BODYTRI', 
+                                  string_value=truncate_filename(self.trippath, "meshes"),
+                                  parent=new_shape)
+
+        # game stays a per-object legacy prop (multi-object discovery in _discover_game).
+        obj[PYN_GAME_PROP] = self.game
+        # All other export settings are sticky in the typed groups: nif-level on the root,
+        # skeleton settings on the armature (Bad Dog's root+armature split).
+        from . import pyn_props
+        # Only persist settings that are authoritative -- i.e. the user's dialog choices
+        # (invoke() clears intuit_defaults) or an explicit intuit_defaults=False call. When
+        # intuit_defaults is True the settings were themselves *derived* from stickiness and
+        # preferences, so writing them back would let a programmatic export's derived values
+        # overwrite the user's stored choices.
+        if not getattr(self.settings, 'intuit_defaults', False):
+            # self.root_object is only set when a pynRoot is *in the selection*; exporting a
+            # selected shape leaves it None. The read side (_discover_settings) walks up to the
+            # nif root regardless, so resolve the anchor the same way here or nothing persists.
+            settings_root = self.root_object or pyn_props.find_settings_root(obj)
+            pyn_props.write_export_settings(settings_root, arma, self.settings)
+            if settings_root is not None:
+                settings_root.pyn_export.blender_xf = MatNearEqual(self.export_xf,
+                                                                   BD.blender_export_xf)
+
+        if self.active_obj != obj:
+            bpy.data.meshes.remove(self.active_obj.data)
+            self.active_obj = None
+
+        log.info(f"{obj.name} successfully exported to {self.nif.filepath}\n")
+        return retval
+    
+
+    def export_armature(self, arma):
+        """Export an armature with no shapes"""
+        for b in arma.data.bones:
+            self.write_bone(None, arma, b.name, arma.data.bones.keys())
+        collision.CollisionHandler.export_collisions(self, arma)
+
+
+    def export_nif(self, fpath, suffix, sk):
+        """
+        Export to a single nif file.
+
+        * fpath = file path to write
+        * suffix = None or "_facebones" when a filebones nif is to be written
+        * sk = target shape key to export
+        """
+        self.objs_written = ReprObjectCollection()
+        pynifly.NifFile.clear_log()
+        self.nif = pynifly.NifFile()
+        # Which file of the set we're writing ('' or '_faceBones'). SF geometry export reads
+        # this to give the facebones companion its own external .mesh.
+        self.file_suffix = suffix
+        # The suffix of the '_'-prefixed shape key this file is ('' when there are none, or for
+        # the plain-file key '_'). SF geometry export puts it on the .mesh name: each key's nif
+        # is its own geometry.
+        self.file_key = file_key_suffix(sk)
+        # A Starfield facebones armature with no face bones -- a crowd head's -- writes the
+        # companion as vanilla crowds ship it: the same nif again, on the same .mesh.
+        self.sf_companion_copy = (
+            suffix == '_faceBones' and self.game == 'SF' and self.facebones is not None
+            and not BD.is_facebones(self.facebones.data.bones.keys()))
+        # Queued external .mesh/.mat writes are per-file; the base nif's are already on disk.
+        self._sf_meshes = []
+        self._sf_materials = []
+        # Output paths already claimed by a shape in THIS file, so a second shape landing on one
+        # gets suffixed and warned about instead of silently overwriting it.
+        self._sf_mesh_names = {}
+        self._sf_morph_paths = {}
+
+        if self.objects:
+            shape = next(iter(self.objects))
+        else:
+            shape = self.armature
+
+        rt = "NiNode"
+        rn = "Scene Root"
+        if self.root_object:
+            rt = self.root_object.get("pynBlockName", "NiNode")
+            rn = BD.name_from_root(self.root_object)
+        
+        self.nif.initialize(self.game, fpath, rt, rn)
+        if self.root_object:
+            self.objs_written.add_pair(self.root_object, self.nif.rootNode) 
+            if "pynNodeFlags" in self.root_object:
+                try:
+                    self.nif.rootNode.flags = NiAVFlags.parse(self.root_object["pynNodeFlags"]).value
+                except Exception as e:
+                    log.warning(f"Error setting pynNodeFlags for root object {self.root_object.name}: pynNodeFlags={self.root_object['pynNodeFlags']}")
+
+        if suffix == '_faceBones' and self.game != 'SF':
+            # FO4/FO76 rename face bones through fo4FaceDict. Starfield's facebones keep their
+            # authored 'faceBone_*' names, so leave the dictionary alone.
+            self.nif.dict = fo4FaceDict
+
+        self.nif.dict.use_niftools = self.settings.rename_bones_niftools
+        self.writtenbones = {}
+
+        if self.objects:
+            for obj in self.objects:
+                if suffix == "_faceBones" and self.facebones:
+                    # Have exporting the facebones variant and have a facebones armature
+                    self.export_shape(obj, sk, self.facebones)
+                elif (not suffix) and self.armature:
+                    # Exporting the main file and have an armature to do it with. 
+                    self.export_shape(obj, sk, self.armature)
+                elif (not suffix) and self.facebones:
+                    # Exporting the main file and have a facebones armature to do it
+                    # with. Facebones armatures generally have all the necessary bones
+                    # for export, so it's fine to use them.
+                    self.export_shape(obj, sk, self.facebones)
+                elif (not self.facebones) and (not self.armature):
+                    # No armatures, just export the shape.
+                    self.export_shape(obj, sk)
+        elif self.armature:
+            # Just export the skeleton
+            self.export_armature(self.armature)
+
+        if self.settings.export_all_bones and self.objects and self.armature:
+            # export_armature already writes every bone on the skeleton-only path.
+            self.write_all_bones(self.armature)
+
+        # Make sure any grouping nodes get exported, even if they're empty.
+        for obj in self.grouping_nodes:
+            if 'pynRoot' not in obj and not self.objs_written.find_blend(obj):
+                par = None
+                if obj.parent:
+                    par = self.objs_written.find_blend(obj.parent)
+                self.export_node(obj, par)
+
+        # Check for bodytri morphs--write the extra data node if needed
+        if self.settings.write_bodytri \
+                and BD.game_traits(self.game).bodytri_extra_data \
+                and len(self.trip.shapes) > 0 \
+                and  not self.bodytri_written:
+            from ..pyn.pynifly import NiStringExtraData
+            NiStringExtraData.New(self.nif, name='BODYTRI', 
+                                  string_value=truncate_filename(self.trippath, "meshes"),
+                                  parent=self.nif.root)
+
+        self._export_bstreenode_bones()
+        self._reorder_switch_children()
+        if self.root_object:
+            collision.CollisionHandler.export_collisions(self, self.root_object)
+        self.export_extra_data()
+        self.connect_points.export_all(self.nif, BD.asset_path)
+        if self.settings.export_animations:
+            controller.ControllerHandler.export_named_animations(self, self.objs_written)
+            if self.armature or self.facebones:
+                controller.ControllerHandler.export_animated_armature(
+                    self, self.armature or self.facebones)
+            # Child nodes get their animation exported as they're created; the root
+            # node isn't created on that path, so its own animation needs exporting
+            # here or it's silently dropped. (The vanilla FO4 workbenches animate
+            # from their root node.)
+            if self.root_object:
+                root_repr = self.objs_written.find_blend(self.root_object)
+                if root_repr:
+                    controller.ControllerHandler.export_animated_obj(self, root_repr)
+
+        self.nif.save()
+        if self.game == 'SF':
+            from . import sf_geometry
+            sf_geometry.write_sf_meshes(self)
+            if getattr(self.settings, 'write_sf_materials', False):
+                sf_geometry.write_sf_materials(self)
+        self._fo4_write_ssf()
+        msgs = list(filter(lambda x: not x.startswith('Info: Loaded skeleton') and len(x)>0, 
+                            self.nif.message_log().split('\n')))
+        if msgs:
+            self.message_log.append(self.nif.message_log())
+
+
+    def export_file_set(self, suffix=''):
+        """ 
+        Create a set of nif files from the target objects, using the given armature and
+        appending the suffix. One file is created per shape key with the shape key used as
+        suffix. Associated TRIP files are exported if there is TRIP info.
+                
+        * suffix = suffix to append to the filenames, after the shape key suffix. Empty
+          string for regular nifs, non-empty for facebones nifs
+        * self.objects = Objects to export
+        """
+        if self.file_keys is None or len(self.file_keys) == 0:
+            shape_keys = ['']
+        else:
+            shape_keys = self.file_keys
+
+        # One TRIP file and one OSD file are written even if we have variants
+        # of the mesh ("_" prefix)
+        fname_ext = os.path.splitext(os.path.basename(self.filepath))
+        self.trip = TripFile()
+        self.osd = None
+        self.osdpath = None
+        if 'PYNIFLY_DEV_ROOT' in os.environ:
+            from ..osd.osdfile import OSDFile
+            self.osd = OSDFile()
+            self.osdpath = os.path.join(os.path.dirname(self.filepath), fname_ext[0]) + ".osd"
+        self.trippath = os.path.join(os.path.dirname(self.filepath), fname_ext[0]) + ".tri"
+
+        for sk in shape_keys:
+            fbasename = fname_ext[0] + file_key_suffix(sk) + suffix
+            fnamefull = fbasename + fname_ext[1]
+            fpath = os.path.join(os.path.dirname(self.filepath), fnamefull)
+
+            self.export_nif(fpath, suffix, sk)
+
+        if len(self.trip.shapes) > 0:
+            self.trip.write(self.trippath)
+            log.info(f"Wrote {self.trippath}")
+        if self.osd is not None and len(self.osd.shapes) > 0:
+            self.osd.write(self.osdpath)
+            log.info(f"Wrote {self.osdpath}")
+
+
+    def execute(self):
+        if not self.objects and not self.armature:
+            self.warn("No objects selected for export", tags=["NOTHING"])
+            return
+
+        log.info(str(self))
+        pynifly.NifFile.clear_log()
+
+        # BD.game_rotations is a module-level global that get_bone_xform reads to
+        # decide whether to apply the pretty-bone Rx rotation. The import path
+        # stamps it based on rotate_bones_pretty; export must do the same so that
+        # bone rotations written to the nif match the bones in Blender, regardless
+        # of whatever the most recent import in this session left behind.
+        saved_game_rotations = BD.game_rotations
+        BD.game_rotations = (BD.game_rotations_pretty
+                             if self.settings.rotate_bones_pretty
+                             else BD.game_rotations_none)
+        try:
+            self.export_file_set('')
+            if self.facebones:
+                self.export_file_set('_faceBones')
+        finally:
+            BD.game_rotations = saved_game_rotations
+        msgs = list(filter(lambda x: not x.startswith('Info: Loaded skeleton') and len(x)>0, 
+                           pynifly.NifFile.message_log().split('\n')))
+        if msgs:
+            log.debug("Nifly Message Log:\n" + pynifly.NifFile.message_log())
+    
+    def export(self, objects):
+        self.set_objects(objects)
+        self.execute()
+
+    @classmethod
+    def do_export(cls, filepath, game, objects, scale=1.0):
+        return NifExporter(filepath, game, scale=scale).export(objects)
+
+
+def export_report(exporter, max_error):
+    """What to tell the user when an export is done, as [(level, message)]: the particular
+    problems the exporter found, or, with none, an overall result from the worst level
+    logged (max_error)."""
+    out = []
+    if len(exporter.objs_unweighted) > 0:
+        out.append(('ERROR', f"The following objects have unweighted vertices.See the '*UNWEIGHTED*' vertex group to find them: \n{exporter.objs_unweighted}"))
+    if len(exporter.objs_scale) > 0:
+        out.append(('ERROR', f"The following objects have non-uniform scale, which nifs do not support. Scale applied to verts before export.\n{exporter.objs_scale}"))
+    if len(exporter.objs_mult_part) > 0:
+        out.append(('WARNING', f"Some faces have been assigned to more than one partition, which should never happen.\n{exporter.objs_mult_part}"))
+    if len(exporter.objs_no_part) > 0:
+        out.append(('WARNING', f"Some faces have been assigned to no partition, which should not happen for skinned body parts.\n{exporter.objs_no_part}"))
+    if len(exporter.arma_game) > 0:
+        out.append(('WARNING', f"The armature appears to be designed for a different game--check that it's correct\nArmature: {exporter.arma_game}, game: {exporter.game}"))
+    if 'NOTHING' in exporter.warnings:
+        out.append(('WARNING', "No mesh selected; nothing to export"))
+    if 'WARNING' in exporter.warnings:
+        out.append(('WARNING', "Export completed with warnings. Check the console window."))
+    if not out:
+        if max_error <= logging.INFO:
+            out.append(('INFO', "Export successful"))
+        elif max_error <= logging.WARNING:
+            out.append(('WARNING', "Export completed with warnings"))
+        else:
+            out.append(('ERROR', "Export completed with errors, see console window for details"))
+    return out
+
+
+def get_default_scale():
+    return 1.0
+
+
+def current_active_object(context):
+    """
+    Determine the object to use as the active object. Only use blender's active object if
+    it is also selected. It's too confusing to be working on an unselected object. If
+    there's no active object choose the first selected object.
+    """
+    if context.object and context.object.select_get():
+        return context.object
+    if context.selected_objects:
+        return context.selected_objects[0]
+    return None
+
+    
+def get_default_game_target(context):
+    """Look at currently selected objects to determine game target."""
+    g = "SKYRIM"
+    obj = current_active_object(context)
+    if PYN_GAME_PROP in obj:
+        g = obj[PYN_GAME_PROP]
+    else:
+        selected_armatures = [a for a in context.selected_objects if a.type == 'ARMATURE']
+        if selected_armatures:
+            g = BD.best_game_fit(selected_armatures[0].data.bones)
+    return g
+    
+
+class ExportNIF(bpy.types.Operator, ExportHelper):
+    """Export Blender object(s) to a NIF File"""
+
+    bl_idname = "export_scene.pynifly"
+    bl_label = 'Export NIF (Nifly)'
+    bl_options = {'PRESET'}
+
+    filename_ext = ".nif"
+
+    # For the user. Set target game. Default value will be our best guess.
+    target_game: bpy.props.EnumProperty(
+            name="Target Game",
+            items=(('SKYRIM', "Skyrim", ""),
+                   ('SKYRIMSE', "Skyrim SE", ""),
+                   ('FO4', "Fallout 4", ""),
+                   ('FO76', "Fallout 76", ""),
+                   ('FONV', "Fallout New Vegas", ""),
+                   ('FO3', "Fallout 3", ""),
+                   ('SF', "Starfield", ""),
+                   ),
+            ) # type: ignore
+    
+    blender_xf: bpy.props.BoolProperty(
+        name="Use Blender orientation",
+        description="Use Blender's orientation and scale.",
+        default=ExportSettings.__dataclass_fields__["blender_xf"].default
+        ) # type: ignore
+    
+    rename_bones: bpy.props.BoolProperty(
+        name="Rename Bones",
+        description="Rename bones from Blender conventions back to nif.",
+        default=ExportSettings.__dataclass_fields__["rename_bones"].default) # type: ignore
+
+    rotate_bones_pretty: bpy.props.BoolProperty(
+        name="Orient bones along limb",
+        description="Set to match how the skeleton was imported: bones aligned along "
+                    "limb (head to tail) for display. No effect on the exported result.",
+        default=ExportSettings.__dataclass_fields__["rotate_bones_pretty"].default) # type: ignore
+
+    rename_bones_niftools: bpy.props.BoolProperty(
+        name="Rename Bones as per NifTools",
+        description="Rename bones from NifTools' Blender conventions back to nif.",
+        default=ExportSettings.__dataclass_fields__["rename_bones_niftools"].default) # type: ignore
+
+    preserve_hierarchy: bpy.props.BoolProperty(
+        name="Preserve Bone Hierarchy",
+        description="Preserve bone hierarchy in exported nif.",
+        default=ExportSettings.__dataclass_fields__["preserve_hierarchy"].default) # type: ignore
+
+    export_all_bones: bpy.props.BoolProperty(
+        name="Export All Bones",
+        description="Write every bone in the armature, not just the ones a shape is skinned to. Needed by nifs that carry their own skeleton and use bones as attachment points.",
+        default=ExportSettings.__dataclass_fields__["export_all_bones"].default) # type: ignore
+
+    write_bodytri: bpy.props.BoolProperty(
+        name="Export BODYTRI Extra Data",
+        description="Write an extra data node pointing to the BODYTRI file, if there are any bodytri shape keys. Not needed if exporting for Bodyslide, because they write their own.",
+        default=ExportSettings.__dataclass_fields__["write_bodytri"].default) # type: ignore
+
+    export_pose: bpy.props.BoolProperty(
+        name="Export pose position",
+        description="Export bones in pose position.",
+        default=ExportSettings.__dataclass_fields__["export_pose"].default) # type: ignore
+    
+    export_modifiers: bpy.props.BoolProperty(
+        name="Export modifiers",
+        description="Export all active modifiers (including shape keys)",
+        default=ExportSettings.__dataclass_fields__["export_modifiers"].default) # type: ignore
+
+    export_animations: bpy.props.BoolProperty(
+        name="Export animations",
+        description="Export animations embedded in the nif file",
+        default=ExportSettings.__dataclass_fields__["export_animations"].default) # type: ignore
+
+    export_colors: bpy.props.BoolProperty(
+        name="Export vertex color/alpha",
+        description="Use vertex color attributes as vertex color",
+        default=ExportSettings.__dataclass_fields__["export_colors"].default) # type: ignore
+
+    write_sf_materials: bpy.props.BoolProperty(
+        name="Write Starfield .mat files",
+        description="For Starfield exports, write a loose .mat for each material, recovered from "
+                    "its shader graph. Off by default (may overwrite a source .mat when exporting "
+                    "in place)",
+        default=ExportSettings.__dataclass_fields__["write_sf_materials"].default) # type: ignore
+
+    write_tris: bpy.props.BoolProperty(
+        name="Export morphs/tri files",
+        description="Write shape-key morphs alongside the nif: FO4/Skyrim expression + chargen .tri "
+                    "files, Starfield chargen/performance morph.dat files. Off to skip morph export",
+        default=ExportSettings.__dataclass_fields__["write_tris"].default) # type: ignore
+
+    export_recenter_half_precision: bpy.props.BoolProperty(
+        name="Recenter half precision vertices",
+        description="For FO4 skinned meshes, keep half precision but store vertices "
+                    "near the bodypart origin and preserve placement in the shape transform",
+        default=ExportSettings.__dataclass_fields__["export_recenter_half_precision"].default) # type: ignore
+
+    export_full_precision: bpy.props.BoolProperty(
+        name="Full precision vertices",
+        description="Store vertices at full 32-bit precision instead of packed "
+                    "16-bit half floats. Sets the shape's hasFullPrecision flag; "
+                    "clearing removes it. FO4 only",
+        default=ExportSettings.__dataclass_fields__["export_full_precision"].default) # type: ignore
+
+    chargen_ext: bpy.props.StringProperty(
+        name="Chargen extension",
+        description="Extension to use for chargen files (not including file extension).",
+        default=ExportSettings.__dataclass_fields__["chargen_extension"].default) # type: ignore
+
+    # For debugging. If True, try to set defaults from the current selection, just as they
+    # would be set for the user. If False, use whatever was passed in or the addon defaults. 
+    intuit_defaults: bpy.props.BoolProperty(
+        name="Intuit Defaults",
+        description="Get defaults from current selection",
+        default=True,
+        options={'HIDDEN'},
+    ) # type: ignore
+
+
+    def _discover_game(self, objlist):
+        """
+        Given objects being exported, return any game they specify. Saves the
+        armatures it finds in self.armatures.
+        """
+        # Walk through objlist plus the descendants of any EMPTY in it so that
+        # selecting just a pynRoot still surfaces the armatures used by its
+        # children's modifiers.
+        def expand(objs):
+            seen = set()
+            stack = list(objs)
+            while stack:
+                o = stack.pop()
+                if o is None or o.name in seen:
+                    continue
+                seen.add(o.name)
+                yield o
+                if o.type == 'EMPTY':
+                    stack.extend(o.children)
+        expanded = list(expand(objlist))
+
+        self.armatures = []
+        # Prefer the game specified by a selected armature.
+        for obj in expanded:
+            if obj.type == 'ARMATURE':
+                if obj not in self.armatures:
+                    self.armatures.append(obj)
+                g = obj.get(PYN_GAME_PROP, "")
+                if g:
+                    return g
+
+        # Then look for armatures controlling an object being exported.
+        for obj in expanded:
+            for m in obj.modifiers:
+                if m.type == 'ARMATURE' and m.object:
+                    if m.object not in self.armatures:
+                        self.armatures.append(m.object)
+                    g = m.object.get(PYN_GAME_PROP, "")
+                    if g:
+                        return g
+
+        # Then look for a game specified by the object.
+        for obj in expanded:
+            g = obj.get(PYN_GAME_PROP, "")
+            if g:
+                return g
+            
+        # Finally, if there are armatures but none specify a game, make a best guess based on the bones.
+        for arma in self.armatures:
+            g = BD.best_game_fit(arma.data.bones)
+            if g:
+                return g
+
+        return 'SKYRIM'
+    
+
+    def _exported_meshes(self):
+        """
+        Mesh objects reachable from the export selection, expanding through the
+        children of any selected EMPTY (e.g. a pynRoot) so selecting just a root
+        still finds its shapes.
+        """
+        seen = set()
+        result = []
+        stack = list(self.objects_to_export)
+        while stack:
+            o = stack.pop()
+            if o is None or o.name in seen:
+                continue
+            seen.add(o.name)
+            if o.type == 'MESH':
+                result.append(o)
+            elif o.type == 'EMPTY':
+                stack.extend(o.children)
+        return result
+
+
+    def _discover_settings(self):
+        """
+        Given objects being exported, set any settings they specify.
+        """
+        try:
+            prefs = bpy.context.preferences.addons[base_package].preferences
+        except KeyError:
+            prefs = ExportSettings()
+
+        obj = self.objects_to_export[0]
+        lst = [o for o in self.objects_to_export if "pynRoot" in o]
+        # Selecting a child shape: walk up to its nif root so its sticky settings apply.
+        # export_shape resolves the write-side anchor with the same helper.
+        from . import pyn_props as _pp
+        obj_root = lst[0] if lst else _pp.find_settings_root(obj)
+
+        # `_discover_game` (called just before this) populates self.armatures via
+        # expansion through EMPTY children, so use that list — self.export_armature
+        # is set later, after this method runs.
+        armatures = self.armatures or []
+        first_arma = armatures[0] if armatures else None
+
+        # Sticky export settings live in typed groups (root + armature). read_export_settings
+        # returns only fields the user has explicitly set (migrating legacy PYN_* props first);
+        # anything unset falls back to the addon preference / dataclass default below. This runs
+        # only when intuit_defaults is True (dialog seeding, or an intuiting programmatic call); a
+        # caller wanting its kwargs honored over everything passes intuit_defaults=False, which
+        # skips this method entirely.
+        from . import pyn_props
+        dfld = ExportSettings.__dataclass_fields__
+        sticky = pyn_props.read_export_settings(obj_root, first_arma)
+        self.blender_xf = sticky.get('blender_xf', prefs.blender_xf)
+        self.rename_bones = sticky.get('rename_bones', prefs.rename_bones)
+        self.rename_bones_niftools = sticky.get('rename_bones_niftools', prefs.rename_bones_niftools)
+        # The armature records how its bones were actually built, and that recorded
+        # value -- not this setting -- is what the animation export reads (see
+        # controller.py's use of PYN_ROTATE_BONES_PRETTY_PROP). Seed the dialog from
+        # it so the user sees what will actually happen instead of a preference the
+        # data may contradict. They can still override it in the dialog.
+        if first_arma is not None and PYN_ROTATE_BONES_PRETTY_PROP in first_arma:
+            self.rotate_bones_pretty = first_arma[PYN_ROTATE_BONES_PRETTY_PROP]
+        else:
+            self.rotate_bones_pretty = sticky.get('rotate_bones_pretty',
+                                                  prefs.rotate_bones_pretty)
+        self.write_bodytri = sticky.get('write_bodytri', prefs.write_bodytri)
+        self.preserve_hierarchy = sticky.get('preserve_hierarchy', dfld["preserve_hierarchy"].default)
+        self.export_all_bones = sticky.get('export_all_bones', dfld["export_all_bones"].default)
+        self.export_pose = sticky.get('export_pose', dfld["export_pose"].default)
+        self.chargen_ext = sticky.get('chargen_extension', dfld["chargen_extension"].default)
+        # These weren't sticky before; consolidating makes them so (keep operator default if unset).
+        self.export_modifiers = sticky.get('export_modifiers', self.export_modifiers)
+        self.export_animations = sticky.get('export_animations', self.export_animations)
+        self.export_colors = sticky.get('export_colors', self.export_colors)
+        self.export_recenter_half_precision = sticky.get(
+            'export_recenter_half_precision', self.export_recenter_half_precision)
+        self.export_full_precision = sticky.get('export_full_precision', self.export_full_precision)
+        self.write_sf_materials = sticky.get('write_sf_materials', self.write_sf_materials)
+        self.write_tris = sticky.get('write_tris', self.write_tris)
+
+
+    def __str__(self):
+        return (f"ExportNIF(game={self.target_game}, "
+                f"blender_xf={self.blender_xf}, "
+                f"rename_bones={self.rename_bones}, "
+                f"rename_bones_niftools={self.rename_bones_niftools}, "
+                f"rotate_bones_pretty={self.rotate_bones_pretty}, "
+                f"preserve_hierarchy={self.preserve_hierarchy}, "
+                f"export_all_bones={self.export_all_bones}, "
+                f"write_bodytri={self.write_bodytri}, "
+                f"export_pose={self.export_pose}, "
+                f"export_modifiers={self.export_modifiers}, "
+                f"export_animations={self.export_animations}, "
+                f"export_colors={self.export_colors}, "
+                f"export_full_precision={self.export_full_precision}, "
+                f"chargen_ext='{self.chargen_ext}', "
+                f"intuit_defaults={self.intuit_defaults})")
+    
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.log_handler = None
+        self.objects_to_export = with_nif_roots(bpy.context.selected_objects)
+        self.armatures = None
+        self.export_armature = None
+        self.settings_from_ui = False
+
+        if not self.objects_to_export:
+            self.report({"ERROR"}, "No objects selected for export")
+            return {'CANCELLED'}
+
+
+    @classmethod
+    def poll(cls, context):
+        if not pynifly.nifly_path:
+            log.error("pyNifly DLL not found--pyNifly disabled")
+            return False
+
+        if len(context.selected_objects) == 0:
+            log.error("Must select an object to export")
+            return False
+
+        if context.object.mode != 'OBJECT':
+            log.error("Must be in Object Mode to export")
+            return False
+
+        return True
+
+
+    def invoke(self, context, event):
+        """
+        Set up default flags for the UI. Override the addon defaults with any settings
+        on the objects being exported.
+        """
+        self.settings_from_ui = True
+
+        # The export file name comes from the exported root node if there is one,
+        # else the active object. (Previously the whole last-export path, file name
+        # included, was reused from one export to the next.) The directory is still
+        # seeded from the last export for convenience.
+        roots = [o for o in self.objects_to_export if "pynRoot" in o]
+        name_obj = roots[0] if roots else (context.object or self.objects_to_export[0])
+        last = context.window_manager.pynifly_last_export_path_nif
+        export_dir = os.path.dirname(last) if last else os.path.dirname(self.filepath)
+        self.filepath = os.path.join(export_dir,
+                                     clean_filename(name_obj.name) + self.filename_ext)
+
+        self.intuit_defaults = False
+        self.target_game = self._discover_game(self.objects_to_export)
+
+        self._discover_settings()
+
+        # Seed the full-precision checkbox from the shapes being exported so the
+        # dialog reflects their current hasFullPrecision property.
+        self.export_full_precision = any(
+            m.get('hasFullPrecision') for m in self._exported_meshes())
+
+        return super().invoke(context, event)
+
+
+    def execute(self, context):
+        res = set()
+        selected_objs = context.selected_objects
+        active_obj = context.object
+        initial_frame = context.scene.frame_current
+
+        if not self.poll(context):
+            self.report({"ERROR"}, "Cannot run exporter--see system console for details")
+            return {'CANCELLED'} 
+
+        if len(self.objects_to_export) == 0:
+            self.report({"ERROR"}, "No objects selected for export")
+            return {'CANCELLED'}
+
+        self.log_handler = BD.LogHandler.New(bl_info, "EXPORT", "NIF")
+        # Library is automatically loaded when pynifly is imported
+
+        if self.intuit_defaults:
+            self.target_game = self._discover_game(self.objects_to_export)
+            self._discover_settings()
+
+        self.export_armature = self.armatures[0] if self.armatures else None
+
+        # When the export settings are authoritative (they came from the dialog
+        # or an explicit call with intuit_defaults=False), push the full-precision
+        # choice onto the exported shapes' hasFullPrecision property so it drives
+        # export and persists. Clearing the option removes the property. Otherwise
+        # leave any existing property untouched so it round-trips as before.
+        if not self.intuit_defaults:
+            for m in self._exported_meshes():
+                if self.export_full_precision:
+                    m['hasFullPrecision'] = 1
+                elif 'hasFullPrecision' in m:
+                    del m['hasFullPrecision']
+
+        try:
+            context.scene.frame_set(1)
+            exporter = NifExporter(self.filepath, 
+                                   self.target_game, 
+                                   chargen=self.chargen_ext)
+
+            exporter.context = context
+            exporter.settings = self
+            if self.export_animations and not hasattr(bpy.types, 'ActionSlot'):
+                log.warning(f"pyNifly animation export not supported in Blender version {bpy.app.version_string}")
+                exporter.settings.export_animations = False
+            if self.blender_xf:
+                exporter.export_xf = BD.blender_export_xf
+            exporter.export(self.objects_to_export)
+            if (msg := wrong_game_folder_warning(self.filepath, self.target_game)):
+                log.warning(msg)
+                self.report({'WARNING'}, msg)
+
+            for level, msg in export_report(exporter, self.log_handler.max_error):
+                self.report({level}, msg)
+            
+        except ShapeTooBigError as e:
+            log.error(str(e))
+            self.report({"ERROR"}, str(e))
+            res.add("CANCELLED")
+        except Exception:
+            self.log_handler.log.exception("Export of nif failed")
+            self.report({"ERROR"}, "Export of nif failed, see console window for details")
+            res.add("CANCELLED")
+
+        self.log_handler.finish("EXPORT", self.objects_to_export)
+        context.scene.frame_set(initial_frame)
+        ObjectSelect(selected_objs)
+        ObjectActive(active_obj)
+
+        # Save the directory path for next time
+        wm = context.window_manager
+        wm.pynifly_last_export_path_nif = self.filepath
+
+        return res.intersection({'CANCELLED', 'FINISHED'})

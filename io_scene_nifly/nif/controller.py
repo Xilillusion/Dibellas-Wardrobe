@@ -1,0 +1,2972 @@
+"""Handles import/export of controller nodes."""
+# Copyright © 2024, Bad Dog.
+
+# TODO: Make sure flags on mesh allow animations
+
+import os
+from pathlib import Path
+import logging
+import math
+from dataclasses import dataclass
+from collections.abc import Iterator
+from types import SimpleNamespace
+import bpy
+import bpy.props 
+from mathutils import Matrix, Vector, Quaternion, Euler, geometry
+from ..pyn.pynifly import *
+from .. import blender_defs as BD
+from ..util.reprobj import ReprObject, ReprObjectCollection
+from ..util.settings import PYN_ROTATE_BONES_PRETTY_PROP
+import re
+import json
+
+
+ANIMATION_NAME_MARKER = "ANIM"
+ANIMATION_NAME_SEP = "|"
+KFP_HANDLE_OFFSET = 10
+
+# Animations come in at twice the speed. Not sure why. Apply an adjustment factor.
+ANIMATION_TIME_ADJUST = 1
+
+
+shader_nodes = {
+    "Fallout 4 MTS": "Lighting",
+    "Fallout 4 Effect": "Effect",
+    "SkyrimShader:Effect": "Effect",
+    "SkyrimShader:Default": "Lighting",
+}
+
+def _shader_game(nodename):
+    if nodename.startswith("Fallout") or nodename.startswith('FO4'):
+        return 'FO4'
+    else:
+        return 'SKYRIM'
+    
+
+def _determine_shader_name(game, shader_type):
+    for k, n in shader_nodes.items():
+        if n == shader_type:
+            if _shader_game(k) == game:
+                return k
+    return None
+
+
+class ControlledVariable:
+    def __init__(self, var_list):
+        self.variables = var_list
+
+    def blend_find(self, node, socket, shader_type=None):
+        """Find the right controlled variable given blender shader node and socket."""
+        for n, s, d, t, v in self.variables:
+            if n == node and s == socket:
+                # If we were not given a shader type take any match. If the match isn't
+                # for a shader, take it. If it is for a shader, has to match on the shader
+                # type.
+                if (not shader_type) or (
+                    not (t.__name__.startswith("BSEffect") or t.__name__.startswith("BSLighting"))
+                    ) or (t.__name__[0:8] == shader_type[0:8]):
+                    return t, v
+        return None, None
+    
+    def nif_find(self, game, ctltype, varid):
+        """Find the right shader node and socket given a nif controller target."""
+        for n, s, d, t, v in self.variables:
+            if t == ctltype and varid == v:
+                for nodename, nodetype in shader_nodes.items():
+                    if nodetype == n:
+                        if game == 'FO4' and 'Skyrim' not in nodename:
+                            return nodename, s, d
+                        if BD.game_traits(game).skyrim and 'Skyrim' in nodename:
+                            return nodename, s, d
+                return n, s, d
+        return None, None, None
+        
+
+controlled_vars = ControlledVariable([
+    ("AlphaProperty", "Alpha Threshold", "inputs", BSNiAlphaPropertyTestRefController, 0),
+    ("Effect", "Alpha Adjust", "inputs", BSEffectShaderPropertyFloatController, EffectShaderControlledVariable.Alpha_Transparency),
+    ("Effect", "Emission Strength", "inputs", BSEffectShaderPropertyFloatController, EffectShaderControlledVariable.Emissive_Multiple),
+    ("Effect", "Emission Strength", "inputs", BSEffectShaderPropertyFloatController, EffectShaderControlledVariable.Falloff_Start_Angle),
+    ("Effect", "Emission Strength", "inputs", BSEffectShaderPropertyFloatController, EffectShaderControlledVariable.Falloff_Start_Opacity),
+    ("Effect", "Emission Strength", "inputs", BSEffectShaderPropertyFloatController, EffectShaderControlledVariable.Falloff_Stop_Angle),
+    ("Effect", "Emission Strength", "inputs", BSEffectShaderPropertyFloatController, EffectShaderControlledVariable.Falloff_Stop_Opacity),
+    ("Fallout 4 MTS - Greyscale To Palette Vector", "Palette", "inputs", BSEffectShaderPropertyColorController, EffectShaderControlledColor.EMISSIVE),
+    ("Lighting", "Alpha Mult", "inputs", BSLightingShaderPropertyFloatController, LightingShaderControlledVariable.Alpha),
+    ("Lighting", "Emission Color", "inputs", BSLightingShaderPropertyColorController, LightingShaderControlledColor.EMISSIVE),
+    ("Lighting", "Emission Strength", "inputs", BSLightingShaderPropertyFloatController, LightingShaderControlledVariable.Emissive_Multiple),
+    ("Lighting", "Glossiness", "inputs", BSLightingShaderPropertyFloatController, LightingShaderControlledVariable.Glossiness),
+    ("Lighting", "Specular Color", "inputs", BSLightingShaderPropertyColorController, LightingShaderControlledColor.SPECULAR),
+    ("Lighting", "Specular Str", "inputs", BSLightingShaderPropertyFloatController, LightingShaderControlledVariable.Specular_Strength),
+    ("UV_Converter", "Offset U", "inputs", BSEffectShaderPropertyFloatController, EffectShaderControlledVariable.U_Offset),
+    ("UV_Converter", "Offset U", "inputs", BSLightingShaderPropertyFloatController, LightingShaderControlledVariable.U_Offset),
+    ("UV_Converter", "Offset V", "inputs", BSEffectShaderPropertyFloatController, EffectShaderControlledVariable.V_Offset),
+    ("UV_Converter", "Offset V", "inputs", BSLightingShaderPropertyFloatController, LightingShaderControlledVariable.V_Offset),
+    ("UV_Converter", "Scale U", "inputs", BSEffectShaderPropertyFloatController, EffectShaderControlledVariable.U_Scale),
+    ("UV_Converter", "Scale U", "inputs", BSLightingShaderPropertyFloatController, LightingShaderControlledVariable.U_Scale),
+    ("UV_Converter", "Scale V", "inputs", BSEffectShaderPropertyFloatController, EffectShaderControlledVariable.V_Scale),
+    ("UV_Converter", "Scale V", "inputs", BSLightingShaderPropertyFloatController, LightingShaderControlledVariable.V_Scale),
+    # ("Alpha Threshold", "0", "outputs", BSNiAlphaPropertyTestRefController, EffectShaderControlledVariable.Alpha_Transparency),
+])
+
+active_animation = ""
+
+_animation_pulldown_items = []
+
+
+def sanitize_name(name:str):
+    return name.replace(ANIMATION_NAME_SEP, ANIMATION_NAME_SEP*2)
+
+
+def desanitize_name(name:str):
+    return name.replace(ANIMATION_NAME_SEP*2, ANIMATION_NAME_SEP)
+
+
+def make_action_name(animation_name=None, target_obj=None, target_elem=None):
+    """
+    Build an animation name suitable for applying to an action.
+    """
+    if animation_name:
+        return animation_name
+    elif target_obj is not None:
+        return target_obj.name
+    else:
+        return "Animation"
+
+
+def current_animations(nif, refobjs:ReprObjectCollection):
+    """
+    Find all exportable animations for objects in refobjs.
+    Returns a dictionary: {animation_name: [Animation], ...}
+    """
+    matches = {}
+    for act in bpy.data.actions: 
+        animdesc = None
+        for s in act.slots:
+            for u in s.users():
+                t = (u in refobjs.blenderdict)
+                t = t or (u.active_material and u.active_material.node_tree)
+                if t:
+                    animdesc = analyze_animation(act, s, bpy.context.scene, animdesc)
+                    if act.name not in matches:
+                        matches[act.name] = []
+                    matches[act.name].append(s)
+
+    return matches
+
+
+def _animations_for_pulldown(self, context):
+    """Find all animations and return them in a form suitable for a Blender pulldown."""
+    _animation_pulldown_items = []
+    found_names = set()
+    for act in all_named_animations(ReprObjectCollection.New(bpy.context.scene.objects)):
+        found_names.add(act.name)
+
+    for f in sorted(found_names):
+        _animation_pulldown_items.append((f, f, "Animation"), )
+
+    return _animation_pulldown_items
+
+
+def apply_action(act):
+    """Make the given action active in the scene."""
+    for s in act.slots:
+        if s.target_id_type == 'OBJECT':
+            objname = s.name_display
+            obj = bpy.context.scene.objects.get(objname)
+            if obj:
+                if not obj.animation_data:
+                    obj.animation_data_delete()
+                    obj.animation_data_create()
+                obj.animation_data.action = act
+                obj.animation_data.action_slot = s
+    bpy.context.scene.frame_start = int(act.frame_start)
+    bpy.context.scene.frame_end = int(act.frame_end)
+
+
+@dataclass
+class AnimationData:
+    name: str = ""
+    action = None
+    slot = None
+    target_obj = None
+    target_elem = None
+    start_time: float = 10000.0
+    stop_time: float = -10000.0
+    start_frame: int = 10000
+    stop_frame: int = -10000
+    cycle_type: CycleType = CycleType.LOOP
+    frequency: float = 1.0
+    markers: dict = None
+
+
+def all_actions():
+    """Iterator returning all actions and slots."""
+    for act in bpy.data.actions:
+        for slot in act.slots:
+            yield act, slot
+
+
+def all_obj_animations(export_objs:ReprObjectCollection):
+    """Iterator returning quads: (action, slot, target_obj, target_elem)"""
+    for act in bpy.data.actions:
+        for slot in act.slots:
+            targ = elem = None
+            if slot.target_id_type == 'NODETREE':
+                # Have to search for the object material that references this slot.
+                for reprobj in export_objs:
+                    obj = reprobj.blender_obj
+                    if obj.active_material and _has_actionslots(obj.active_material.node_tree):
+                        slotrefs = _get_actionslots(obj.active_material.node_tree)
+                        for actionname, slotname in slotrefs.items():
+                            if actionname == act.name and slotname == slot.name_display:
+                                targ = reprobj
+                                elem = obj.active_material.node_tree
+                                yield act, slot, targ, elem
+            else:
+                reprobj = export_objs.blenderdict.get(slot.name_display)
+                if reprobj:
+                    targ = reprobj
+                    elem = None
+                    yield act, slot, targ, elem
+
+
+def all_named_animations(export_objs:ReprObjectCollection) -> Iterator[AnimationData]:
+    """
+    Iterator returning all actions/slots that are exportable as named animations
+    representable as controller sequences. They must have a target that is being exported
+    and has the 'pynActionSlots' property.
+    """
+    ## TODO: What if they animate something we can't export? Maybe return everything and 
+    ## let later parts of the code decide.
+
+    for act, slot, targ, elem in all_obj_animations(export_objs):
+        if act.get('pynController', '') == 'NiControllerSequence':
+            yield _animation_data(act, slot, targ, elem)
+
+
+def armature_named_animations(arma) -> Iterator[AnimationData]:
+    """
+    Named animations that animate the bones of an armature. Their target_obj is the
+    armature itself, not a ReprObject: the armature isn't a node in the nif, its bones are,
+    so all_named_animations never sees it.
+    """
+    for act in bpy.data.actions:
+        if act.get('pynController', '') != 'NiControllerSequence':
+            continue
+        for slot in act.slots:
+            if slot.target_id_type == 'OBJECT' and slot.name_display == arma.name:
+                yield _animation_data(act, slot, arma, None)
+
+
+def _animation_data(act, slot, targ, elem) -> AnimationData:
+    res = AnimationData()
+    res.name = act.name
+    res.action = act
+    res.slot = slot
+    res.target_obj = targ
+    res.target_elem = elem
+    res.start_time = (act.frame_start - 1) / bpy.context.scene.render.fps
+    res.stop_time = (act.frame_end - 1) / bpy.context.scene.render.fps
+    res.start_frame = act.frame_start
+    res.stop_frame = act.frame_end
+    res.cycle_type = CycleType.LOOP if act.use_cyclic else CycleType.CLAMP
+
+    res.markers = {}
+    for m in act.pose_markers:
+        res.markers[m.name] = (m.frame - 1) / bpy.context.scene.render.fps
+    return res
+
+
+def apply_animation(anim_name, myscene):
+    """
+    Apply the named animation to the currently visible objects.
+    """
+    act = None
+    for act, slot, targobj, elem in all_obj_animations(
+            ReprObjectCollection.New(myscene.objects)):
+        if act.name == anim_name:
+            if elem:
+                targ = elem
+            else:
+                targ = targobj.blender_obj
+            targ.animation_data_clear()
+            targ.animation_data_create()
+            targ.animation_data.action = act
+            targ.animation_data.action_slot = slot
+            myscene.frame_start = math.floor(act.curve_frame_range[0])
+            myscene.frame_end = math.ceil(act.curve_frame_range[1])
+    if not act:
+        log = logging.getLogger("pynifly")
+        log.error(f"Animation not found: {anim_name}")
+
+
+def actionslot_fcurves(action, slot):
+    """Return all fcurves in the given action slot."""
+    res = []
+    for layer in action.layers:
+        for strip in layer.strips:
+            cb = strip.channelbag(slot)
+            if cb:
+                res.extend(cb.fcurves)
+    return res
+
+
+### ActionSlot recording, in one place cuz they might change.
+
+def _has_actionslots(target_obj):
+    """
+    Return TRUE if the target object has any action slots recorded in its
+    'pynActionSlots" property.
+    """
+    return target_obj.get('pynActionSlots', '') != ''
+
+
+def _add_actionslot(target_obj, fcurve):
+    """
+    Add an action slot reference to the target object's 'pynActionSlots" property.
+    """
+    # if not slot: 
+    #     log.warning(f"Tried to add action slot for action {action_name} but slot is None")
+
+    for lay in target_obj.animation_data.action.layers:
+        for strip in lay.strips:
+            for cb in strip.channelbags:
+                for c in cb.fcurves:
+                    if c == fcurve:
+                        slots = json.loads(target_obj.get('pynActionSlots', '{}'))
+                        slots[target_obj.animation_data.action.name] = cb.slot.name_display
+                        target_obj['pynActionSlots'] = json.dumps(slots)
+                        return
+
+    log.warning(
+f"fcurve not found in action {target_obj.animation_data.action.name} for {target_obj.name}")
+
+
+def _get_actionslots(target_obj):
+    """
+    Get the action slot references from the target object's 'pynActionSlots" property
+    as a dictionary {sequence name: target name}.
+    """
+    slots = json.loads(target_obj.get('pynActionSlots', '{}'))
+    return slots
+
+
+def analyze_animation(anim, slot, myscene, export_objs:ReprObjectCollection) -> AnimationData:
+    """
+    Analyze the given action and slot but do not apply it. If it's exportable as an
+    animation, return an AnimationData object. Otherwise return None.
+    """
+    res = AnimationData()
+
+    for name, robj in export_objs.blenderdict.items():
+        obj = robj.blender_obj
+        if obj.name == slot.name_display:
+            res.target_obj = robj
+            break
+        if obj.active_material and obj.active_material.node_tree:
+            if obj.active_material.node_tree.name == slot.name_display:
+                res.target_obj = robj
+                res.target_elem = obj.active_material.node_tree
+                break
+
+    res.name = anim.name
+    res.action = anim
+    res.slot = slot
+    res.start_time = (anim.frame_start - 1) / myscene.render.fps
+    res.stop_time = (anim.frame_end - 1) / myscene.render.fps
+    res.start_frame = anim.frame_start
+    res.stop_frame = anim.frame_end
+    res.cycle_type = CycleType.LOOP if anim.use_cyclic else CycleType.CLAMP
+
+    res.markers = {}
+    if "pynMarkers" in anim:
+        for name, val in anim["pynMarkers"].items():
+            res.markers[name] = val
+
+    return res
+
+
+def curve_bone_target(curve):
+    """
+    Return the curve target and type for the curve. The target is the bone name if any,
+    otherwise ''. Type is '.location', '.scale', etc.
+    """
+    # The name runs to the quote that opened it: a bone can have the other kind inside
+    # (the FO4 face rig's skin_bone_C_Adam'sApple), and Blender escapes its own kind.
+    m = re.match(r"""pose\.bones\[(["'])((?:\\.|(?!\1).)*)\1\]\.?(.*)""", curve.data_path)
+    if m:
+        return re.sub(r'\\(.)', r'\1', m.group(2)), m.group(3)
+    else:
+        return '', curve.data_path
+
+
+class ControllerHandler(BD.Warns):
+    def __init__(self, parent_handler, objlist:ReprObjectCollection=None):
+        self.action = None
+        self.action_group = ""
+        self.action_name = ""
+        self.action_name_root = ""
+        self.frame_end = 0
+        self.frame_start = 0
+        self.parent = parent_handler
+        self.path_name = None
+        self.animation_target = None
+        self.sequence_target = None  # what the current NiControllerSequence was imported onto
+        self.target_node = None  # nif node being animated, for interpolator defaults
+        self.action_target = None # 
+        self.accum_root = None
+        self.export_objs = objlist
+        self.action_slot = None
+        self.channelbag = None
+
+        # Single MultiTargetTransformController and ObjectPalette to use fo all controller
+        # sequences in a ControllerManager
+        self.controller_manager:NiControllerManager = None
+        self.multitarget_controller = None 
+        self.controller_sequence:NiControllerSequence = None
+        self.cm_obj_palette = None
+        
+        self.controlled_objects = ReprObjectCollection.New()
+        self.scene_range_set = False  # the scene range has been set by this import
+        self.start_time = sys.float_info.max
+        self.end_time = -sys.float_info.max
+
+        # Necessary context from the parent.
+        self.nif = parent_handler.nif
+        self.context:bpy.types.Context = parent_handler.context
+        self.fps = parent_handler.context.scene.render.fps
+        self.logger = logging.getLogger("pynifly")
+        self.auxbones = None
+        if hasattr(parent_handler, "auxbones"): 
+            self.auxbones = parent_handler.auxbones
+        self.nif_name = None
+        if hasattr(parent_handler, "nif_name"): 
+            self.nif_name = parent_handler.nif_name
+        self.blender_name = None
+        if hasattr(parent_handler, "blender_name"): 
+            self.blender_name = parent_handler.blender_name
+        self.objects_created = None
+        if hasattr(parent_handler, "objects_created"):
+            self.objects_created:ReprObjectCollection = parent_handler.objects_created
+        if hasattr(parent_handler, "objs_written"):
+            self.objects_created:ReprObjectCollection = parent_handler.objs_written
+
+        self.export_each_frame = False
+
+
+    def _find_target(self, nifname):
+        """
+        Find the blender object 
+        """
+        try:
+            nifnode = self.nif.nodes[nifname]
+            return self.objects_created.find_nifnode(nifnode).blender_obj
+        except (KeyError, AttributeError):
+            return None
+
+
+    def _bone_armature(self, nifname):
+        """The armature a nif node was built into as a bone, or None if it wasn't."""
+        armatures = [getattr(self.parent, 'armature', None)]
+        if self.objects_created:
+            armatures += [r.blender_obj for r in self.objects_created]
+        for arma in armatures:
+            if arma and arma.type == 'ARMATURE' and (
+                    nifname in arma.data.bones or self.blender_name(nifname) in arma.data.bones):
+                return arma
+        return None
+
+
+    def _find_nif_target(self, blendname):
+        nifname = self.nif_name(blendname)
+        if nifname in self.nif.nodes:
+            return self.nif.nodes[nifname]
+        return None
+
+
+    def _key_nif_to_blender(self, key0, key1, key2):
+        """
+        Return blender fcurve handle values for key1.
+
+        key0 and key2 may be omitted if key1 is first or last.
+        """
+        frame1 = key1.time*(self.fps * ANIMATION_TIME_ADJUST)+1
+        if key2:
+            frame2 = key2.time*(self.fps * ANIMATION_TIME_ADJUST)+1
+            frame_delt_r = (frame2 - frame1)
+            slope_right = key1.backward/frame_delt_r
+        else:
+            frame_delt_r = 1
+            slope_right = key1.backward
+
+        if key0:
+            frame0 = key0.time * (self.fps * ANIMATION_TIME_ADJUST) + 1
+            frame_delt_l = (frame1 - frame0)
+            slope_left = key1.forward/frame_delt_l
+        else:
+            frame_delt_l = 1
+            slope_left = key1.forward
+
+        partial = 1/3
+        handle_l = Vector((frame1 - frame_delt_l*partial, key1.value - slope_left*frame_delt_l*partial))
+        handle_r = Vector((frame1 + frame_delt_r*partial, key1.value + slope_right*frame_delt_r*partial))
+        
+        return handle_l, handle_r
+
+
+    def _point3key_nif_to_blender(self, key0, key1, key2, i):
+        """
+        Return blender fcurve handle values for key1.
+
+        key0 and key2 may be omitted if key1 is first or last.
+        """
+        _key0 = None
+        if key0:
+            _key0 = NiAnimKeyFloatBuf(time=key0.time,
+                                      value=key0.value[i],
+                                      forward=key0.forward[i],
+                                      backward=key0.backward[i],)
+        _key1 = None
+        if key1:
+            _key1 = NiAnimKeyFloatBuf(time=key1.time,
+                                      value=key1.value[i],
+                                      forward=key1.forward[i],
+                                      backward=key1.backward[i],)
+        _key2 = None
+        if key2:
+            _key2 = NiAnimKeyFloatBuf(time=key2.time,
+                                      value=key2.value[i],
+                                      forward=key2.forward[i],
+                                      backward=key2.backward[i],)
+
+        return self._key_nif_to_blender(_key0, _key1, _key2)
+
+
+    def _import_interp_controller(self, fi:NiInterpController, interp:NiInterpController):
+        """Import a subclass of NiInterpController."""
+        fi.import_node(self, interp)
+
+
+    def _import_color_controller(self, seq:NiSequence, block:ControllerLink):
+        """Import one color controller block."""
+        if block.node_name in self.nif.nodes:
+            target_node = self.nif.nodes[block.node_name]
+
+            target_obj = self.objects_created.find_nifnode(target_node).blender_obj
+            if not target_obj:
+                self.warn(f"Target object was not imported: {block.node_name}")
+                return
+        else:
+            self.warn(f"Target block not found in nif. Is it corrupt? ({block.node_name})")
+
+        self.action_group = "Color Property Transforms"
+        self.path_name = None
+        self.action_name = f"{block.node_name}_{seq.name}"
+
+
+    def _new_animation(self, anim_context):
+        """
+        Set up to import a new animation from the nif file.
+
+        Nif animations can control multiple elements and multiple types of elements.
+        Blender actions are associated with a single element. So it may require mulitple
+        blender actions to represent a nif animation. 
+        """
+        self.context.scene.timeline_markers.clear()
+        self.animation_actions = []
+        self.action = None
+
+        self.action_name = ""
+        self.action_group = ""
+        self.path_name = ""
+        self.frame_start = 1
+        self.frame_end = 1
+        self.is_cyclic = anim_context.is_cyclic
+        self.action_slot = None
+        self.channelbag = None
+
+
+    def _new_action(self, name_suffix=None):
+        """
+        Create a new action to represent all or part of a nif animation.
+        """
+        if not self.animation_target:
+            self.warn("No animation target") 
+
+        suf = name_suffix
+        if suf is None:
+            suf = self.action_group
+        self.action_name = make_action_name(self.anim_name, self.animation_target, suf)
+
+        ## Create the action. Ignore any existing action on the target.
+        self.action = bpy.data.actions.new(self.action_name)
+        self.action.frame_start = self.frame_start
+        self.action.frame_end = self.frame_end
+        self.action.use_frame_range = True
+        self.action.use_cyclic = self.is_cyclic 
+        self.anim_name = self.action.name # Just in case Blender added a suffix
+        if self.controller_sequence:
+            self.action['pynController'] = 'NiControllerSequence'
+        self.action_slot = None
+        self.channelbag = None
+
+        # Some nifs have multiple animations with different names. Others just animate
+        # various nif blocks. If there's a name, make this an asset so we can track them.
+        if self.anim_name:
+            self.action.use_fake_user = True
+            self.action.asset_mark()
+            self.animation_actions.append(self.action)
+
+
+    def _new_slot(self):
+        """
+        Set up to store fcurves in a new action slot for the controller action.
+        The slot itself is created when the first fcurve is addded.
+        """
+        try:
+            if self.action_target and self.action_target.type == 'ARMATURE' and not self.bone_target:
+                self.bone_target = self._find_target(self.action_target.name)
+        except AttributeError:
+            self.action_target = None
+        if not self.action_target: return
+
+        if (not self.action_target.animation_data) or (
+                self.action_target.animation_data.action != self.action):
+            self.action_target.animation_data_clear()
+            self.action_target.animation_data_create()
+            self.action_target.animation_data.action = self.action
+            self.action_target.animation_data.action_slot = None
+
+        # The channelbag will be created when we add fcurves.
+        self.channelbag = None
+
+
+    def _record_slot(self):
+        """
+        Record the action slot handle on the target object for export later. An object may
+        have multiple action slots if it has multiple named animations or if multiple
+        properties are being animated. We store slot handles in a custom property
+        'pynActionSlots' as a tuple of integers. Each integer is an action slot handle.
+        During export, we look for this property to find which action slots apply to this
+        object.
+
+        Also set the frame range to include these fcurves. The scene's range is set from
+        the first action this import records, then widened for the rest.
+        """
+        ## _add_actionslot(self.action_target, self.action.name, self.action_slot)
+        if self.action_target.animation_data and self.action_target.animation_data.action_slot:
+            s = self.action_target.animation_data.action_slot
+
+            # Expand the action's frame range to cover these fcurves. Skip any fcurve that
+            # has no keyframes--an unimplemented interpolator type can leave one behind, and
+            # we'd rather warn and carry on than crash the whole import.
+            populated = [fc for fc in BD.action_fcurves(self.action) if len(fc.keyframe_points)]
+            if not populated:
+                return
+            mintime = min([fc.keyframe_points[0].co[0] for fc in populated])
+            maxtime = max([fc.keyframe_points[-1].co[0] for fc in populated])
+            self.action.frame_start = round(min(self.action.frame_start, mintime))
+            self.action.frame_end = round(max(self.action.frame_end, maxtime))
+            sc = self.context.scene
+            if self.scene_range_set:
+                sc.frame_start = min(sc.frame_start, round(self.action.frame_start))
+                sc.frame_end = max(sc.frame_end, round(self.action.frame_end))
+            else:
+                sc.frame_start = round(self.action.frame_start)
+                sc.frame_end = round(self.action.frame_end)
+                self.scene_range_set = True
+
+
+    def _animate_bone(self, bone_name:str):
+        """
+        Set up to import the animation of a bone as part of a larger animation. 
+        
+        Returns TRUE if the target bone was found, FALSE otherwise.
+        """
+        # Armature may have had bone names converted or not. Check both ways.
+        name = bone_name
+        if name not in self.animation_target.data.bones:
+            name = self.blender_name(name)
+            if name not in self.animation_target.data.bones:
+                # Some nodes are uppercase in the skeleton but not in the animations.
+                # Don't know if they are ignored in game or if the game is doing
+                # case-insensitive matching.
+                self.warn(f"Controller target not found: {bone_name}")
+                return False
+            
+        self.action_group = name
+        self.bone_target = self.animation_target.pose.bones[name]
+        self.target_node = self.nif.nodes.get(bone_name)
+        self.path_name = f'pose.bones["{name}"]'
+        return True
+
+
+    def _new_bone_anim(self, ctlr):
+        """
+        Set up to import the animation of a bone as part of a larger animation. 
+        
+        Returns TRUE if the target bone was found, FALSE otherwise.
+        """
+        if not self.action_target:
+            self.warn("No action target in _new_bone_anim")
+
+        if self.bone_target:
+            name = self.bone_target.name
+        else:
+            name = self.animation_target.name
+        
+        self.path_name = f'pose.bones["{name}"]'
+        self.animation_target = self.action_target.pose.bones[name]
+        self.action_group = name
+
+
+    def _new_element_action(self, anim_context, target_name, property_type, suffix):
+        """
+        Set up info to create an action slot to animate a single element (bone, shader,
+        node). This may be part of a larger nif animation/blender action. The actual
+        action and action slot aren't created until we load the interpolator, because for
+        various reasons we might never get there.
+
+        target_name is the name of the target in the nif file.
+         
+        Returns TRUE if the target element was found, FALSE otherwise.
+        """
+        try:
+            targ = self.objects_created.find_nifname(self.nif, target_name)
+            self.animation_target = targ.blender_obj
+            self.target_node = self.nif.nodes.get(target_name)
+            if property_type in ['BSEffectShaderProperty', 'BSLightingShaderProperty',
+                                 'NiAlphaProperty']:
+                self.action_target = targ.blender_obj.active_material.node_tree
+                suffix = "Shader"
+            else:
+                self.action_target = targ.blender_obj
+            if self.action_target:
+                return True
+        except (AttributeError, KeyError):
+            pass
+
+        self.warn(f"Target of controller not found: {target_name}")
+        return False
+            
+
+    def _new_transform_action(self, ctlr):
+        """
+        Create a new standalone NiTransform animation.
+
+        NiNodes that are imported into an armature have to have an action on the armature
+        with a path that references the bone, and it's one action for all the bones.
+        NiNodes that are imported as EMPTYs have their action on the EMPTY itself and it's
+        a separate action for each EMPTY.
+        """
+        if self.action_target and self.action_target.type == 'ARMATURE':
+            if not self.action_target.animation_data:
+                self._new_animation(ctlr)
+                self._new_action("Transform")
+            self._new_bone_anim(ctlr)
+        else:
+            self._new_animation(ctlr)
+            self._new_element_action(ctlr, ctlr.target.name, "Transform")
+        ctlr.import_node(self, ctlr.interpolator)
+
+
+    def _new_armature_action(self, anim_context):
+        """
+        Create an action to animate an armature.
+        
+        Animating an armature means moving the bone pose positions around. It is
+        represented in Blender as a single action.
+        """
+        self._new_action("Pose")
+        self.action_group = "Object Transforms"
+
+
+    def _import_controller_link(self, seq:NiSequence, block:ControllerLink):
+        """
+        Import one controlled block.
+
+        Imports a single controller link (Controlled Block) within a ControllerSequence
+        block. One element will be animated by this link block, but may require multiple
+        fcurves.
+        """
+        try:
+            # Animating an armature just needs one slot--each bone gets its own fcurve.
+            # Otherwise one slot per controller link block.
+            #
+            # A sequence on an ordinary node can still target nodes that were built into an
+            # armature (a skinned banner animated through its bones); those are pose bones
+            # on that armature. Decide by the sequence's own target, not animation_target,
+            # which the previous block has already moved.
+            arma = None
+            if self.sequence_target is None or self.sequence_target.type != 'ARMATURE':
+                arma = self._bone_armature(block.node_name)
+            if arma:
+                self.animation_target = arma
+                self.action_target = arma
+                if not self._animate_bone(block.node_name):
+                    return
+                self._new_slot()
+            elif self.sequence_target and self.sequence_target.type == 'ARMATURE':
+                self.animation_target = self.sequence_target
+                if not self._animate_bone(block.node_name):
+                    return
+                if not self.action_slot:
+                    self._new_slot()
+            else:
+                # Not a bone, so no bone left over from an earlier block may steer it.
+                self.bone_target = None
+                if not self._new_element_action(
+                    seq, block.node_name, block.property_type, None):
+                    return
+                self._new_slot()
+
+            if block.controller:
+                block.controller.import_node(self, block.interpolator)
+
+            if block.interpolator:
+                # If there's no controller, everything is done by the interpolator.
+                block.interpolator.import_node(self, None)
+
+            self._record_slot()
+
+        except Exception as e:
+            log.exception(f"Error importing sequence {seq.name}: {e}")
+
+    def _import_text_keys(self, tk:NiTextKeyExtraData):
+        for time, val in tk.keys:
+            m = self.action.pose_markers.new(val)
+            m.frame = round(time*(self.fps * ANIMATION_TIME_ADJUST))+1
+
+
+    # --- PUBLIC FUNCTIONS ---
+
+    def import_controller(self, ctlr, target_object=None, target_element=None, target_bone=None,
+                          animation_name=None):
+        """
+        Import the animation defined by a controller block.
+        
+        ctlr = 
+            May be a NiControllerManager containg multiple named sequences. Each sequence
+            is a separate action with slots for each target object/material.
+
+            May be a NiTransformController on an individual bone, part of the armature's
+            animation. it will be imported as additional fcurves on the armature action.
+
+            May be a NiTransformController on a node in a nif. The nif may have other animated
+            nodes. Animations will be imported as slots on a single action.
+
+        target_object = The blender object controlled by the animation, e.g. armature, mesh object.
+        
+        target_element = The blender object an action must be bound to, e.g. bone, material.
+        """
+        self.animation_target = target_object
+        self.sequence_target = None
+        self.action_target = target_element
+        if not self.action:
+            if hasattr(ctlr, "name"):
+                self.anim_name = ctlr.name
+            else:
+                self.anim_name = Path(ctlr.file.filepath).stem
+            self._new_animation(ctlr)
+        self.bone_target = target_bone
+
+        ctlr.import_node(self)
+
+
+    def import_bone_animations(self, arma):
+        """Load any animations associated with individual armature bones."""
+        for b in arma.data.bones:
+            nifbone = self._find_nif_target(b.name)
+            if nifbone and nifbone.controller:
+                self.import_controller(nifbone.controller, arma, arma, b)
+
+
+    @classmethod
+    def import_block(controller_class, controller_block, parent, 
+                     target_object=None):
+        """
+        Import a single controller block. 
+
+        * controller_block = block to import
+        * parent = NifImporter object holding context
+        * target_object = target being controlled.
+        """
+        importer = ControllerHandler(parent)
+        importer.import_controller(controller_block, target_object=target_object)
+
+
+    ### EXPORT ###
+
+    def _key_blender_to_nif(self, kfp0, kfp1, kfp2):
+        """
+        Return nif key values for keyframe point kfp1.
+
+        kfp0 and kfp2 may be omitted if kfp1 is first or last.
+        """
+        slope_right = (kfp1.handle_right[1]-kfp1.co.y) / (kfp1.handle_right[0]-kfp1.co.x)
+        slope_left = (kfp1.handle_left[1]-kfp1.co.y) / (kfp1.handle_left[0]-kfp1.co.x)
+        
+        if kfp0:
+            forward = slope_left * (kfp1.co.x-kfp0.co.x)
+        else:
+            forward = slope_left
+        if kfp2:
+            backward = slope_right * (kfp2.co.x-kfp1.co.x)
+        else:
+            backward = slope_right
+
+        return forward, backward
+
+
+    def _get_curve_linear_values(self, curve):
+        """
+        Transform a blender curve into nif keys.
+        Returns [LinearScalarKey, ...] for each keyframe in the curve.
+
+        Used when the channel's key type is LINEAR_KEY, where the nif stores only
+        time and value -- no tangents. (Bezier handles on the blender keyframe, if
+        any, have nowhere to go in a linear key and are dropped.)
+        """
+        keys = []
+        for p in curve.keyframe_points:
+            k = LinearScalarKey()
+            k.time = (p.co.x - 1) / (self.fps * ANIMATION_TIME_ADJUST)
+            k.value = p.co.y
+            keys.append(k)
+        return keys
+
+
+    def _get_curve_quad_values(self, curve):
+        """
+        Transform a blender curve into nif keys. 
+        Returns [NiAnimKeyFloatBuf, ...] for each keyframe in the curve.
+        """
+        keys = []
+        points = [None] + list(curve.keyframe_points) + [None]
+        while points[1]:
+            if points[1].interpolation == 'BEZIER':
+                k = QuadScalarKey()
+            elif points[1].interpolation == 'LINEAR':
+                k = LinearScalarKey()
+            else:
+                k = LinearScalarKey()
+                self.warn(f"Unsupported interpolation type {points[1].interpolation}, using LINEAR")
+            k.time = (points[1].co.x-1) / (self.fps * ANIMATION_TIME_ADJUST)
+            k.value = points[1].co.y
+            if points[1].interpolation == 'BEZIER':
+                k.forward, k.backward = self._key_blender_to_nif(points[0], points[1], points[2])
+            keys.append(k)
+            points.pop(0)
+        return keys
+
+
+    def _get_curve_bool_values(self, curve):
+        """
+        Transform a blender curve into nif keys. 
+        Returns [(time, 0 or 1), ...], one per keyframe. A curve that never changes comes
+        back as one key, which exports as the interpolator's fixed value.
+        """
+        # hide_viewport, so a nif visibility value is its opposite.
+        keys = [((p.co.x - 1) / (self.fps * ANIMATION_TIME_ADJUST), 0 if round(p.co.y) else 1)
+                for p in curve.keyframe_points]
+        if not keys:
+            raise Exception("Cannot export NiBoolInterpolator with no keyframes")
+        if all(v == keys[0][1] for _t, v in keys):
+            return keys[:1]
+        return keys
+
+
+    def _get_curve_quad_vector(self, curvexyz, basexf=Matrix.Identity(4)):
+        """
+        Transform a blender curve into nif keys. 
+
+        curvexyz = List of 3 fcurves, holding the x, y, & z curves.
+        Returns [NiAnimKeyQuadTransBuf, ...] for each keyframe in the curve.
+        """
+        log.debug(f"Exporting {curvexyz[0].data_path} as quad vector")
+        kx = self._get_curve_quad_values(curvexyz[0])
+        ky = self._get_curve_quad_values(curvexyz[1])
+        kz = self._get_curve_quad_values(curvexyz[2])
+
+        out_list = []
+        for x, y, z in zip(kx, ky, kz):
+            if not all_NearEqual([x.time, y.time, z.time]):
+                raise Exception("Time values do not match")
+            
+            if isinstance(x, QuadScalarKey):
+                k = NiAnimKeyQuadTransBuf()
+                k.forward[0] = x.forward
+                k.forward[1] = y.forward
+                k.forward[2] = z.forward
+                k.backward[0] = x.backward
+                k.backward[1] = y.backward
+                k.backward[2] = z.backward
+            else:
+                k = NiAnimKeyLinearTransBuf()
+            k.time = x.time
+            k.value[0] = x.value + basexf.translation.x
+            k.value[1] = y.value + basexf.translation.y
+            k.value[2] = z.value + basexf.translation.z
+            out_list.append(k)
+        return out_list
+
+
+    def _add_controlled_object(self, obj:ReprObject):
+        """
+        Add the object and all its children recursively to the set of controlled objects.
+        """
+        if obj.nifnode and obj.nifnode.id != 0 and isinstance(obj.nifnode, NiNode):
+            self.controlled_objects.add(obj)
+        for child in obj.blender_obj.children:
+            if child.type in ['EMPTY', 'MESH']:
+                ro = self.export_objs.find_blend(child)
+                if ro: self._add_controlled_object(ro)
+        
+
+    def _write_controlled_objects(self):
+        for obj in self.controlled_objects:
+            self.cm_obj_palette.add_object(obj.nifnode.name, obj.nifnode)
+
+
+    def _select_controller(self, dp, shader_type=None):
+        """
+        Determine the controller class and controlled variable needed to represent an
+        fcurve in a nif file.
+        """
+        if (dp.startswith("location") or dp.startswith("rotation")):
+            ctlclass = NiTransformController
+            return ctlclass, None
+        elif dp == 'hide_viewport':
+            ctlclass = NiVisController
+            return ctlclass, 0
+        elif dp.startswith("node"):
+            fcurve_match = re.match(
+                r"""nodes\[['"]([^]]+)['"]\].(inputs|outputs)\[['"]([^]]+)['"]\]""", dp)
+            if not fcurve_match:
+                raise Exception(f"Could not handle animation fcurve: {dp}")
+            
+            node_name, i_o, socket_name = fcurve_match.groups()
+            if node_name in shader_nodes:
+                node_type = shader_nodes[node_name]
+            else: 
+                node_type = node_name
+            return controlled_vars.blend_find(node_type, socket_name, shader_type)
+
+
+    def _export_activated_obj(self, anim:AnimationData):
+        """
+        Export a single activated object--an object with animation_data on it. 
+
+        Returns a list of controller/interpolator pairs created. May have to be more than
+        one if several variables are controlled, or if both variables and color are
+        controlled.
+        """
+        interps_created = []
+        controller = None # self.multitarget_controller
+        ctlvar = ctlvar_cur = None
+        ctlclass = ctlclass_cur = None
+        self.action = anim.action
+        self.start_time=(self.action.curve_frame_range[0]-1)/(self.fps * ANIMATION_TIME_ADJUST)
+        self.stop_time=(self.action.curve_frame_range[1]-1)/(self.fps * ANIMATION_TIME_ADJUST)
+        fcurves = actionslot_fcurves(anim.action, anim.slot)
+        shader_type = None
+        if anim.target_elem and anim.target_elem.type == 'SHADER':
+            shader_type = anim.target_obj.nifnode.shader.blockname
+        try:
+            while fcurves:
+                ctlclass, ctlvar = self._select_controller(fcurves[0].data_path, shader_type)
+                if ctlclass is None:
+                    self.warn(f"Could not export fcurve {fcurves[0].data_path} on {anim.target_obj.name}")
+                    fcurves.pop(0)
+                    continue
+
+                if ((ctlclass != ctlclass_cur) or (ctlvar != ctlvar_cur)
+                    or (ctlclass_cur is None)):
+
+                    # New node type needed, start a new controller/interpolator pair
+                    mytarget = anim.target_obj.nifnode
+                    if issubclass(ctlclass, BSNiAlphaPropertyTestRefController):
+                        mytarget = anim.target_obj.nifnode.alpha_property
+                    elif anim.target_elem and anim.target_elem.type == 'SHADER':
+                        mytarget = anim.target_obj.nifnode.shader
+
+                    grp, interp = ctlclass.fcurve_exporter(self, fcurves, anim.target_obj)
+
+                    if self.controller_sequence:
+                        myinterp = ctlclass.blend_interpolator(self)
+                        myparent = None
+                    else:
+                        myinterp = interp
+                        myparent = anim.target_obj.nifnode.shader
+
+                    if self.multitarget_controller and issubclass(ctlclass, NiTransformController):
+                        controller = self.multitarget_controller
+
+                    elif (ctlclass != NiTransformController): 
+                        if mytarget.controller is None:
+                            controller = ctlclass.New(
+                                file=self.nif,
+                                flags=TimeControllerFlags(
+                                    cycle_type=(CycleType.LOOP if self.action.use_cyclic else CycleType.CLAMP),
+                                    manager_controlled=(self.multitarget_controller is not None)
+                                ).flags,
+                                target=mytarget,
+                                start_time=self.start_time,
+                                stop_time=self.stop_time,
+                                next_controller=controller,
+                                interpolator=myinterp,
+                                var=ctlvar,
+                                parent=myparent)
+                        else:
+                            controller = mytarget.controller
+                        
+                    interps_created.append((controller, interp))
+
+                ctlclass_cur = ctlclass
+                ctlvar_cur = ctlvar
+
+            # Target has to point to the first controller in the chain (but the chain
+            # was built from last to first).
+            #
+            # Dwemer chest does not have controllers on each of the controlled nodes--just
+            # on the ControllerManager. It has a MultiTargetTransformController as the
+            # next_controller on the ControllerManager with the root node as target and
+            # the controlled nodes as extra targets.
+            #
+            # The FO4 glowing one does have controllers on the controlled shader nodes, 
+            # which are also referenced by the Controller Sequences.
+            # 
+            # The spriggans have controllers on their controlled shader nodes.
+            # 
+            # At a guess--if it's the Controller Manager's next controller, it doesn't
+            # need to be set on the controlled block.
+            #
+            if mytarget.properties.controllerID == NODEID_NONE and interps_created:
+                new_controller = interps_created[-1][0]
+                if self.controller_manager is None \
+                        or self.controller_manager.next_controller.id != new_controller.id:
+                    mytarget.controller = interps_created[-1][0]
+                
+        except Exception:
+            log.exception(f"Error exporting fcurves to class {ctlclass} for {anim.name}")
+        
+        return interps_created
+            
+
+    def _export_text_keys(self, action:bpy.types.Action, cs:NiControllerSequence):
+        """
+        Export any timeline markers to the given NiControllerSequence as text keys.
+        """
+        tked = None
+        
+        for m in action.pose_markers:
+            if not tked:
+                tked = NiTextKeyExtraData.New(file=self.nif, parent=cs)
+            tked.add_key((m.frame-1)/(self.fps * ANIMATION_TIME_ADJUST), m.name)
+
+
+    def _export_anim_markers(self, cs:NiControllerSequence, markers):
+        """
+        Export any timeline markers to the given NiControllerSequence as text keys.
+        markers = {name, timestamp}
+        """
+        ordered_markers = [(v, n) for n, v in markers.items()]
+        if ordered_markers:
+            ordered_markers.sort()
+            tked = NiTextKeyExtraData.New(file=self.nif, parent=cs)
+            for v, n in ordered_markers:
+                tked.add_key(v, n)
+
+
+    def _export_animations(self):
+        """
+        Export any actions that represent named nif animations to the target nif.
+        """
+        self.accum_root = self.nif.rootNode
+        self.controlled_objects = ReprObjectCollection()
+
+        self.controller_manager:NiControllerManager = None
+
+        # A sequence may animate objects and bones both, and the two are found separately,
+        # so sequences are looked up by name rather than assumed to arrive together.
+        sequences = {}
+        # The skeleton's animation, whichever role the export gave the armature: a full
+        # skeleton that carries the face rig (the FO4 animatrons) is taken as the facebones
+        # armature, and its bones still animate.
+        arma = getattr(self.parent, 'armature', None) or getattr(self.parent, 'facebones', None)
+        anims = list(all_named_animations(self.export_objs))
+        if arma:
+            anims += list(armature_named_animations(arma))
+
+        anim:AnimationData = None
+        for anim in anims:
+            # Named animations depend on Action Slots. Bail if it's an older Blender.
+            if not hasattr(bpy.types, 'ActionSlot'):
+                log.warning("Action Slots not supported in this version of Blender. Cannot export named animations.")
+                return
+
+            # Don't create the controller blocks until we need them.
+            if not self.multitarget_controller:
+                self.multitarget_controller = NiMultiTargetTransformController.New(
+                    file=self.nif, flags=108, target=self.nif.rootNode)
+                
+            if not self.controller_manager:
+                self.controller_manager = NiControllerManager.New(
+                    file=self.parent.nif, 
+                    flags=TimeControllerFlags(cycle_type=CycleType.CLAMP),
+                    next_controller=self.multitarget_controller,
+                    parent=self.accum_root)
+
+            if not self.cm_obj_palette:
+                self.cm_obj_palette = NiDefaultAVObjectPalette.New(
+                    self.nif, self.nif.rootNode, parent=self.controller_manager)
+
+            # Create the controller sequence if it's new.
+            if anim.name not in sequences:
+                sequences[anim.name] = NiControllerSequence.New(
+                    file=self.parent.nif,
+                    name=anim.name,
+                    accum_root_name=self.parent.nif.rootName,
+                    start_time=anim.start_time,
+                    stop_time=anim.stop_time,
+                    cycle_type=anim.cycle_type,
+                    frequency=anim.frequency,
+                    parent=self.controller_manager
+                )
+                self._export_anim_markers(sequences[anim.name], anim.markers)
+            self.controller_sequence:NiControllerSequence = sequences[anim.name]
+
+            if anim.target_obj is arma:
+                self._export_armature_sequence(anim)
+                continue
+
+            interps = []
+            try:
+                interps = self._export_activated_obj(anim)
+            except Exception:
+                log.exception(f"Could not export animation {anim.name} on object {anim.target_obj.blender_obj.name}")
+            
+            for ctlr, intp in interps:
+                self.controller_sequence.add_controlled_block(
+                    name=anim.target_obj.nifnode.name,
+                    interpolator=intp,
+                    controller=ctlr,
+                    controller_type=(ctlr.blockname 
+                                        if ctlr.blockname != 'NiMultiTargetTransformController'
+                                        else 'NiTransformController'),
+                )
+
+        # Vanilla nifs list all AV objects in the object palette, animated or not. We 
+        # do the same.
+        if self.cm_obj_palette:
+            for obj in self.export_objs:
+                if isinstance(obj.nifnode, NiAVObject) and obj.nifnode.id != 0:
+                    self.cm_obj_palette.add_object(obj.nifnode.name, obj.nifnode)
+            # Bones are nodes too, and a controlled block finds its bone through here.
+            if arma:
+                for b in arma.data.bones:
+                    node = self.nif.nodes.get(self.nif_name(b.name))
+                    if node is not None and node.id != 0:
+                        self.cm_obj_palette.add_object(node.name, node)
+
+
+    def _export_armature_sequence(self, anim:AnimationData):
+        """
+        Export the bone curves of a named animation on an armature into the current
+        controller sequence: one controlled block per bone, all driven by the manager's
+        multitarget controller (genericbannerred01.nif).
+        """
+        arma = anim.target_obj
+        self.action = anim.action
+        self.start_time = (self.action.curve_frame_range[0]-1)/(self.fps * ANIMATION_TIME_ADJUST)
+        self.stop_time = (self.action.curve_frame_range[1]-1)/(self.fps * ANIMATION_TIME_ADJUST)
+        curves = actionslot_fcurves(anim.action, anim.slot)
+        while curves:
+            # Whether the bone about to be exported actually moves, or only holds a pose.
+            first = curve_bone_target(curves[0])[0]
+            holds = all(len({round(k.co.y, 6) for k in c.keyframe_points}) <= 1
+                        for c in curves if curve_bone_target(c)[0] == first)
+            bonename, ti = NiTransformController.fcurve_exporter(self, curves, arma)
+            if not (bonename and ti):
+                continue
+            nifname = self.nif_name(bonename)
+            if nifname not in self.nif.nodes:
+                if holds:
+                    # A static channel on a bone this export doesn't write: nothing moves.
+                    log.info(f"Bone {bonename} isn't exported; its static channel is dropped")
+                else:
+                    self.warn(f"Animated bone {bonename} was not exported; dropping its animation")
+                continue
+            self.controller_sequence.add_controlled_block(
+                name=nifname,
+                interpolator=ti,
+                controller=self.multitarget_controller,
+                controller_type='NiTransformController',
+            )
+
+
+    @classmethod
+    def export_animation(cls, parent_handler, arma):
+        """
+        Export one action to one animation KF file. KF animations are exported at 30 fps,
+        not keyframe by keyframe.
+        """
+        exporter = ControllerHandler(parent_handler)
+        exporter.nif = parent_handler.nif
+        exporter.controller_sequence = exporter.nif.rootNode
+        exporter.action = arma.animation_data.action
+        cp = exporter.controller_sequence.properties.copy()
+        exporter.start_time = cp.startTime = (exporter.action.curve_frame_range[0]-1)/exporter.fps
+        exporter.stop_time = cp.stopTime = (exporter.action.curve_frame_range[1]-1)/exporter.fps
+        cp.cycleType = CycleType.LOOP if exporter.action.use_cyclic else CycleType.CLAMP
+        cp.frequency = 1.0
+        exporter.controller_sequence.properties = cp
+        exporter._export_text_keys(exporter.action, exporter.controller_sequence)
+        exporter.export_each_frame = True
+
+        # Collect list of curves. They will be picked off in clumps until the list is empty.
+        curve_list = [c for c in BD.action_fcurves(exporter.action)]
+
+        while curve_list:
+            bonename, ti = NiTransformController.fcurve_exporter(exporter, curve_list, arma)
+            if bonename and ti:
+                nifbonename = exporter.nif_name(bonename)
+
+                exporter.controller_sequence.add_controlled_block(
+                    name=nifbonename,
+                    interpolator=ti,
+                    controller_type="NiTransformController"
+                )
+
+
+    @classmethod
+    def export_animated_armature(cls, parent_handler, arma):
+        """
+        Export an animated skinned mesh (loadscreenalduinwall.nif).
+        """
+        if not arma.animation_data:return
+        # A named animation belongs to the controller manager's sequence, not to loose
+        # controllers on each bone; export_named_animations handles it.
+        if arma.animation_data.action \
+                and arma.animation_data.action.get('pynController', '') == 'NiControllerSequence':
+            return
+
+        exporter = ControllerHandler(parent_handler)
+        exporter.nif = parent_handler.nif
+
+        exporter.action = arma.animation_data.action
+        exporter.start_time=(exporter.action.curve_frame_range[0]-1)/exporter.fps
+        exporter.stop_time=(exporter.action.curve_frame_range[1]-1)/exporter.fps
+        # A nif's whole animation lands in one action, with a slot per animated
+        # element -- bones, shader node trees, EMPTYs standing in for nif nodes. Only
+        # this armature's slot holds bone curves; walking the rest just warns that a
+        # shader or node isn't a bone and drops it. Those belong to their own
+        # exporters. (Node animations aren't exported yet -- see TODO.md.)
+        slot = arma.animation_data.action_slot
+        curves = (actionslot_fcurves(exporter.action, slot) if slot
+                  else list(BD.action_fcurves(exporter.action)))
+        while curves:
+            bonename, ti = NiTransformController.fcurve_exporter(exporter, curves, arma)
+            nifbonename = exporter.nif_name(bonename)
+            # KF animation files have no controllers, so only create one if the target
+            # bone exists in the nif.
+            if nifbonename in exporter.nif.nodes:
+                nifbone = exporter.nif.nodes[nifbonename]
+                ctlr = NiTransformController.New(
+                    file=exporter.nif,
+                    flags=TimeControllerFlags(
+                            cycle_type=CycleType.LOOP if exporter.action.use_cyclic else CycleType.CLAMP)
+                            .flags,
+                    start_time=exporter.start_time,
+                    stop_time=exporter.stop_time,
+                    interpolator=ti,
+                    target=nifbone,
+                    parent=nifbone
+                    )
+
+
+    @classmethod
+    def export_animated_obj(cls, parent_handler, robj:ReprObject):
+        """
+        Export an animated object.
+        """
+        obj = robj.blender_obj
+        if not obj.animation_data: return
+        if not obj.animation_data.action: return
+        if obj.animation_data.action.get('pynController', '') == 'NiControllerSequence':
+            return
+
+        exporter = ControllerHandler(parent_handler)
+        exporter.nif = parent_handler.nif
+
+        exporter.action = obj.animation_data.action
+        exporter.action_slot = obj.animation_data.action_slot
+        exporter.start_time=(exporter.action.curve_frame_range[0]-1)/exporter.fps
+        exporter.stop_time=(exporter.action.curve_frame_range[1]-1)/exporter.fps
+        curves = []
+        for lay in exporter.action.layers:
+            for strip in lay.strips:
+                for b in strip.channelbags:
+                    if b.slot == exporter.action_slot:
+                        curves = list(b.fcurves)
+                        break
+
+        while curves:
+            targetnodename, ti = NiTransformController.fcurve_exporter(exporter, curves, robj)
+            nifnodename = exporter.nif_name(targetnodename)
+            nifnode = None
+            if nifnodename in exporter.nif.nodes:
+                nifnode = exporter.nif.nodes[nifnodename]
+            elif robj.nifnode is not None and targetnodename == robj.name:
+                # Curves on the object itself (not a bone) target this object's node,
+                # which we already have paired here. Needed for the nif root, whose
+                # blender object carries a ":ROOT" suffix so its name never matches
+                # the node's.
+                nifnode = robj.nifnode
+            # KF animation files have no controllers, so only create one if the target
+            # bone exists in the nif.
+            if nifnode is not None:
+                ctlr = NiTransformController.New(
+                    file=exporter.nif,
+                    flags=TimeControllerFlags(
+                            cycle_type=CycleType.LOOP if exporter.action.use_cyclic else CycleType.CLAMP)
+                            .flags,
+                    start_time=exporter.start_time,
+                    stop_time=exporter.stop_time,
+                    interpolator=ti,
+                    target=nifnode,
+                    parent=nifnode
+                    )
+
+
+    @classmethod
+    def export_shader_controller(cls, parent_handler, activeobj:ReprObject, activeelem):
+        """Export an obj that has an animated shader."""
+
+        a = activeelem.animation_data.action
+
+        # If the animation is a named animation, it will be part of a controller 
+        # sequence so we don't need to export it now.
+        if a.get('pynController', '') == 'NiControllerSequence': return
+
+        # If the animation has multiple slots, don't export this one individually
+        if len(a.slots) > 1: return
+
+        objcol = ReprObjectCollection()
+        objcol.add(activeobj)
+        s = activeelem.animation_data.action_slot
+        dat = analyze_animation(a, s, bpy.context.scene, objcol)
+
+        exporter = ControllerHandler(parent_handler, objcol)
+        exporter.nif = parent_handler.nif
+        exporter._export_activated_obj(dat)
+
+
+    @classmethod
+    def export_named_animations(cls, parent_handler, object_dict:ReprObjectCollection):
+        """
+        Export a ControllerManager to manage all named animations (if any). 
+        Only animations controlling objects in the given list count.
+
+        * object_dict = dictionary of objects to consider
+        """
+        exporter = ControllerHandler(parent_handler, object_dict)
+        exporter._export_animations()
+
+
+### Handlers for importing different types of blocks
+
+def _import_fixed(importer:ControllerHandler, value):
+    """
+    Create a "fixed" fcurve for an interpolator that has no keys.
+    """
+    if not importer.path_name: return
+
+    curve = importer.action.fcurve_ensure_for_datablock(
+        importer.action_target, importer.path_name)
+    _add_actionslot(importer.action_target, curve)
+    frame = importer.start_time * importer.fps * ANIMATION_TIME_ADJUST + 1
+    kfp = curve.keyframe_points.insert(frame, value)
+    kfp.interpolation = 'CONSTANT'
+    frame = importer.end_time * importer.fps * ANIMATION_TIME_ADJUST + 1
+    kfp = curve.keyframe_points.insert(frame, value)
+    kfp.interpolation = 'CONSTANT'
+
+
+def _import_float_data(td, importer:ControllerHandler):
+    if not importer.path_name: return
+
+    # Seems like fcurve_ensure_for_datablock creates unnecessary slots.
+    s = None
+    curve = importer.action.fcurve_ensure_for_datablock(importer.action_target, importer.path_name)
+    _add_actionslot(importer.action_target, curve)
+
+    # NO_INTERP keys carry no tangents, so treat them as linear.
+    if td.properties.keys.interpolation in (
+            NiKeyType.QUADRATIC_KEY, NiKeyType.LINEAR_KEY, NiKeyType.NO_INTERP):
+        keys = [None]
+        keys.extend(td.keys)
+        keys.append(None)
+        while keys[1]:
+            frame = keys[1].time * (importer.fps * ANIMATION_TIME_ADJUST) + 1
+            kfp = curve.keyframe_points.insert(frame, keys[1].value)
+            if td.properties.keys.interpolation == NiKeyType.QUADRATIC_KEY:
+                kfp.interpolation = 'BEZIER'
+                kfp.handle_left_type = "FREE"
+                kfp.handle_right_type = "FREE"
+                kfp.handle_left, kfp.handle_right = importer._key_nif_to_blender(keys[0], keys[1], keys[2])
+            else:
+                kfp.interpolation = 'LINEAR'
+            importer.start_time = min(importer.start_time, keys[1].time)
+            importer.end_time = max(importer.end_time, keys[1].time)
+            keys.pop(0)
+    else:
+        importer.warn(f"NYI: NiFloatData type {td.properties.keys.interpolation}")
+
+NiFloatData.import_node = _import_float_data
+
+
+def _hidden(visible):
+    """A nif visibility bool as Blender's hide_viewport, and back: they're opposites. (A nif
+    value of 2, seen in vanilla, counts as visible.)"""
+    return 0.0 if visible else 1.0
+
+
+def _import_bool_data(td, importer:ControllerHandler):
+    """A bool interpolator's keys (visibility): each holds its value until the next one."""
+    if not importer.path_name: return
+    curve = importer.action.fcurve_ensure_for_datablock(importer.action_target, importer.path_name)
+    _add_actionslot(importer.action_target, curve)
+    for k in td.keys:
+        frame = k.time * (importer.fps * ANIMATION_TIME_ADJUST) + 1
+        kfp = curve.keyframe_points.insert(frame, _hidden(k.value))
+        kfp.interpolation = 'CONSTANT'
+        importer.start_time = min(importer.start_time, k.time)
+        importer.end_time = max(importer.end_time, k.time)
+
+NiBoolData.import_node = _import_bool_data
+
+
+def _import_pos_data(td:NiPosData, importer:ControllerHandler):
+    if not importer.path_name: return
+
+    if td.properties.keys.interpolation == NiKeyType.QUADRATIC_KEY:
+        for i in range(0, 3):
+            curve = importer.action.fcurve_ensure_for_datablock(
+                importer.action_target, importer.path_name, index=i)
+            keys = [None]
+            keys.extend(td.keys)
+            keys.append(None)
+            while keys[1]:
+                frame = keys[1].time * (importer.fps * ANIMATION_TIME_ADJUST) + 1
+                kfp = curve.keyframe_points.insert(frame, keys[1].value[i])
+                kfp.handle_left_type = "FREE"
+                kfp.handle_right_type = "FREE"
+                kfp.handle_left, kfp.handle_right \
+                    = importer._point3key_nif_to_blender(keys[0], keys[1], keys[2], i)
+                importer.start_time = min(importer.start_time, keys[1].time)
+                importer.end_time = max(importer.end_time, keys[1].time)
+                keys.pop(0)
+            if i == 0: _add_actionslot(importer.action_target, curve)
+    else:
+        importer.warn(f"NYI: NiPosData type {td.properties.keys.interpolation}")
+
+NiPosData.import_node = _import_pos_data
+
+
+def _pretty_rotation(importer):
+    """
+    The pretty-bone rotation R as (quaternion, inverse quaternion, inverse 3x3), or
+    (None, None, None) when the target isn't a pretty bone.
+
+    Pretty bone rotations add R to bone.matrix_local, so a pose bone's channels are in
+    axes rotated by R from the nif's. Every NIF-space delta written to a bone has to go
+    through this: translations by R inverse, rotations conjugated by R.
+    """
+    if importer.bone_target and importer.animation_target:
+        arma = importer.animation_target
+        if arma.get(PYN_ROTATE_BONES_PRETTY_PROP, False):
+            axis = BD.game_axes.get(importer.nif.game)
+            if axis:
+                R_mat, R_inv_mat = BD.game_rotations_pretty[axis][:2]
+                return R_mat.to_quaternion(), R_inv_mat.to_quaternion(), R_inv_mat.to_3x3()
+    return None, None, None
+
+
+def _import_transform_data(td:NiTransformData,
+                           importer:ControllerHandler, 
+                           have_parent_rotation,
+                           tiv,
+                           tiq):
+    """
+    Import transform data.
+
+    - Returns the rotation mode that must be set on the target. If this interpolator
+        is using XYZ rotations, the rotation mode must be set to Euler. 
+    """
+    if importer.path_name:
+        path_prefix = importer.path_name + "."
+    else:
+        path_prefix = ""
+    qinv = tiq.inverted()
+
+    targ = importer.bone_target if importer.bone_target else importer.action_target
+    # Action group is the bone name if animating an armature, otherwise just "Object Transforms"
+    if  not importer.action_group: importer.action_group = "Object Transforms"
+
+    pretty_R_q, pretty_R_q_inv, pretty_R_inv_3x3 = _pretty_rotation(importer)
+
+    targ.rotation_mode = "QUATERNION"
+    if td.properties.rotationType == NiKeyType.XYZ_ROTATION_KEY:
+        targ.rotation_mode = "XYZ"
+        if td.xrotations or td.yrotations or td.zrotations:
+            curveX = importer.action.fcurve_ensure_for_datablock(importer.action_target, path_prefix + "rotation_euler", index=0)
+            curveY = importer.action.fcurve_ensure_for_datablock(importer.action_target, path_prefix + "rotation_euler", index=1)
+            curveZ = importer.action.fcurve_ensure_for_datablock(importer.action_target, path_prefix + "rotation_euler", index=2)
+            _add_actionslot(importer.action_target, curveX)
+
+            x_bezier = (td.properties.xRotations.interpolation == NiKeyType.QUADRATIC_KEY)
+            y_bezier = (td.properties.yRotations.interpolation == NiKeyType.QUADRATIC_KEY)
+            z_bezier = (td.properties.zRotations.interpolation == NiKeyType.QUADRATIC_KEY)
+
+            # The X/Y/Z rotation channels are independent unless a base (parent) or
+            # pretty-bone rotation has to be applied -- that combines the three
+            # through a quaternion, which needs all three sampled at the same
+            # instant. When no such rotation applies, import each channel on its own
+            # key times: correct for any per-channel key count or misalignment,
+            # since Blender evaluates the three fcurves independently.
+            need_conversion = have_parent_rotation or pretty_R_q
+
+            if not need_conversion:
+                for curve, keys, is_bezier in ((curveX, list(td.xrotations), x_bezier),
+                                               (curveY, list(td.yrotations), y_bezier),
+                                               (curveZ, list(td.zrotations), z_bezier)):
+                    for idx, k in enumerate(keys):
+                        kp = curve.keyframe_points.insert(
+                            k.time * (importer.fps * ANIMATION_TIME_ADJUST) + 1, k.value)
+                        kp.interpolation = 'BEZIER' if is_bezier else 'LINEAR'
+                        if is_bezier:
+                            prev = keys[idx-1] if idx > 0 else None
+                            nxt = keys[idx+1] if idx < len(keys)-1 else None
+                            kp.handle_left_type = "FREE"
+                            kp.handle_right_type = "FREE"
+                            kp.handle_left, kp.handle_right = \
+                                importer._key_nif_to_blender(prev, k, nxt)
+                        importer.start_time = min(importer.start_time, k.time)
+                        importer.end_time = max(importer.end_time, k.time)
+            else:
+                # Resample all three channels onto the union of their key times so
+                # the quaternion conversion sees a consistent rotation at each key.
+                # For already-aligned channels the union is just the original times
+                # (no interpolation). Tangents are not carried through the
+                # conversion (as before) -- resampled keys are linear.
+                xk, yk, zk = list(td.xrotations), list(td.yrotations), list(td.zrotations)
+
+                def _sample(keys, t):
+                    if not keys:
+                        return 0.0
+                    if t <= keys[0].time:
+                        return keys[0].value
+                    if t >= keys[-1].time:
+                        return keys[-1].value
+                    for i in range(1, len(keys)):
+                        if keys[i].time >= t:
+                            k0, k1 = keys[i-1], keys[i]
+                            span = k1.time - k0.time
+                            f = (t - k0.time) / span if span else 0.0
+                            return k0.value + f * (k1.value - k0.value)
+                    return keys[-1].value
+
+                frames = sorted({round(k.time, 6) for k in xk}
+                                | {round(k.time, 6) for k in yk}
+                                | {round(k.time, 6) for k in zk})
+                for t in frames:
+                    ve = Euler(Vector((_sample(xk, t), _sample(yk, t), _sample(zk, t))), 'XYZ')
+                    vq = qinv @ ve.to_quaternion()
+                    if pretty_R_q:
+                        vq = pretty_R_q_inv @ vq @ pretty_R_q
+                    ve = vq.to_euler()
+                    fr = t * (importer.fps * ANIMATION_TIME_ADJUST) + 1
+                    for curve, val, is_bezier in ((curveX, ve[0], x_bezier),
+                                                  (curveY, ve[1], y_bezier),
+                                                  (curveZ, ve[2], z_bezier)):
+                        kp = curve.keyframe_points.insert(fr, val)
+                        # Match the channel's key type. Tangents are auto (the
+                        # conversion doesn't carry the nif's), as before.
+                        kp.interpolation = 'BEZIER' if is_bezier else 'LINEAR'
+                    importer.start_time = min(importer.start_time, t)
+                    importer.end_time = max(importer.end_time, t)
+    
+    elif td.properties.rotationType in [NiKeyType.LINEAR_KEY, NiKeyType.QUADRATIC_KEY]:
+        if td.properties.rotationType == NiKeyType.LINEAR_KEY:
+            key_type = 'LINEAR'
+        else:
+            key_type = 'BEZIER'
+        try:
+            # The curve may already have been started.
+            curveW = importer.action.fcurve_ensure_for_datablock(importer.action_target, path_prefix + "rotation_quaternion", index=0)
+            curveX = importer.action.fcurve_ensure_for_datablock(importer.action_target, path_prefix + "rotation_quaternion", index=1)
+            curveY = importer.action.fcurve_ensure_for_datablock(importer.action_target, path_prefix + "rotation_quaternion", index=2)
+            curveZ = importer.action.fcurve_ensure_for_datablock(importer.action_target, path_prefix + "rotation_quaternion", index=3)
+            _add_actionslot(importer.action_target, curveW)
+        except Exception:
+            curveW = importer.action.fcurve_ensure_for_datablock(importer.action_target, path_prefix + "rotation_quaternion", index=0)
+            _add_actionslot(importer.action_target, curveW)
+
+        for i, k in enumerate(td.qrotations):
+            kq = Quaternion(k.value)
+            # Auxbones animations are not correct yet, but they seem to need something
+            # different from animations on the full skeleton.
+            if importer.auxbones:
+                vq = kq
+            else:
+                vq = qinv @ kq
+            if pretty_R_q:
+                vq = pretty_R_q_inv @ vq @ pretty_R_q
+
+            kw = curveW.keyframe_points.insert(k.time * (importer.fps * ANIMATION_TIME_ADJUST) + 1, vq[0])
+            kw.interpolation = key_type
+            kx = curveX.keyframe_points.insert(k.time * (importer.fps * ANIMATION_TIME_ADJUST) + 1, vq[1])
+            kx.interpolation = key_type
+            ky = curveY.keyframe_points.insert(k.time * (importer.fps * ANIMATION_TIME_ADJUST) + 1, vq[2])
+            ky.interpolation = key_type
+            kz = curveZ.keyframe_points.insert(k.time * (importer.fps * ANIMATION_TIME_ADJUST) + 1, vq[3])
+            kz.interpolation = key_type
+            importer.start_time = min(importer.start_time, k.time)
+            importer.end_time = max(importer.end_time, k.time)
+
+    elif td.properties.rotationType == NiKeyType.NO_INTERP:
+        pass
+    else:
+        importer.warn(f"Not Yet Implemented: Rotation type {td.properties.rotationType} at {importer.path_name}")
+
+    # Seems like a value of + or - infinity in the Transform
+    if len(td.translations) > 0:
+        xlate_interp = (
+            'LINEAR' if td.properties.translations.interpolation == NiKeyType.LINEAR_KEY
+                else 'BEZIER')
+        curveLocX = importer.action.fcurve_ensure_for_datablock(importer.action_target, path_prefix + "location", index=0)
+        curveLocY = importer.action.fcurve_ensure_for_datablock(importer.action_target, path_prefix + "location", index=1)
+        curveLocZ = importer.action.fcurve_ensure_for_datablock(importer.action_target, path_prefix + "location", index=2)
+        _add_actionslot(importer.action_target, curveLocX)
+        for k in td.translations:
+            v = Vector(k.value)
+
+            if importer.auxbones:
+                pass
+            else:
+                v = v - tiv
+                if importer.bone_target:
+                    # A pose bone's location is in the bone's OWN axes, but the nif's keys
+                    # are in its parent's. Rotate the delta into the bone's frame or it
+                    # goes off in the wrong direction--the power armor's COM carries the
+                    # whole rig, and left unrotated it lifted the frame 3.6 units off the
+                    # floor for the length of the animation.
+                    v = qinv @ v
+            if pretty_R_inv_3x3:
+                v = pretty_R_inv_3x3 @ v
+            k1 = curveLocX.keyframe_points.insert(k.time * (importer.fps * ANIMATION_TIME_ADJUST) + 1, v[0])
+            k1.interpolation = xlate_interp
+            k2 = curveLocY.keyframe_points.insert(k.time * (importer.fps * ANIMATION_TIME_ADJUST) + 1, v[1])
+            k2.interpolation = xlate_interp
+            k3 = curveLocZ.keyframe_points.insert(k.time * (importer.fps * ANIMATION_TIME_ADJUST) + 1, v[2])
+            k3.interpolation = xlate_interp
+            importer.start_time = min(importer.start_time, k.time)
+            importer.end_time = max(importer.end_time, k.time)
+
+    # Scale keys are a uniform scale factor, the same on all three axes. They're a ratio, not
+    # a position, so unlike translations they need no rest-pose delta, unit scaling or
+    # pretty-bone rotation: a pose bone's scale and an object's both take the key as it is.
+    if td.scales:
+        is_bezier = (td.properties.scales.interpolation == NiKeyType.QUADRATIC_KEY)
+        curves = [importer.action.fcurve_ensure_for_datablock(
+                    importer.action_target, path_prefix + "scale", index=i) for i in range(3)]
+        _add_actionslot(importer.action_target, curves[0])
+        keys = list(td.scales)
+        for idx, k in enumerate(keys):
+            frame = k.time * (importer.fps * ANIMATION_TIME_ADJUST) + 1
+            for curve in curves:
+                kp = curve.keyframe_points.insert(frame, k.value)
+                kp.interpolation = 'BEZIER' if is_bezier else 'LINEAR'
+                if is_bezier:
+                    prev = keys[idx-1] if idx > 0 else None
+                    nxt = keys[idx+1] if idx < len(keys)-1 else None
+                    kp.handle_left_type = "FREE"
+                    kp.handle_right_type = "FREE"
+                    kp.handle_left, kp.handle_right = importer._key_nif_to_blender(prev, k, nxt)
+            importer.start_time = min(importer.start_time, k.time)
+            importer.end_time = max(importer.end_time, k.time)
+
+NiTransformData.import_node = _import_transform_data
+
+
+# #####################################
+# Importers for NiInterpolator blocks. 
+
+def _import_bool_interpolator(interp:NiBoolInterpolator, 
+                               importer:ControllerHandler, 
+                               ctlr:NiInterpController):
+    """
+    "ctlr" is the controller to use when this interpolator doesn't have one.
+    """
+    td = interp.data
+    if td: 
+        td.import_node(importer)
+    else:
+        # Bool interpolators can have no data block. They just force their value.
+        _import_fixed(importer, _hidden(interp.properties.value))
+    
+NiBoolInterpolator.import_node = _import_bool_interpolator
+
+
+def _import_float_interpolator(fi:NiFloatInterpolator, 
+                               importer:ControllerHandler, 
+                               interp:NiInterpController):
+    """
+    "interp" is the controller to use when this interpolator doesn't have one.
+    """
+    td = fi.data
+    if td: td.import_node(importer)
+    
+NiFloatInterpolator.import_node = _import_float_interpolator
+
+
+def _import_point3_interpolator(fi:NiPoint3Interpolator, 
+                                importer:ControllerHandler, 
+                                interp:NiInterpController):
+    """
+    "interp" is the controller to use when this interpolator doesn't have one.
+    """
+    td = fi.data
+    if td: td.import_node(importer)
+    
+NiPoint3Interpolator.import_node = _import_point3_interpolator
+
+
+def _import_blendfloat_interpolator(fi:NiBlendFloatInterpolator, 
+                               importer:ControllerHandler, 
+                               interp:NiInterpController):
+    if fi.properties.flags != InterpBlendFlags.MANAGER_CONTROLLED:
+        importer.warn("NYI: BlendFloatInterpolator that is not MANAGER_CONTROLLED")
+    
+NiBlendFloatInterpolator.import_node = _import_blendfloat_interpolator
+
+
+def _import_transform_interpolator(ti:NiTransformInterpolator, 
+                                   importer:ControllerHandler, 
+                                   interp:NiInterpController):
+    """
+    Import a transform interpolator, including its data block.
+
+    - Returns the rotation mode that must be set on the target. If this interpolator
+        is using XYZ rotations, the rotation mode must be set to Euler. 
+    """
+    # ti, the parent NiTransformInterpolator, has the transform-to-global necessary
+    # for this animation. It matches the transform of the target being animated.
+    #
+    # For a BONE the base is the bone's own rest transform relative to its parent, which
+    # is what a pose bone's location/rotation are deltas from -- and what export composes
+    # against (_export_transform_curves, via get_bone_xform). The nif's own idea of where
+    # the node sits is NOT usable: when the armature is built at the skin's bind position
+    # the two differ, and composing against the node leaves every animated bone off by
+    # that difference. On PowerArmorFurniture that was 21.7 degrees of rotation on
+    # RLeg_Foot for the length of the animation, and it made a symmetrical animation
+    # import lopsided.
+    #
+    # An object's location/rotation are its local transform outright, so objects keep the
+    # interpolator's own base (identity when it holds the FLT_MAX "no static value here"
+    # sentinel).
+    rest_rel = None
+    if importer.bone_target is not None:
+        rest_rel = BD.get_bone_xform(
+            importer.bone_target.id_data, importer.bone_target.name, importer.nif.game,
+            preserve_hierarchy=True, use_pose=False)
+
+    have_parent_rotation = False
+    if rest_rel is not None:
+        tiq = rest_rel.to_quaternion()
+        tiv = rest_rel.translation.copy()
+        have_parent_rotation = True
+    else:
+        if max(ti.properties.rotation[:]) > 3e+38 or min(ti.properties.rotation[:]) < -3e+38:
+            tiq = Quaternion()
+        else:
+            have_parent_rotation = True
+            tiq = Quaternion(ti.properties.rotation)
+        tiv = Vector(ti.properties.translation)
+
+        # Some interpolators have bogus translations. Dunno why.
+        for i in range(3):
+            if tiv[i] <= -1e+30 or tiv[i] >= 1e+30:
+                tiv[i] = 0
+    qinv = tiq.inverted()
+
+    if not ti.data:
+        # No keys: the interpolator holds one transform for the whole sequence. On a bone
+        # that's every channel static, which pulls the bone from its rest to that transform
+        # (the animatron's anim01 holds 137 of its 156 bones this way; dropped, they lost
+        # their place in the animation and on export). Elsewhere -- some controllers have no
+        # data and no duration -- there's nothing to interpret.
+        if rest_rel is not None:
+            _add_static_bone_channels(importer, ti, _NO_KEYS, qinv, tiv, always=True)
+        return None
+
+    ti.data.import_node(importer, have_parent_rotation, tiv, tiq)
+
+    if rest_rel is not None:
+        _add_static_bone_channels(importer, ti, ti.data, qinv, tiv)
+
+NiTransformInterpolator.import_node = _import_transform_interpolator
+
+
+def _import_path_interpolator(pi:NiPathInterpolator,
+                              importer:ControllerHandler,
+                              interp:NiInterpController):
+    """
+    Path animation (an object following a spline) isn't supported. Note the target so the
+    import can say so once, rather than once per interpolator -- the same interpolator is
+    reached through both its controller and its controlled block.
+    """
+    target = importer.bone_target or importer.animation_target
+    name = target.name if target is not None else f"block {pi.id}"
+    skipped = getattr(importer.parent, '_skipped_paths', None)
+    if skipped is None:
+        importer.warn(f"Path animation (NiPathInterpolator) is not supported; skipped on {name}")
+    else:
+        skipped.add(name)
+
+NiPathInterpolator.import_node = _import_path_interpolator
+
+
+# Stands in for transform data with no keys at all, for _add_static_bone_channels.
+_NO_KEYS = SimpleNamespace(qrotations=[], xrotations=[], yrotations=[], zrotations=[],
+                           translations=[])
+
+
+def _add_static_bone_channels(importer, ti, td, qinv, tiv, always=False):
+    """
+    Give a bone a constant key for any channel the nif leaves static.
+
+    The fcurves hold deltas from the bone's rest position, and the rest is the skin's bind
+    position, which is not where the node sits. So "the nif has no keys here" does not
+    mean "no delta": a foot with rotation keys and a static translation has to be pulled
+    from its bind position to the node's, or it animates in the wrong place. Where rest
+    and node agree -- unskinned rigs, and anything imported with import_pose -- the delta
+    is zero and nothing is written, unless `always`: a channel with no keys at all is in the
+    sequence only to hold the bone, and keeps its place there (and on export) by its key.
+    """
+    static = (BD.transform_to_matrix(importer.target_node.transform)
+              if getattr(importer, 'target_node', None) is not None else Matrix.Identity(4))
+
+    r = ti.properties.rotation[:]
+    static_q = (static.to_quaternion() if (max(r) > 3e+38 or min(r) < -3e+38)
+                else Quaternion(r))
+    static_t = Vector(ti.properties.translation)
+    for i in range(3):
+        if static_t[i] <= -1e+30 or static_t[i] >= 1e+30:
+            static_t[i] = static.translation[i]
+
+    path_prefix = importer.path_name + "." if importer.path_name else ""
+    # These keys go in the bone's own axes, which for a pretty bone are rotated by R --
+    # converted exactly as _import_transform_data converts animated keys. Left out, a
+    # rotation-only bone on VltGearDoor01 (b_Ramp) posed 168 units off its node.
+    pretty_R_q, pretty_R_q_inv, pretty_R_inv_3x3 = _pretty_rotation(importer)
+
+    has_rotation = (len(td.qrotations) or len(td.xrotations)
+                    or len(td.yrotations) or len(td.zrotations))
+    if not has_rotation:
+        vq = qinv @ static_q
+        if pretty_R_q:
+            vq = pretty_R_q_inv @ vq @ pretty_R_q
+        if always or abs(abs(vq.w) - 1.0) > 1e-6:
+            importer.bone_target.rotation_mode = "QUATERNION"
+            for i in range(4):
+                c = importer.action.fcurve_ensure_for_datablock(
+                    importer.action_target, path_prefix + "rotation_quaternion", index=i)
+                if i == 0: _add_actionslot(importer.action_target, c)
+                c.keyframe_points.insert(1, vq[i]).interpolation = 'LINEAR'
+
+    if not len(td.translations):
+        v = qinv @ (static_t - tiv)
+        if pretty_R_inv_3x3:
+            v = pretty_R_inv_3x3 @ v
+        if always or v.length > 1e-5:
+            for i in range(3):
+                c = importer.action.fcurve_ensure_for_datablock(
+                    importer.action_target, path_prefix + "location", index=i)
+                if i == 0: _add_actionslot(importer.action_target, c)
+                c.keyframe_points.insert(1, v[i]).interpolation = 'LINEAR'
+
+
+# #####################################
+# Importers for NiTimeController blocks. Controllers usually have their own interpolators,
+# but may not. If not, they get the interpolator from a parent ControllerLink, so it has
+# to be passed in.
+
+def _ignore_interp(interp):
+    """Determine whether to ignore an interpolator."""
+    return ((not interp) 
+            or (isinstance(interp, NiBlendInterpolator) 
+                and interp.properties.flags == InterpBlendFlags.MANAGER_CONTROLLED))
+
+
+def _import_transform_controller(tc:NiTransformController, 
+                                 importer:ControllerHandler, 
+                                 interp:NiInterpController=None):
+    """Import transform controller block."""
+    if not interp:
+        interp = tc.interpolator
+
+    if importer.animation_target and interp:
+        if importer.animation_target.type == 'ARMATURE':
+            # If the target isn't a bone, _animate_bone leaves path_name alone rather
+            # than clearing it, so importing anyway would write this controller's keys
+            # onto whatever bone was handled last.
+            if not importer._animate_bone(tc.target.name):
+                return
+            if not importer.action: importer._new_action()
+            importer._new_slot()
+            interp.import_node(importer, None)
+        else:
+            # Target is the object itself, not a bone. Clear the bone path left over
+            # from any bone handled earlier, or its keys land on that bone: an Empty
+            # has no pose.bones, so those fcurves are silently inert.
+            importer.path_name = ""
+            importer.bone_target = None
+            importer.target_node = tc.target
+            importer.action_group = "Object Transforms"
+            if not importer.action: importer._new_action()
+            importer._new_slot()
+            interp.import_node(importer, None)
+            importer._record_slot()
+    else:
+        importer.warn(f"Found no target for {type(tc)}")
+
+NiTransformController.import_node = _import_transform_controller
+
+
+def _import_alphatest_controller(ctlr:BSNiAlphaPropertyTestRefController, 
+                                 importer:ControllerHandler,
+                                 interp:NiInterpController=None):
+    importer.action_group = "Shader"
+    importer.path_name = 'nodes["AlphaProperty"].inputs["Alpha Threshold"].default_value'
+    if not interp:
+        interp = ctlr.interpolator
+    if _ignore_interp(interp):
+        if interp is None:
+            log.debug(f"No interpolator available for controller {ctlr.id}")
+        return
+    
+    td = interp.data
+    if td: 
+        if not importer.action: importer._new_action()
+        importer._new_slot()
+        td.import_node(importer)
+        importer._record_slot()
+    
+BSNiAlphaPropertyTestRefController.import_node = _import_alphatest_controller
+
+
+def _import_ESPFloat_controller(ctlr:BSEffectShaderPropertyFloatController, 
+                                 importer:ControllerHandler,
+                                 interp:NiInterpController=None):
+    """
+    Import float controller block.
+    importer.action_target should be the material node_tree the action affects.
+    """
+    if not interp:
+        interp = ctlr.interpolator
+    if _ignore_interp(interp):
+        if interp is not None and not interp.blockname.startswith('NiBlend'):
+            log.debug(f"Not importing interpolator {'None' if interp is None else interp.blockname} for controller {ctlr.id}")
+        return
+
+    if not importer.action_target:
+        importer.warn("No target object")
+
+    importer.action_group = "Shader"
+    importer.path_name = ""
+    try:
+        nodename, inputname, in_out = controlled_vars.nif_find(
+            importer.nif.game,
+            BSEffectShaderPropertyFloatController, 
+            ctlr.properties.controlledVariable)
+        if nodename is None:
+            raise Exception(f"Invalid controlled target on controller {ctlr.id}")
+        importer.path_name = \
+            f'nodes["{nodename}"].{in_out}["{inputname}"].default_value'
+    except Exception:
+        pass
+
+    if not importer.path_name: 
+        if ctlr.properties.controlledVariable == EffectShaderControlledVariable.Alpha_Transparency:
+            log.info(f"Common error: Nif controller {ctlr.id} attempting to control effect shader alpha transparency, which does not exist.")
+            return
+        else:
+            raise Exception(f"NYI: Cannot handle controlled variable on controller {ctlr.id}: {repr(EffectShaderControlledVariable(ctlr.properties.controlledVariable))}") 
+
+    td = interp.data
+    if td: 
+        if not importer.action: importer._new_action()
+        importer._new_slot()
+        td.import_node(importer)
+        importer._record_slot()
+    
+BSEffectShaderPropertyFloatController.import_node = _import_ESPFloat_controller
+
+
+def _import_ESPColor_controller(ctlr:BSEffectShaderPropertyColorController, 
+                                 importer:ControllerHandler,
+                                 interp:NiInterpController=None):
+    """
+    Import float controller block.
+    importer.action_target should be the material node_tree the action affects.
+    """
+    if not importer.action_target:
+        importer.warn("No target object")
+
+    importer.action_group = "Shader"
+    if "Fallout 4 MTS - Greyscale To Palette Vector" in importer.action_target.nodes:
+        importer.path_name = 'nodes["Fallout 4 MTS - Greyscale To Palette Vector"].inputs["Palette"].default_value'
+    else:
+        importer.path_name = 'nodes["Fallout 4 Effect"].inputs["Emission Color"].default_value'
+
+    if not interp:
+        interp = ctlr.interpolator
+    if _ignore_interp(interp):
+        if interp is None:
+            log.debug(f"No interpolator available for controller {ctlr.id}")
+        return
+    td = interp.data
+    if td: 
+        if not importer.action: importer._new_action()
+        importer._new_slot()
+        td.import_node(importer)
+        importer._record_slot()
+    
+BSEffectShaderPropertyColorController.import_node = _import_ESPColor_controller
+
+
+def _import_LSPColorController(ctlr:BSLightingShaderPropertyColorController, 
+                               importer:ControllerHandler,
+                               interp:NiInterpController=None):
+    """
+    Import controller block.
+    importer.action_target should be the material node_tree the action affects.
+    """
+    if not interp:
+        interp = ctlr.interpolator
+    if _ignore_interp(interp):
+        # If no usable interpolator, just skip. This is part of a ControllerSequence and
+        # we'll find it again when we load that.
+        if interp is None:
+            log.debug(f"No interpolator available for controller {ctlr.id}")
+        return
+
+    if not importer.action_target:
+        importer.warn("No target object")
+
+    importer.action_group = "Shader"
+    importer.path_name = ""
+    try:
+        nodename, inputname, in_out = controlled_vars.nif_find(
+            importer.nif.game,
+            BSLightingShaderPropertyColorController, 
+            ctlr.properties.controlledVariable)
+        importer.path_name = \
+                f'nodes["{nodename}"].{in_out}["{inputname}"].default_value'
+    except Exception:
+        pass
+
+    if not importer.path_name: 
+        importer.warn(f"NYI: Cannot handle controlled variable on controller {ctlr.id}: {repr(LightingShaderControlledColor(ctlr.properties.controlledVariable))}") 
+    else:    
+        
+        td = interp.data
+        if td: 
+            if not importer.action: importer._new_action()
+            importer._new_slot()
+            td.import_node(importer)
+            importer._record_slot()
+    
+BSLightingShaderPropertyColorController.import_node = _import_LSPColorController
+
+
+def _import_LSPFloatController(ctlr:BSLightingShaderPropertyFloatController, 
+                               importer:ControllerHandler,
+                               interp:NiInterpController=None):
+    """
+    Import controller block.
+    importer.action_target should be the material node_tree the action affects.
+    """
+    if not interp:
+        interp = ctlr.interpolator
+    if _ignore_interp(interp):
+        # If no usable interpolator, just skip. This is part of a ControllerSequence and
+        # we'll find it again when we load that.
+        if interp is None:
+            log.debug(f"No interpolator available for controller {ctlr.id}")
+        return
+
+    if not importer.action_target:
+        raise Exception("No target object")
+
+    importer.action_group = "Shader"
+    importer.path_name = ""
+    try:
+        nodename, inputname, in_out = controlled_vars.nif_find(
+            importer.nif.game,
+            BSLightingShaderPropertyFloatController, 
+            ctlr.properties.controlledVariable)
+        importer.path_name = \
+            f'nodes["{nodename}"].{in_out}["{inputname}"].default_value'
+    except Exception:
+        pass
+
+    if not importer.path_name: 
+        importer.warn(f"NYI: Cannot handle controlled variable on controller {ctlr.id}: {ctlr.properties.controlledVariable} on {ctlr.id}") 
+    else:    
+        
+        td = interp.data
+        if td: 
+            if not importer.action: importer._new_action()
+            importer._new_slot()
+            td.import_node(importer)
+            importer._record_slot()
+    
+BSLightingShaderPropertyFloatController.import_node = _import_LSPFloatController
+
+
+def _import_VisController(ctlr:NiVisController, 
+                          importer:ControllerHandler,
+                          interp:NiInterpController=None):
+    """
+    Import NiVisController block. Visibility controllers seem to turn visibility
+    on and off, which we implement thorugh the 'hide_viewport' fcurve path.
+    """
+    if not interp:
+        interp = ctlr.interpolator
+    if _ignore_interp(interp):
+        # If no usable interpolator, just skip. This is part of a ControllerSequence and
+        # we'll find it again when we load that.
+        if interp is None:
+            log.debug(f"No interpolator available for controller {ctlr.id}")
+        return
+
+    if not importer.action_target:
+        raise Exception("No target object")
+
+    importer.action_group = "Visibility"
+    importer.path_name = 'hide_viewport'
+        
+    if not importer.action: importer._new_action()
+    importer._new_slot()
+    td = interp.data
+    if td: td.import_node(importer)
+    importer._record_slot()
+    
+NiVisController.import_node = _import_VisController
+
+
+def _import_multitarget_transform_controller( 
+        block:ControllerLink, 
+        importer:ControllerHandler, 
+        interp:NiInterpController, ):
+    """Import multitarget transform controller block from a controller link block."""
+    # NiMultiTargetTransformController doesn't actually link to a controller or an
+    # interpolator. It just references the target objects. The parent Control Link
+    # block references the interpolator.
+    #
+    # A target that's a bone already has its pose-bone path from _animate_bone; only an
+    # object target animates its own transform.
+    if importer.bone_target is None:
+        importer.action_group = None
+        importer.path_name = ""
+
+
+NiMultiTargetTransformController.import_node = _import_multitarget_transform_controller
+
+
+def _import_controller_sequence(seq:NiControllerSequence, 
+                                importer:ControllerHandler,
+                                interp=None):
+    """
+    Import a single controller sequence block.
+    
+    A controller sequence represents a single animation. It contains a list of
+    ControllerLink structures, called "Controlled Block" in NifSkope. (They are not
+    full, separate blocks in the nif file.) Each Controller Link block controls one
+    element being animated.
+
+    A ControllerSequence maps to multiple Blender actions, because several objects may
+    be animated. The actions are marked as assets so they persist. 
+
+    There may be text keys associated with this animation. They are represented as
+    Blender TimelineMarker objects and apply across all the different actions that
+    make up the animation. They are aso stored as a dictionary on the actions so they
+    can be recovered when the user switches between animations.
+    """
+    importer._new_animation(seq)
+    importer.anim_name = seq.name
+    importer.controller_sequence = seq
+    importer.start_time = min(importer.start_time, seq.properties.startTime)
+    importer.end_time = max(importer.end_time, seq.properties.stopTime)
+    # Every sequence of a manager starts from the manager's target. The blocks of the
+    # previous sequence moved animation_target, so don't take it from there.
+    if importer.sequence_target is None:
+        importer.sequence_target = importer.animation_target
+    importer.animation_target = importer.sequence_target
+
+    if importer.animation_target.type == 'ARMATURE':
+        importer._new_armature_action(seq)
+    else:
+        importer._new_action()
+
+    for cb in seq.controlled_blocks:
+        importer._import_controller_link(seq, cb)
+
+    if seq.text_key_data: importer._import_text_keys(seq.text_key_data)
+
+NiControllerSequence.import_node = _import_controller_sequence
+
+
+def _import_controller_manager(cm:NiControllerManager, 
+                                importer:ControllerHandler, 
+                                interp=None):
+    if not hasattr(bpy.types, 'ActionSlot'):
+        log.warning("Blender version does not support Action Slots; cannot import controller manager properly.")
+        return
+    
+    a = None
+    for seq in cm.sequences.values():
+        seq.import_node(importer)
+        if not a: a = importer.action
+    if a: 
+        apply_action(a)
+
+NiControllerManager.import_node = _import_controller_manager
+
+
+def _get_interpolation_type(curvelist):
+    """
+    Return the interpolation type needed to represet a set of fcurves. If any curve has
+    bezier handles, the interpolation will be QUADRATIC. 
+    """
+    for c in curvelist:
+        for k in c.keyframe_points:
+            if k.interpolation == 'BEZIER':
+                return NiKeyType.QUADRATIC_KEY
+    return NiKeyType.LINEAR_KEY
+
+
+def _parse_transform_curves(exporter:ControllerHandler, curve_list):
+    """
+    Pull fcurves affecting the same target object off the list and parse them. Return
+    a NiTransformData object representing the fcurves, and the curves themselves.
+
+    Rules:
+
+    * If rotationType == LINEAR or QUADRATIC, rotation keys are quaternions, no quadratic
+    interpolation, only one channel. Generally many more keyframes emitted.
+
+    * If rotationType == XYZ, rotation keys are Eulers, X, Y, and Z in separate channels,
+    each channel has its own interpolation (which can be different), and key times and
+    number of signatures can be different.
+
+    * Translation keys are XYZ but only one channel, and one interpolation type.
+    """
+    loc = []
+    eu = []
+    quat = []
+    scale = []
+    props = NiTransformDataBuf()
+    c = None
+
+    targetname, curve_type = curve_bone_target(curve_list[0])
+    while curve_list:
+        c = curve_list.pop(0)
+        if curve_type == "location":
+            loc.append(c)
+        elif curve_type == "rotation_quaternion":
+            quat.append(c)
+        elif curve_type == "rotation_euler":
+            eu.append(c)
+        elif curve_type == "scale":
+            scale.append(c)
+        else:
+            log.warning(f"Unknown curve type: {c.data_path}")
+        
+        if not curve_list: break
+        t1, curve_type = curve_bone_target(curve_list[0]) 
+        if t1 != targetname: break
+        targetname = t1
+    
+    if len(loc) != 3 and len(eu) != 3 and len(quat) != 4:
+        log.info("No useable transforms in fcurves for "
+            + f"{c.data_path[0:-6] if c.data_path.endswith('.scale') else c.data_path}")
+    
+    if loc: 
+        props.translations.interpolation = _get_interpolation_type(loc)
+    if quat: 
+        props.rotationType = _get_interpolation_type(quat)
+    if eu:
+        props.rotationType = NiKeyType.XYZ_ROTATION_KEY
+        props.xRotations.interpolation = _get_interpolation_type([eu[0]])
+        props.yRotations.interpolation = _get_interpolation_type([eu[1]])
+        props.zRotations.interpolation = _get_interpolation_type([eu[2]])
+    if scale:
+        props.scales.interpolation = _get_interpolation_type([scale[0]])
+
+    return props, loc, eu, quat, scale
+
+
+def _export_quaterion_curves(exporter, td, quat, rot_type, targ_q,
+                             R_q=None, R_q_inv=None):
+    """
+    Export quaternion fcurves.
+
+    td = NiTransformData object
+    quat = list of 4 fcurves containing quaternion values
+    rot_type = Indicates whether bezier or linear curves are used
+    targ_q = rotation of the target bone, if any
+    R_q, R_q_inv = pretty bone rotation quaternions (None if not pretty)
+    """
+    # Can't do quadratic interpolation with quaternions, so if the rot_type is QUADRATIC
+    # export keys using the current fps.
+    if rot_type == NiKeyType.QUADRATIC_KEY:
+        timesig = exporter.start_time
+        timestep = 1/(exporter.fps * ANIMATION_TIME_ADJUST)
+
+        while timesig < exporter.stop_time + 0.0001:
+            fr = timesig * (exporter.fps * ANIMATION_TIME_ADJUST) + 1
+            tdq = Quaternion([quat[0].evaluate(fr),
+                                quat[1].evaluate(fr),
+                                quat[2].evaluate(fr),
+                                quat[3].evaluate(fr)])
+            if R_q:
+                tdq = R_q @ tdq @ R_q_inv
+            kq = targ_q  @ tdq
+            td.add_qrotation_key(timesig, kq)
+            timesig += timestep
+
+    else:
+        # The curve uses linear interpolation, so it's fine to export just keyframes. Each
+        # fcurve of the quaternion could have different keyframes but it's not likely and
+        # nifs don't support it, so don't allow it.
+        if not all_equal([len(quat[0].keyframe_points), len(quat[1].keyframe_points),
+                          len(quat[2].keyframe_points), len(quat[3].keyframe_points)]):
+            raise Exception("Different number of quaternion keyframes")
+
+        for k1, k2, k3, k4 in zip(quat[0].keyframe_points, quat[1].keyframe_points,
+                                quat[2].keyframe_points, quat[3].keyframe_points):
+            if not all_NearEqual([k1.co[0], k2.co[0], k3.co[0], k4.co[0]]):
+                raise Exception ("Quaternion keyframes not at matching times")
+
+            tdq = Quaternion([k1.co[1], k2.co[1], k3.co[1], k4.co[1]])
+            if R_q:
+                tdq = R_q @ tdq @ R_q_inv
+            timesig = (k1.co[0]-1)/(exporter.fps * ANIMATION_TIME_ADJUST)
+            kq = targ_q  @ tdq
+            td.add_qrotation_key(timesig, kq)
+
+
+def _curves_aligned(keylists):
+    """True if all the given key lists have keys at the same times."""
+    if len({len(k) for k in keylists}) != 1:
+        return False
+    return all(all_NearEqual([k.time for k in keys]) for keys in zip(*keylists))
+
+
+def _resample_euler_curves(exporter, td, eu):
+    """
+    Sample all three Euler fcurves at the union of their keyframe times.
+
+    The nif stores X/Y/Z rotations as three independent channels, each free to
+    have its own key times. Converting them (to un-conjugate a pretty-bone or
+    bone rotation) means going Euler->quaternion->Euler, which needs all three
+    values at the same instant, so the channels have to be put on a common
+    timeline first.
+
+    Sampling at the union keeps every original key time; only the added samples
+    are interpolated, and those are evaluated on the blender curve so they sit
+    on the existing shape. Tangents for a quadratic channel are taken from the
+    curve's local slope. (Note the caller does not convert tangents anyway --
+    it converts values and keeps the tangents as-is -- so a quadratic channel
+    is already approximate through this path.)
+
+    Returns [xkeys, ykeys, zkeys].
+    """
+    frames = sorted({round(p.co.x, 4) for c in eu for p in c.keyframe_points})
+    scale = exporter.fps * ANIMATION_TIME_ADJUST
+    keytypes = [td.properties.xRotations.interpolation,
+                td.properties.yRotations.interpolation,
+                td.properties.zRotations.interpolation]
+    result = []
+    for curve, keytype in zip(eu, keytypes):
+        keys = []
+        for i, f in enumerate(frames):
+            if keytype == NiKeyType.QUADRATIC_KEY:
+                k = QuadScalarKey()
+                # Local slope by central difference; tangents are slope scaled by
+                # the gap to the neighbouring key, matching _key_blender_to_nif.
+                eps = 0.01
+                slope = (curve.evaluate(f + eps) - curve.evaluate(f - eps)) / (2 * eps)
+                prev_gap = f - frames[i-1] if i > 0 else 1.0
+                next_gap = frames[i+1] - f if i < len(frames)-1 else 1.0
+                k.forward = slope * prev_gap
+                k.backward = slope * next_gap
+            else:
+                k = LinearScalarKey()
+            k.time = (f - 1) / scale
+            k.value = curve.evaluate(f)
+            keys.append(k)
+        result.append(keys)
+    return result
+
+
+def _export_euler_curves(exporter, td, eu, targ_q, R_q=None, R_q_inv=None):
+    """
+    Export Euler fcurves.
+
+    td = NiTransformData object
+    eu = list of 3 fcurves containing Euler x/y/z values
+    targ_q = rotation of the target bone, if any
+    R_q, R_q_inv = pretty bone rotation quaternions (None if not pretty)
+    """
+    if td.properties.xRotations.interpolation == NiKeyType.QUADRATIC_KEY:
+        xkeys = exporter._get_curve_quad_values(eu[0])
+    else:
+        xkeys = exporter._get_curve_linear_values(eu[0])
+    if td.properties.yRotations.interpolation == NiKeyType.QUADRATIC_KEY:
+        ykeys = exporter._get_curve_quad_values(eu[1])
+    else:
+        ykeys = exporter._get_curve_linear_values(eu[1])
+    if td.properties.zRotations.interpolation == NiKeyType.QUADRATIC_KEY:
+        zkeys = exporter._get_curve_quad_values(eu[2])
+    else:
+        zkeys = exporter._get_curve_linear_values(eu[2])
+
+    # Bone fcurve rotations are relative to the bone, but nif keyframes are absolute. So
+    # make the conversion if necessary. Also needed to un-conjugate pretty bone R.
+    need_conversion = (targ_q and not NearEqual(targ_q.angle, 0, epsilon=0.01)) or R_q
+    if need_conversion:
+        if not _curves_aligned([xkeys, ykeys, zkeys]):
+            # The channels have their own key times, but the conversion below needs
+            # x/y/z together. Put them on a common timeline. Whether this is needed
+            # must not depend on the pretty-bones display option, so resample rather
+            # than fail: a bone with a rotated rest needs the conversion regardless.
+            xkeys, ykeys, zkeys = _resample_euler_curves(exporter, td, eu)
+        for xk, yk, zk in zip(xkeys, ykeys, zkeys):
+            euk = Euler([xk.value, yk.value, zk.value])
+            quatk = euk.to_quaternion()
+            if R_q:
+                quatk = R_q @ quatk @ R_q_inv
+            if targ_q:
+                quatk = targ_q @ quatk
+            euk1 = quatk.to_euler()
+            xk.value = euk1[0]
+            yk.value = euk1[1]
+            zk.value = euk1[2]
+
+    td.add_xyz_rotation_keys("X", xkeys)
+    td.add_xyz_rotation_keys("Y", ykeys)
+    td.add_xyz_rotation_keys("Z", zkeys)
+
+
+def _export_scale_curves(exporter, td, scale):
+    """
+    Export scale fcurves as the nif's scale keys.
+
+    A nif animates scale with one uniform factor, so one channel is written. Blender allows a
+    different scale per axis; if the curves disagree, the X curve is used and the user told.
+    """
+    if td.properties.scales.interpolation == NiKeyType.QUADRATIC_KEY:
+        keys = exporter._get_curve_quad_values(scale[0])
+    else:
+        keys = exporter._get_curve_linear_values(scale[0])
+
+    first = scale[0]
+    for other in scale[1:]:
+        pts, opts = list(first.keyframe_points), list(other.keyframe_points)
+        if (len(pts) != len(opts)
+                or any(abs(a.co[0] - b.co[0]) > 1e-4 or abs(a.co[1] - b.co[1]) > 1e-4
+                       for a, b in zip(pts, opts))):
+            exporter.warn(f"Scale animation on {first.data_path} differs between axes; nifs "
+                          f"scale uniformly, so only the X scale was exported")
+            break
+
+    td.add_xyz_rotation_keys("S", keys)
+
+
+def _get_keyframe_indices(curve_list):
+    """
+    Return an ordered list of keyframe indices for all keyframes in the given list of
+    fcurves.
+    """
+    frameset = set()
+    for c in curve_list:
+        for k in c.keyframe_points:
+            frameset.add(round(k.co[0], 2))
+    frames = list(frameset)
+    frames.sort()
+    return frames
+
+
+def _next_keyframe_index(curve_list):
+    findices = _get_keyframe_indices(curve_list)
+
+    keyframes = []
+    for c in curve_list:
+        keyframes.append(list(c.keyframe_points))
+    
+    for kfindex in findices:
+        matches = []
+        for i, klist in enumerate(keyframes):
+            if klist[0].co.x == kfindex:
+                matches.append(klist.pop(0))
+            else:
+                matches.append(None)
+        yield kfindex, matches
+
+
+def _export_loc_curves(exporter, td, loc, targ_xf, R_3x3=None, targ_q=None):
+    """
+    Export location fcurves.
+
+    td = NiTransformData object
+    loc = list of 3 fcurves containing location x/y/z values
+    R_3x3 = pretty bone R rotation matrix (None if not pretty)
+    targ_q = rotation of the target bone's rest transform, if any. A pose bone's location
+        is in the bone's own axes and the nif's keys are in its parent's, so the delta
+        has to be rotated back out. Import does the matching conversion.
+    """
+    def to_nif(v):
+        return (targ_q @ v if targ_q else v) + targ_xf.translation
+    if exporter.export_each_frame:
+        timesig = exporter.start_time
+        timestep = 1/(exporter.fps * ANIMATION_TIME_ADJUST)
+        while timesig < exporter.stop_time + 0.0001:
+            fr = timesig * (exporter.fps * ANIMATION_TIME_ADJUST) + 1
+            kv =Vector([loc[0].evaluate(fr),
+                            loc[1].evaluate(fr),
+                            loc[2].evaluate(fr)])
+            if R_3x3:
+                kv = R_3x3 @ kv
+            td.add_translation_key(timesig, to_nif(kv))
+            timesig += timestep
+
+    else:
+        if td.properties.translations.interpolation == NiKeyType.QUADRATIC_KEY:
+            if R_3x3:
+                # Get keys without base translation, rotate values and tangents,
+                # then add translation back.
+                keys = exporter._get_curve_quad_vector(loc)
+                for k in keys:
+                    v = to_nif(R_3x3 @ Vector(k.value[:3]))
+                    k.value[0] = v.x
+                    k.value[1] = v.y
+                    k.value[2] = v.z
+                    if hasattr(k, 'forward'):
+                        fwd = R_3x3 @ Vector(k.forward[:3])
+                        k.forward[0], k.forward[1], k.forward[2] = fwd.x, fwd.y, fwd.z
+                        bwd = R_3x3 @ Vector(k.backward[:3])
+                        k.backward[0], k.backward[1], k.backward[2] = bwd.x, bwd.y, bwd.z
+            else:
+                keys = exporter._get_curve_quad_vector(loc, targ_xf)
+            td.add_quad_translation_keys(keys)
+        else:
+            if not (len(loc[0].keyframe_points) == len(loc[1].keyframe_points) == len(loc[2].keyframe_points)):
+                raise Exception("NYI: Euler bone rotations when different number of fcurve keyframes")
+            for k0, k1, k2 in zip(loc[0].keyframe_points, loc[1].keyframe_points, loc[2].keyframe_points):
+                if not all_NearEqual([k0.co.x, k1.co.x, k2.co.x]):
+                    raise Exception (f"Translation keys not at matching frames for {exporter.action_target.name}")
+
+                timesig = (k0.co.x-1)/(exporter.fps * ANIMATION_TIME_ADJUST)
+                kv = Vector([k0.co.y, k1.co.y, k2.co.y])
+                if R_3x3:
+                    kv = R_3x3 @ kv
+                td.add_translation_key(timesig, to_nif(kv))
+
+
+def _export_transform_curves(exporter:ControllerHandler, curve_list, targetobj=None):
+    """
+    Export a group of curves from the list to a TransformInterpolator/TransformData pair.
+    A group maps to a controlled object, so each group should be one such pair. The curves
+    that are used are picked off the list.
+
+    * Returns (group name, TransformInterpolator for the set of curves).
+    """
+    if not curve_list: return None, None
+    
+    # Bone target implies targetobj is an armature containing that bone. Else targetobj is
+    # a ReprObject for a node being manipulated.
+    targetname, curve_type = curve_bone_target(curve_list[0])
+    export_R_q = None
+    export_R_q_inv = None
+    export_R_3x3 = None
+    if targetobj.type == 'ARMATURE':
+        if targetname not in targetobj.data.bones:
+            log.warning(f"Target of fcurve not found in armature: {curve_list[0].data_path}")
+            curve_list.pop(0)
+            targ_xf = None
+        else:
+            # Use get_bone_xform to get the NIF-space local transform,
+            # with pretty rotation R stripped out. With pretty bones,
+            # fcurve deltas are in bone-space (conjugated by R on import),
+            # so we un-conjugate them on export to get back NIF-space values.
+            # This armature's own rotation table, passed in: the module-wide one belongs to
+            # the export as a whole and isn't changed here.
+            if targetobj.get(PYN_ROTATE_BONES_PRETTY_PROP, False):
+                rotations = BD.game_rotations_pretty
+                axis = BD.game_axes.get(exporter.nif.game)
+                if axis:
+                    export_R_q = BD.game_rotations_pretty[axis][0].to_quaternion()
+                    export_R_q_inv = BD.game_rotations_pretty[axis][1].to_quaternion()
+                    export_R_3x3 = BD.game_rotations_pretty[axis][0].to_3x3()
+            else:
+                rotations = BD.game_rotations_none
+            targ_xf = BD.get_bone_xform(
+                targetobj, targetname, exporter.nif.game,
+                preserve_hierarchy=True, use_pose=False, rotations=rotations)
+    else:
+        # Exported interpolator needs to reflect the transform on the target object.
+        # Dwechest01 has nodes with rotations that trigger this.
+        bobj = targetobj.blender_obj
+        if bobj.parent:
+            targ_xf = bobj.parent.matrix_local.inverted() @ bobj.matrix_world
+        else:
+            targ_xf = bobj.matrix_local
+        targ_xf = Matrix.Identity(4)
+
+    if targ_xf is None: return None, None
+
+    targ_q = targ_xf.to_quaternion()
+    ## Hacky fix when trying to figure out dwemer chest problems.
+    # if bobj.name in ['Object188', 'Object189']:
+    #     targ_q = Quaternion(Vector((0, 1, 0,)), 3.14159)
+
+    loc = []
+    eu = []
+    quat = []
+    scale = []
+    ti = None
+
+    props, loc, eu, quat, scale = _parse_transform_curves(exporter, curve_list)
+
+    if quat or eu or loc or scale:
+        # Use FLT_MAX sentinels for the interpolator's base transform when we
+        # have keyed data.  Vanilla NIFs do this to tell the engine "use the
+        # keys, not a static base value".  Writing concrete values (e.g.
+        # identity) instead causes CK crashes on some meshes.
+        FMAX = -3.4028234663852886e+38
+        ti = NiTransformInterpolator.New(
+            file=exporter.nif,
+            translation=(FMAX, FMAX, FMAX),
+            rotation=(FMAX, FMAX, FMAX, FMAX),
+            scale=FMAX,
+        )
+        
+        td:NiTransformData = NiTransformData.New(
+            file=exporter.nif,
+            properties=props,
+            parent=ti,
+        )
+
+        if len(quat) == 4:
+            _export_quaterion_curves(exporter, td, quat, props.rotationType, targ_q,
+                                     export_R_q, export_R_q_inv)
+
+        if len(eu) == 3:
+            _export_euler_curves(exporter, td, eu, (targ_q if targetname else None),
+                                 export_R_q, export_R_q_inv)
+
+        if len(loc) == 3:
+            _export_loc_curves(exporter, td, loc, targ_xf, export_R_3x3,
+                               targ_q if targetname else None)
+
+        if scale:
+            _export_scale_curves(exporter, td, scale)
+
+    return (targetname if targetname else targetobj.name), ti
+
+NiTransformController.fcurve_exporter = _export_transform_curves
+
+
+def _create_blend_transform(exporter):
+    return NiBlendTransformInterpolator.New(exporter.nif)
+
+NiTransformController.blend_interpolator = _create_blend_transform
+
+
+def _export_color_curves(exporter, curve_list, target_obj=None):
+    """
+    Export fcurves controlling a color value. The 3 color channels are popped off the
+    curve list. Returns the interpolator.
+    """
+    dat = NiPosData.New(exporter.nif, interpolation=NiKeyType.QUADRATIC_KEY)
+    fcv = (curve_list.pop(0), curve_list.pop(0), curve_list.pop(0), )
+
+    # Have to assume all channels have the same keyframes.
+    keyframes = [(None, None, None, )]
+    for k1, k2, k3 in zip(fcv[0].keyframe_points, fcv[1].keyframe_points, fcv[2].keyframe_points):
+        if k1.co[0] != k2.co[0] or k1.co[0] != k3.co[0]:
+            raise Exception("Cannot handle color fcurves with mismatched keyframes")
+        keyframes.append((k1, k2, k3,))
+    keyframes.append((None, None, None, ))
+
+    for i in range(1, len(keyframes)-1):
+        kfr, kfg, kfb = keyframes[i]
+        kfbuf = NiAnimKeyQuadTransBuf()
+        kfbuf.time = (kfr.co.x-1)/(exporter.fps * ANIMATION_TIME_ADJUST)
+        kfbuf.value[0] = kfr.co.y
+        kfbuf.forward[0], kfbuf.backward[0] = exporter._key_blender_to_nif(
+            kfp0=keyframes[i-1][0],
+            kfp1=keyframes[i][0],
+            kfp2=keyframes[i+1][0]
+        )
+        kfbuf.value[1] = kfg.co.y
+        kfbuf.forward[1], kfbuf.backward[1] = exporter._key_blender_to_nif(
+            kfp0=keyframes[i-1][1],
+            kfp1=keyframes[i][1],
+            kfp2=keyframes[i+1][1]
+        )
+        kfbuf.value[2] = kfb.co.y
+        kfbuf.forward[2], kfbuf.backward[2] = exporter._key_blender_to_nif(
+            kfp0=keyframes[i-1][2],
+            kfp1=keyframes[i][2],
+            kfp2=keyframes[i+1][2]
+        )
+        dat.add_key(kfbuf)
+
+    interp = NiPoint3Interpolator.New(exporter.nif, data=dat)
+    return "", interp
+
+BSLightingShaderPropertyColorController.fcurve_exporter = _export_color_curves
+BSEffectShaderPropertyColorController.fcurve_exporter = _export_color_curves
+
+
+def _create_blend_color(exporter):
+    return NiBlendPoint3Interpolator.New(exporter.nif)
+
+BSLightingShaderPropertyColorController.blend_interpolator = _create_blend_color
+BSEffectShaderPropertyColorController.blend_interpolator = _create_blend_color
+
+
+def _export_float_curves(exporter, fcurves, target_obj=None):
+    """
+    Export a float curve from the list to a NiFloatInterpolator/NiFloatData pair. 
+    The curve is picked off the list.
+
+    * Returns (group name, NiFloatInterpolator for the set of curves).
+    """
+    fc = fcurves.pop(0)
+    keys = exporter._get_curve_quad_values(fc)
+    fdp = NiFloatDataBuf()
+    fdp.keys.interpolation = NiKeyType.QUADRATIC_KEY
+    if len(keys) > 0 and type(keys[0]) is LinearScalarKey:
+        fdp.keys.interpolation = NiKeyType.LINEAR_KEY
+    fd = NiFloatData(file=exporter.nif, properties=fdp, keys=keys)
+
+    fip = NiFloatInterpolatorBuf()
+    fip.dataID = fd.id
+    fi = NiFloatInterpolator(file=exporter.nif, properties=fip)
+    return "", fi
+
+BSLightingShaderPropertyFloatController.fcurve_exporter = _export_float_curves
+BSEffectShaderPropertyFloatController.fcurve_exporter = _export_float_curves
+BSNiAlphaPropertyTestRefController.fcurve_exporter = _export_float_curves
+
+
+def _create_blend_float(exporter):
+    return NiBlendFloatInterpolator.New(exporter.nif)
+
+BSLightingShaderPropertyFloatController.blend_interpolator = _create_blend_float
+BSEffectShaderPropertyFloatController.blend_interpolator = _create_blend_float
+BSNiAlphaPropertyTestRefController.blend_interpolator = _create_blend_float
+
+
+def _export_bool_curves(exporter, fcurves, target_obj=None):
+    """
+    Export a bool curve from the list to a NiBoolInterpolator/NiBoolData pair. 
+    The curve is picked off the list.
+
+    * Returns (group name, NiBoolInterpolator for the set of curves).
+    """
+    fc = fcurves.pop(0)
+    keys = exporter._get_curve_bool_values(fc)
+    bip = NiBoolInterpolatorBuf()
+    bip.value = keys[0][1]
+    bi = NiBoolInterpolator(file=exporter.nif, properties=bip)
+    if len(keys) > 1:
+        # The value changes: a NiBoolData of the keys, linked to the interpolator.
+        NiBoolData.New(exporter.nif, interpolation=NiKeyType.LINEAR_KEY, keys=keys, parent=bi)
+    return target_obj.name, bi
+
+NiVisController.fcurve_exporter = _export_bool_curves
+
+
+def _create_blend_bool(exporter):
+    return NiBlendBoolInterpolator.New(exporter.nif)
+
+NiVisController.blend_interpolator = _create_blend_bool
+
+
+class AssignAnimPanel(bpy.types.Panel):
+    bl_idname = "PYNIFLY_apply_anim"
+    bl_label = "Apply Animation"
+    bl_space_type = 'PROPERTIES'
+    bl_region_type = 'WINDOW'
+    bl_context = "object"
+
+    def draw(self, context):
+        self.layout.label(text="Apply Animation")
+
+
+class WM_OT_ApplyAnim(bpy.types.Operator):
+    bl_idname = "wm.apply_anim"
+    bl_label = "Apply Nif Animation"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    # Keeping the list of animations in a module-level variable because EnumProperty doesn't
+    # like it if the list contents goes away.
+    _animations_found = []
+
+    anim_chooser : bpy.props.EnumProperty(name="Animation Selection",
+                                           items=_animations_for_pulldown,
+                                           )  # type: ignore
+    
+    @classmethod
+    def poll(cls, context):
+        return True
+
+    def invoke(self, context, event): # Used for user interaction
+        wm = context.window_manager
+        return wm.invoke_props_dialog(self)
+
+    def draw(self, context): # Draw options (typically displayed in the tool-bar)
+        row = self.layout
+        row.prop(self, "anim_chooser", text="Animation name")
+
+    def execute(self, context): # Runs by default 
+        apply_animation(self.anim_chooser, context.scene)
+        return {'FINISHED'}
+
+
+def _draw_apply_animation_menu_entry(self, context):
+    self.layout.operator(WM_OT_ApplyAnim.bl_idname)
+
+def register():
+    try:
+        bpy.types.VIEW3D_MT_view.remove(_draw_apply_animation_menu_entry)
+        bpy.utils.unregister_class(WM_OT_ApplyAnim)
+    except (RuntimeError, ValueError, AttributeError):
+        pass
+    bpy.types.VIEW3D_MT_view.append(_draw_apply_animation_menu_entry)
+    bpy.utils.register_class(WM_OT_ApplyAnim)
+
+def unregister():
+    try:
+        bpy.types.VIEW3D_MT_view.remove(_draw_apply_animation_menu_entry)
+        bpy.utils.unregister_class(WM_OT_ApplyAnim)
+    except (RuntimeError, ValueError, AttributeError):
+        pass
