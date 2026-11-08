@@ -64,6 +64,30 @@ To use a configuration file at a different location:
 python main.py --config "C:\path\to\config.json"
 ```
 
+## Build a portable release
+
+Install PyInstaller into the Python environment used to build the app:
+
+```powershell
+python -m pip install pyinstaller
+```
+
+Then run the release script from the project directory:
+
+```powershell
+python build_release.py
+```
+
+The script cleans `build/` and `dist/`, builds with `package.spec`, validates the executable and bundled runtime assets, and writes a portable ZIP under `dist/`. Version is read from `VERSION`, `version.txt`, or the optional `version` field in `config.json`, in that order; if none is present, it defaults to `0.1.0`.
+
+Options:
+
+```text
+--version 1.2.3   Override the release version
+--skip-zip        Build and validate without creating the ZIP
+--no-clean        Keep existing build/ and dist/ directories
+```
+
 ## Using the preview
 
 1. Select a directory using **Browse Folder** (or start with `--root`).
