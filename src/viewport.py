@@ -69,6 +69,20 @@ class ViewportRenderSettings:
     wireframe_overlay: bool = False
     show_ground_grid: bool = True
 
+    enable_ssr: bool = False
+    ssr_step_size: float = 1.0
+    ssr_max_steps: int = 32
+    ssr_thickness: float = 2.0
+
+    enable_ao: bool = False
+    ao_radius: float = 8.0
+    ao_intensity: float = 1.0
+    ao_bias: float = 0.02
+
+    enable_ssss: bool = False
+    ssss_radius: float = 5.0
+    ssss_falloff_color: Tuple[float, float, float] = (1.0, 0.45, 0.35)
+
 
 class OutfitViewportWidget(QOpenGLWidget):
     """
@@ -95,6 +109,12 @@ class OutfitViewportWidget(QOpenGLWidget):
 
         self.ctx: Optional[moderngl.Context] = None
         self.prog: Optional[moderngl.Program] = None
+        self.post_prog: Optional[moderngl.Program] = None
+        self.post_vao: Optional[moderngl.VertexArray] = None
+        self.scene_color: Optional[moderngl.Texture] = None
+        self.scene_depth: Optional[moderngl.Texture] = None
+        self.scene_fbo: Optional[moderngl.Framebuffer] = None
+        self._scene_target_size: Tuple[int, int] = (0, 0)
         self.grid_prog: Optional[moderngl.Program] = None
         self.grid_vao: Optional[moderngl.VertexArray] = None
         self.grid_vbo: Optional[moderngl.Buffer] = None
@@ -229,6 +249,14 @@ class OutfitViewportWidget(QOpenGLWidget):
         frag_src = (_SHADER_DIR / "default.frag").read_text(encoding="utf-8")
         self.prog = self.ctx.program(vertex_shader=vert_src, fragment_shader=frag_src)
 
+        post_vert_src = (_SHADER_DIR / "postprocess.vert").read_text(encoding="utf-8")
+        post_frag_src = (_SHADER_DIR / "postprocess.frag").read_text(encoding="utf-8")
+        self.post_prog = self.ctx.program(
+            vertex_shader=post_vert_src,
+            fragment_shader=post_frag_src,
+        )
+        self.post_vao = self.ctx.vertex_array(self.post_prog, [])
+
         self._init_default_textures()
         self._init_ground_grid()
 
@@ -244,19 +272,27 @@ class OutfitViewportWidget(QOpenGLWidget):
         pass
 
     def paintGL(self) -> None:
-        if self.ctx is None or self.prog is None:
+        if (
+            self.ctx is None
+            or self.prog is None
+            or self.post_prog is None
+            or self.post_vao is None
+        ):
             return
 
         qt_fbo_id = self.defaultFramebufferObject()
-        fbo = self.ctx.detect_framebuffer(qt_fbo_id)
-        fbo.use()
+        output_fbo = self.ctx.detect_framebuffer(qt_fbo_id)
         dpr = self.devicePixelRatioF()
         vp_w = max(1, int(self.width() * dpr))
         vp_h = max(1, int(self.height() * dpr))
         self.ctx.viewport = (0, 0, vp_w, vp_h)
+        self._ensure_scene_target(vp_w, vp_h)
+        assert self.scene_fbo is not None
+        self.scene_fbo.use()
+        self.ctx.viewport = (0, 0, vp_w, vp_h)
 
-        # Dark studio slate background
-        fbo.clear(0.13, 0.14, 0.17, 1.0, depth=1.0)
+        # Effects use only mesh color and depth; the grid is composited afterward.
+        self.scene_fbo.clear(0.13, 0.14, 0.17, 1.0, depth=1.0)
 
         aspect = vp_w / float(vp_h)
         proj = glm.perspective(glm.radians(self.cam_fov_deg), aspect, 1.0, 2500.0)
@@ -265,17 +301,6 @@ class OutfitViewportWidget(QOpenGLWidget):
         mv = view * model
         mv_inv = glm.inverse(mv)
         normal_mat = glm.mat3(glm.transpose(glm.inverse(mv)))
-
-        # Draw ground grid if enabled
-        if self.settings.show_ground_grid and self.grid_vao is not None and self.grid_prog is not None:
-            self.ctx.enable(moderngl.DEPTH_TEST)
-            self.ctx.depth_mask = False
-            self.ctx.enable(moderngl.BLEND)
-            self.ctx.blend_func = (moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA)
-            self.grid_prog["u_mvp"].write(bytes(glm.transpose(proj * view)))
-            self.grid_vao.render(moderngl.LINES)
-            self.ctx.depth_mask = True
-            self.ctx.disable(moderngl.BLEND)
 
         # Collect visible shapes and split into opaque vs alpha-blended passes
         opaque_items: List[GpuShapeItem] = []
@@ -332,6 +357,111 @@ class OutfitViewportWidget(QOpenGLWidget):
                 self._render_shape_item(item, wireframe=True)
             self.ctx.disable(moderngl.BLEND)
 
+        self._composite_postprocess(output_fbo, proj, vp_w, vp_h)
+
+        if (
+            self.settings.show_ground_grid
+            and self.grid_vao is not None
+            and self.grid_prog is not None
+            and self.scene_depth is not None
+        ):
+            output_fbo.use()
+            self.ctx.viewport = (0, 0, vp_w, vp_h)
+            self.ctx.disable(moderngl.DEPTH_TEST)
+            self.ctx.depth_mask = False
+            self.ctx.enable(moderngl.BLEND)
+            self.ctx.blend_func = (moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA)
+            self.grid_prog["u_mvp"].write(bytes(glm.transpose(proj * view)))
+            self.grid_prog["u_viewport_size"].value = (float(vp_w), float(vp_h))
+            self.grid_prog["u_depth_test_scene"].value = True
+            self.scene_depth.use(location=0)
+            self.grid_prog["u_scene_depth"].value = 0
+            self.grid_vao.render(moderngl.LINES)
+            self.ctx.depth_mask = True
+            self.ctx.disable(moderngl.BLEND)
+            self.ctx.enable(moderngl.DEPTH_TEST)
+
+    def _ensure_scene_target(self, width: int, height: int) -> None:
+        assert self.ctx is not None
+        if self.scene_fbo is not None and self._scene_target_size == (width, height):
+            return
+
+        self._release_scene_target()
+        self.scene_color = self.ctx.texture((width, height), 4, dtype="f1")
+        self.scene_color.filter = (moderngl.LINEAR, moderngl.LINEAR)
+        self.scene_color.repeat_x = False
+        self.scene_color.repeat_y = False
+        self.scene_depth = self.ctx.depth_texture((width, height))
+        self.scene_depth.filter = (moderngl.NEAREST, moderngl.NEAREST)
+        self.scene_depth.repeat_x = False
+        self.scene_depth.repeat_y = False
+        self.scene_fbo = self.ctx.framebuffer(
+            color_attachments=[self.scene_color],
+            depth_attachment=self.scene_depth,
+        )
+        self._scene_target_size = (width, height)
+
+    def _release_scene_target(self) -> None:
+        for resource in (self.scene_fbo, self.scene_color, self.scene_depth):
+            if resource is not None:
+                resource.release()
+        self.scene_fbo = None
+        self.scene_color = None
+        self.scene_depth = None
+        self._scene_target_size = (0, 0)
+
+    def _composite_postprocess(
+        self,
+        output_fbo: moderngl.Framebuffer,
+        projection: glm.mat4,
+        width: int,
+        height: int,
+    ) -> None:
+        assert (
+            self.ctx is not None
+            and self.post_prog is not None
+            and self.post_vao is not None
+            and self.scene_color is not None
+            and self.scene_depth is not None
+        )
+        output_fbo.use()
+        self.ctx.viewport = (0, 0, width, height)
+        self.ctx.disable(moderngl.DEPTH_TEST)
+        self.ctx.disable(moderngl.BLEND)
+        self.ctx.depth_mask = False
+
+        self.scene_color.use(location=0)
+        self.scene_depth.use(location=1)
+        self.post_prog["u_scene_color"].value = 0
+        self.post_prog["u_scene_depth"].value = 1
+        self.post_prog["u_viewport_size"].value = (float(width), float(height))
+        self.post_prog["u_projection"].write(bytes(glm.transpose(projection)))
+        self.post_prog["u_inverse_projection"].write(
+            bytes(glm.transpose(glm.inverse(projection)))
+        )
+
+        settings = self.settings
+        self.post_prog["u_enable_ssr"].value = settings.enable_ssr
+        self.post_prog["u_ssr_step_size"].value = max(0.1, settings.ssr_step_size)
+        self.post_prog["u_ssr_max_steps"].value = max(
+            1, min(128, int(settings.ssr_max_steps))
+        )
+        self.post_prog["u_ssr_thickness"].value = max(0.01, settings.ssr_thickness)
+        self.post_prog["u_enable_ao"].value = settings.enable_ao
+        self.post_prog["u_ao_radius"].value = max(0.1, settings.ao_radius)
+        self.post_prog["u_ao_intensity"].value = max(0.0, settings.ao_intensity)
+        self.post_prog["u_ao_bias"].value = max(0.0, settings.ao_bias)
+        self.post_prog["u_enable_ssss"].value = settings.enable_ssss
+        self.post_prog["u_ssss_radius"].value = max(1.0, settings.ssss_radius)
+        self.post_prog["u_ssss_falloff_color"].value = tuple(
+            max(0.0, min(1.0, float(channel)))
+            for channel in settings.ssss_falloff_color
+        )
+        self.post_vao.render(moderngl.TRIANGLES, vertices=3)
+
+        self.ctx.depth_mask = True
+        self.ctx.enable(moderngl.DEPTH_TEST)
+
     # ------------------------------------------------------------------
     # Internal Shader & GPU Resource Helpers
     # ------------------------------------------------------------------
@@ -370,8 +500,18 @@ class OutfitViewportWidget(QOpenGLWidget):
         grid_frag = """
         #version 330
         in vec4 v_col;
+        uniform sampler2D u_scene_depth;
+        uniform vec2 u_viewport_size;
+        uniform bool u_depth_test_scene;
         out vec4 fragColor;
         void main() {
+            if (u_depth_test_scene) {
+                vec2 uv = gl_FragCoord.xy / u_viewport_size;
+                float mesh_depth = texture(u_scene_depth, uv).r;
+                if (mesh_depth < 0.999999 && gl_FragCoord.z > mesh_depth + 0.0002) {
+                    discard;
+                }
+            }
             fragColor = v_col;
         }
         """

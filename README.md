@@ -11,6 +11,13 @@ Dibella's Wardrobe is a desktop previewer for Skyrim Special Edition and Anniver
 - Show CharGen-exported NIFs from `overwrite/SKSE/Plugins/CharGen` in the fallback list. Other overwrite folders are not included in the NIF tree.
 - Keep selected outfits in the wardrobe, lock outfits to reload them at startup, and hide or show individual outfits.
 - Adjust lighting, shader display options, and language in Settings. Translation choices are loaded from `locales.json`.
+- Tune screen-space reflections (SSR), ambient occlusion (GTAO), and screen-space subsurface scattering (SSSS) in Settings.
+
+## Advanced viewport effects
+
+The Settings panel exposes independent enable switches and quality controls for SSR (step size, maximum ray steps, and thickness), ambient occlusion (radius, intensity, and bias), and SSSS (radius and falloff color). All three effects are disabled by default.
+
+These are screen-space approximations evaluated from the rendered meshes' color and depth buffers. Background pixels are excluded, and the optional reference grid is composited separately so it does not contribute to the effects. Screen-space reflections can only reflect visible on-screen geometry; they do not represent off-screen objects or a room environment.
 
 ## Requirements
 
@@ -83,6 +90,6 @@ Available languages are read from `locales.json`. Each locale is an object keyed
 - `main.py` - application entry point.
 - `src/` - user interface, NIF loader, mod scanner, texture resolver, and viewport.
 - `io_scene_nifly/` - bundled NIF parsing library and native DLL.
-- `shaders/` - GLSL shaders used by the viewport.
+- `shaders/` - mesh and post-processing GLSL shaders used by the viewport.
 - `requirements.txt` - Python dependencies.
 - `CITATION.md` - acknowledgements and third-party dependency information.

@@ -49,6 +49,23 @@ class LightingConfig:
 
 
 @dataclass
+class ViewportEffectsConfig:
+    enable_ssr: bool = False
+    ssr_step_size: float = 1.0
+    ssr_max_steps: int = 32
+    ssr_thickness: float = 2.0
+
+    enable_ao: bool = False
+    ao_radius: float = 8.0
+    ao_intensity: float = 1.0
+    ao_bias: float = 0.02
+
+    enable_ssss: bool = False
+    ssss_radius: float = 5.0
+    ssss_falloff_color: tuple[float, float, float] = (1.0, 0.45, 0.35)
+
+
+@dataclass
 class CheckboxConfig:
     # Filter checkboxes
     meshes_and_caliente_only: bool = True
@@ -66,6 +83,7 @@ class AppConfig:
     default_folder: str = ""
     language: str = ""
     lighting: LightingConfig = field(default_factory=LightingConfig)
+    effects: ViewportEffectsConfig = field(default_factory=ViewportEffectsConfig)
     checkboxes: CheckboxConfig = field(default_factory=CheckboxConfig)
     locked_nifs: list[str] = field(default_factory=list)
 
@@ -113,6 +131,48 @@ class AppConfig:
                     setattr(cfg.lighting, key, float(val))
                 except (ValueError, TypeError):
                     pass
+
+        effects_data = data.get("effects", {})
+        if isinstance(effects_data, dict):
+            for key in (
+                "enable_ssr",
+                "ssr_step_size",
+                "ssr_max_steps",
+                "ssr_thickness",
+                "enable_ao",
+                "ao_radius",
+                "ao_intensity",
+                "ao_bias",
+                "enable_ssss",
+                "ssss_radius",
+            ):
+                if key not in effects_data:
+                    continue
+                try:
+                    current = getattr(cfg.effects, key)
+                    value = effects_data[key]
+                    if isinstance(current, bool):
+                        if isinstance(value, bool):
+                            setattr(cfg.effects, key, value)
+                    elif isinstance(current, int):
+                        setattr(cfg.effects, key, int(value))
+                    else:
+                        setattr(cfg.effects, key, float(value))
+                except (ValueError, TypeError, OverflowError):
+                    log.warning("Ignoring invalid viewport effect setting %s", key)
+
+            falloff_color = effects_data.get("ssss_falloff_color")
+            if (
+                isinstance(falloff_color, (list, tuple))
+                and len(falloff_color) == 3
+            ):
+                try:
+                    cfg.effects.ssss_falloff_color = tuple(
+                        max(0.0, min(1.0, float(channel)))
+                        for channel in falloff_color
+                    )
+                except (ValueError, TypeError, OverflowError):
+                    log.warning("Ignoring invalid SSSS falloff color")
 
         # checkboxes (supports both nested {"checkboxes": {...}} and flat keys)
         c_data = data.get("checkboxes", {})

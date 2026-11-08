@@ -1,13 +1,30 @@
 {
   "default_folder": "E:\\Skyrim\\MO2\\mods",
-  "language": "en",
+  "language": "zh",
   "lighting": {
     "light_azimuth_deg": 35.0,
     "light_elevation_deg": 28.0,
     "light_intensity": 0.85,
-    "ambient_intensity": 0.54,
-    "specular_multiplier": 1.31,
-    "env_reflection_multiplier": 1.57
+    "ambient_intensity": 0.45,
+    "specular_multiplier": 1.0,
+    "env_reflection_multiplier": 1.0
+  },
+  "effects": {
+    "enable_ssr": false,
+    "ssr_step_size": 1.0,
+    "ssr_max_steps": 32,
+    "ssr_thickness": 2.0,
+    "enable_ao": false,
+    "ao_radius": 8.0,
+    "ao_intensity": 1.0,
+    "ao_bias": 0.02,
+    "enable_ssss": false,
+    "ssss_radius": 5.0,
+    "ssss_falloff_color": [
+      1.0,
+      0.45,
+      0.35
+    ]
   },
   "checkboxes": {
     "meshes_and_caliente_only": true,
