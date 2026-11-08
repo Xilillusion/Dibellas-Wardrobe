@@ -21,6 +21,7 @@ from PySide6.QtCore import QModelIndex, QRect, QSize, Qt, QThread, QTimer, Signa
 from PySide6.QtGui import QBrush, QColor, QKeySequence, QPainter, QPen, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QFileDialog,
     QFormLayout,
     QFrame,
@@ -43,7 +44,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .config import AppConfig
+from .config import AppConfig, LightingConfig, load_locales
 from .nif_loader import LoadedNifData, NifLoader
 from .texture_resolver import TextureResolver
 from .viewport import OutfitViewportWidget
@@ -251,11 +252,15 @@ class AddedNifRowWidget(QWidget):
         on_double_click,
         visible: bool = True,
         remove_tooltip: str = "Remove this NIF",
+        hide_tooltip: str = "Hide this NIF",
+        show_tooltip: str = "Show this NIF",
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
         self._on_select = on_select
         self._on_double_click = on_double_click
+        self._hide_tooltip = hide_tooltip
+        self._show_tooltip = show_tooltip
         layout = QHBoxLayout(self)
         layout.setContentsMargins(4, 1, 4, 1)
         layout.setSpacing(4)
@@ -326,7 +331,9 @@ class AddedNifRowWidget(QWidget):
 
     def set_visible(self, visible: bool) -> None:
         self.btn_visibility.setText("◉" if visible else "○")
-        self.btn_visibility.setToolTip("Hide this NIF" if visible else "Show this NIF")
+        self.btn_visibility.setToolTip(
+            self._hide_tooltip if visible else self._show_tooltip
+        )
 
 
 class NeatTreeWidget(QTreeWidget):
@@ -416,23 +423,25 @@ class DibellasWardrobeWindow(QMainWindow):
         self.setWindowState(Qt.WindowState.WindowMaximized)
 
         self.config_path = config_path
-        self.config = AppConfig.load(config_path)
+        self._translations = load_locales()
+        self.config = AppConfig.load(
+            config_path,
+            supported_languages=self._translations,
+        )
+        self.language = self.config.language
+        self._i18n_bindings: List[tuple[QWidget, str, str]] = []
 
-        mo2_default = Path(r"E:\Skyrim\MO2\mods")
         cfg_folder = Path(self.config.default_folder) if self.config.default_folder else None
 
         if initial_root_dir:
-            self.current_root_dir = Path(initial_root_dir).resolve()
+            self.current_root_dir: Optional[Path] = Path(initial_root_dir).resolve()
         elif cfg_folder and cfg_folder.is_dir():
             self.current_root_dir = cfg_folder.resolve()
-        elif mo2_default.is_dir():
-            self.current_root_dir = mo2_default.resolve()
-        elif cfg_folder:
-            self.current_root_dir = cfg_folder
         else:
-            self.current_root_dir = Path.cwd().resolve()
+            self.current_root_dir = None
 
-        self.resolver = TextureResolver(extra_roots=[self.current_root_dir])
+        extra_roots = [self.current_root_dir] if self.current_root_dir else None
+        self.resolver = TextureResolver(extra_roots=extra_roots)
         self.loader = NifLoader(resolver=self.resolver)
 
         self._checked_nif_paths: Set[str] = set()
@@ -458,6 +467,52 @@ class DibellasWardrobeWindow(QMainWindow):
         self.populate_file_tree()
         self._autoload_locked_nifs()
 
+    def _t(self, key: str, **values: object) -> str:
+        translations = self._translations.get(self.language, {})
+        fallback = next(iter(self._translations.values()))
+        template = translations.get(key, fallback.get(key, key))
+        return template.format(**values)
+
+    def _bind_text(self, widget: QWidget, key: str, setter: str = "setText") -> None:
+        self._i18n_bindings.append((widget, key, setter))
+        getattr(widget, setter)(self._t(key))
+
+    def _on_language_changed(self, _index: int) -> None:
+        language = self.language_combo.currentData()
+        if language not in self._translations or language == self.language:
+            return
+        self.language = language
+        self.config.language = language
+        self.retranslate_ui()
+
+    def retranslate_ui(self) -> None:
+        for widget, key, setter in self._i18n_bindings:
+            getattr(widget, setter)(self._t(key))
+        self._retranslate_tree_helpers()
+        self._refresh_added_nifs()
+        self._update_added_nif_count()
+
+    def _retranslate_tree_helpers(self) -> None:
+        helper_keys = ("loading", "no_nif_files")
+        known_texts = {
+            translations[key]
+            for translations in self._translations.values()
+            for key in helper_keys
+        }
+
+        def visit(item: QTreeWidgetItem) -> None:
+            if item.text(0) in known_texts:
+                key = "loading" if item.text(0) in {
+                    translations["loading"]
+                    for translations in self._translations.values()
+                } else "no_nif_files"
+                item.setText(0, self._t(key))
+            for index in range(item.childCount()):
+                visit(item.child(index))
+
+        for index in range(self.file_tree.topLevelItemCount()):
+            visit(self.file_tree.topLevelItem(index))
+
     # ------------------------------------------------------------------
     # UI Construction
     # ------------------------------------------------------------------
@@ -469,7 +524,7 @@ class DibellasWardrobeWindow(QMainWindow):
                 background-color: #1b1d24;
                 color: #e4e7ef;
                 font-family: "Segoe UI", sans-serif;
-                font-size: 13px;
+                font-size: 10pt;
             }
             QGroupBox {
                 border: 1px solid #303442;
@@ -570,13 +625,17 @@ class DibellasWardrobeWindow(QMainWindow):
         mesh_layout.setContentsMargins(2, 2, 2, 2)
         mesh_layout.setSpacing(6)
 
-        dir_group = QGroupBox("Mod Directory")
+        dir_group = QGroupBox()
+        self._bind_text(dir_group, "mod_directory", "setTitle")
         dir_layout = QVBoxLayout(dir_group)
 
         path_row = QHBoxLayout()
-        self.root_path_edit = QLineEdit(str(self.current_root_dir))
+        self.root_path_edit = QLineEdit(
+            str(self.current_root_dir) if self.current_root_dir else ""
+        )
         self.root_path_edit.setReadOnly(True)
-        browse_btn = QPushButton("Browse Folder...")
+        browse_btn = QPushButton()
+        self._bind_text(browse_btn, "browse_folder")
         browse_btn.clicked.connect(self._on_browse_root_folder)
         path_row.addWidget(self.root_path_edit, stretch=1)
         path_row.addWidget(browse_btn)
@@ -584,34 +643,40 @@ class DibellasWardrobeWindow(QMainWindow):
 
         cfg_chk = self.config.checkboxes
         self.chk_meshes_and_caliente_only = self._add_checkbox(
-            dir_layout, "Show only meshes & CalienteTools",
+            dir_layout, self._t("show_meshes_caliente"),
             cfg_chk.meshes_and_caliente_only, self._on_filter_toggled
         )
-        self.chk_meshes_and_caliente_only.setToolTip(
-            "Filter out mods without meshes or CalienteTools folders, and show only those folders"
+        self._bind_text(self.chk_meshes_and_caliente_only, "show_meshes_caliente")
+        self.chk_meshes_and_caliente_only.setToolTip(self._t("show_meshes_caliente_tip"))
+        self._i18n_bindings.append(
+            (self.chk_meshes_and_caliente_only, "show_meshes_caliente_tip", "setToolTip")
         )
         self.chk_hide_low_weight = self._add_checkbox(
-            dir_layout, "Hide _0.nif (Low Weight Models)",
+            dir_layout, self._t("hide_low_weight"),
             cfg_chk.hide_low_weight, self._on_filter_toggled
         )
+        self._bind_text(self.chk_hide_low_weight, "hide_low_weight")
         self.chk_hide_gnd_folder = self._add_checkbox(
-            dir_layout, "Hide 'gnd' Folders",
+            dir_layout, self._t("hide_gnd"),
             cfg_chk.hide_gnd_folder, self._on_filter_toggled
         )
+        self._bind_text(self.chk_hide_gnd_folder, "hide_gnd")
 
         self.dir_group = dir_group
         self.dir_group.setVisible(cfg_chk.show_mod_dir_filter)
         mesh_layout.addWidget(dir_group)
 
         tree_group = RefreshableGroupBox(
-            "Outfit Meshes",
+            self._t("outfit_meshes"),
             self.populate_file_tree,
         )
+        self._bind_text(tree_group, "outfit_meshes", "setTitle")
         self.btn_refresh_tree = tree_group.btn_refresh
+        self._bind_text(self.btn_refresh_tree, "refresh_tree", "setToolTip")
         tree_layout = QVBoxLayout(tree_group)
 
         self.search_edit = QLineEdit()
-        self.search_edit.setPlaceholderText("Search mod name (e.g. bikini, cbbe, dx)...")
+        self._bind_text(self.search_edit, "search_mod", "setPlaceholderText")
         self.search_edit.textChanged.connect(self._on_search_text_changed)
         tree_layout.addWidget(self.search_edit)
 
@@ -632,7 +697,7 @@ class DibellasWardrobeWindow(QMainWindow):
         added_layout.setContentsMargins(2, 2, 2, 2)
         added_layout.setSpacing(6)
 
-        locked_group = QGroupBox("Locked Wardrobe (0)")
+        locked_group = QGroupBox(self._t("locked_wardrobe", count=0))
         locked_group_layout = QVBoxLayout(locked_group)
         self.locked_nifs_list = QListWidget()
         self.locked_nifs_list.setMinimumHeight(72)
@@ -642,7 +707,7 @@ class DibellasWardrobeWindow(QMainWindow):
         locked_group_layout.addWidget(self.locked_nifs_list, stretch=1)
         added_layout.addWidget(locked_group)
 
-        added_group = QGroupBox("Wardrobe (0)")
+        added_group = QGroupBox(self._t("wardrobe", count=0))
         added_group_layout = QVBoxLayout(added_group)
         self.added_nifs_list = QListWidget()
         self.added_nifs_list.setMinimumHeight(72)
@@ -651,7 +716,8 @@ class DibellasWardrobeWindow(QMainWindow):
         added_group_layout.addWidget(self.added_nifs_list, stretch=1)
         self.locked_nifs_group = locked_group
 
-        self.btn_clear_all_added = QPushButton("Clear Unlocked")
+        self.btn_clear_all_added = QPushButton()
+        self._bind_text(self.btn_clear_all_added, "clear_unlocked")
         self.btn_clear_all_added.clicked.connect(self.uncheck_all_nifs)
         added_group_layout.addWidget(self.btn_clear_all_added)
 
@@ -682,24 +748,22 @@ class DibellasWardrobeWindow(QMainWindow):
         s.specular_multiplier = cfg_light.specular_multiplier
         s.env_reflection_multiplier = cfg_light.env_reflection_multiplier
 
-        s.show_textures = cfg_chk.show_textures
-        s.enable_normal_map = cfg_chk.enable_normal_map
-        s.enable_specular = cfg_chk.enable_specular
-        s.enable_cubemap = cfg_chk.enable_cubemap
         s.wireframe_overlay = cfg_chk.wireframe_overlay
         s.show_ground_grid = cfg_chk.show_ground_grid
 
         center_layout.addWidget(self.viewport, stretch=1)
 
         cam_hint_row = QHBoxLayout()
-        cam_hint = QLabel("Controls: Left-Drag = Orbit  |  Right-Drag / Shift+Left-Drag = Pan  |  Scroll Wheel = Zoom")
+        cam_hint = QLabel()
+        self._bind_text(cam_hint, "camera_controls")
         cam_hint.setStyleSheet("color: #8f98b0; font-size: 12px;")
-        btn_reset_cam = QPushButton("Reset Camera (R)")
+        btn_reset_cam = QPushButton()
+        self._bind_text(btn_reset_cam, "reset_camera")
         btn_reset_cam.setShortcut("R")
         btn_reset_cam.clicked.connect(self.viewport.reset_camera)
 
-        self.btn_settings = QPushButton("Settings (S)")
-        self.btn_settings.setToolTip("Lighting & Skyrim Shader Options (S)")
+        self.btn_settings = QPushButton()
+        self._bind_text(self.btn_settings, "settings")
         self.btn_settings.setShortcut("S")
         self.btn_settings.clicked.connect(lambda: self._toggle_settings_sidebar())
 
@@ -715,16 +779,17 @@ class DibellasWardrobeWindow(QMainWindow):
         # COLUMN 4: Lighting & Skyrim Shader Controls Sidebar
         # ------------------------------------------------------------------
         right_panel = QWidget()
-        right_panel.setMinimumWidth(280)
+        right_panel.setMinimumWidth(400)
         right_layout = QVBoxLayout(right_panel)
         right_layout.setContentsMargins(6, 6, 6, 6)
         right_layout.setSpacing(6)
 
         sidebar_header = QHBoxLayout()
-        sidebar_title = QLabel("Lighting & Shader Options")
+        sidebar_title = QLabel()
+        self._bind_text(sidebar_title, "settings_title")
         sidebar_title.setStyleSheet("font-weight: 600; color: #f0d59c; font-size: 13px;")
         btn_close_sidebar = QPushButton("✕")
-        btn_close_sidebar.setToolTip("Close Settings Sidebar")
+        self._bind_text(btn_close_sidebar, "close_settings", "setToolTip")
         btn_close_sidebar.setFixedSize(22, 22)
         btn_close_sidebar.setStyleSheet(
             """
@@ -743,7 +808,18 @@ class DibellasWardrobeWindow(QMainWindow):
             """
         )
         btn_close_sidebar.clicked.connect(lambda: self._toggle_settings_sidebar(False))
+        language_label = QLabel()
+        self._bind_text(language_label, "language")
+        self.language_combo = QComboBox()
+        for language_code, translations in self._translations.items():
+            self.language_combo.addItem(translations["language_name"], language_code)
+        self.language_combo.setCurrentIndex(
+            self.language_combo.findData(self.language)
+        )
+        self.language_combo.currentIndexChanged.connect(self._on_language_changed)
         sidebar_header.addWidget(sidebar_title)
+        sidebar_header.addWidget(language_label)
+        sidebar_header.addWidget(self.language_combo)
         sidebar_header.addStretch(1)
         sidebar_header.addWidget(btn_close_sidebar)
         right_layout.addLayout(sidebar_header)
@@ -757,64 +833,64 @@ class DibellasWardrobeWindow(QMainWindow):
         scroll_layout.setSpacing(8)
 
         # Lighting Controls Group
-        light_group = QGroupBox("Lighting & Hemisphere Controls")
+        light_group = RefreshableGroupBox(
+            self._t("lighting_hemisphere"),
+            self._reset_lighting_controls,
+        )
+        self._bind_text(light_group, "lighting_hemisphere", "setTitle")
         light_form = QFormLayout(light_group)
 
+        self.btn_reset_lighting = light_group.btn_refresh
+        self._bind_text(self.btn_reset_lighting, "reset_lighting", "setToolTip")
+
         self.slider_light_azimuth, self.lbl_azimuth_val = self._add_slider_row(
-            light_form, "Light Rotation:", -180, 180, int(round(cfg_light.light_azimuth_deg)),
-            f"{int(round(cfg_light.light_azimuth_deg))}°", self._on_lighting_changed
+            light_form, self._t("light_rotation"), -180, 180, int(round(cfg_light.light_azimuth_deg)),
+            f"{int(round(cfg_light.light_azimuth_deg))}°", self._on_lighting_changed,
+            "light_rotation",
         )
         self.slider_light_elevation, self.lbl_elevation_val = self._add_slider_row(
-            light_form, "Light Elevation:", -60, 85, int(round(cfg_light.light_elevation_deg)),
-            f"{int(round(cfg_light.light_elevation_deg))}°", self._on_lighting_changed
+            light_form, self._t("light_elevation"), -60, 85, int(round(cfg_light.light_elevation_deg)),
+            f"{int(round(cfg_light.light_elevation_deg))}°", self._on_lighting_changed,
+            "light_elevation",
         )
         self.slider_key_intensity, self.lbl_key_val = self._add_slider_row(
-            light_form, "Key Light Power:", 0, 200, int(round(cfg_light.light_intensity * 100)),
-            f"{cfg_light.light_intensity:.2f}", self._on_lighting_changed
+            light_form, self._t("key_light_power"), 0, 200, int(round(cfg_light.light_intensity * 100)),
+            f"{cfg_light.light_intensity:.2f}", self._on_lighting_changed,
+            "key_light_power",
         )
         self.slider_ambient, self.lbl_ambient_val = self._add_slider_row(
-            light_form, "Ambient Light:", 0, 100, int(round(cfg_light.ambient_intensity * 100)),
-            f"{cfg_light.ambient_intensity:.2f}", self._on_lighting_changed
+            light_form, self._t("ambient_light"), 0, 100, int(round(cfg_light.ambient_intensity * 100)),
+            f"{cfg_light.ambient_intensity:.2f}", self._on_lighting_changed,
+            "ambient_light",
         )
         self.slider_specular, self.lbl_spec_val = self._add_slider_row(
-            light_form, "Specular Scale:", 0, 300, int(round(cfg_light.specular_multiplier * 100)),
-            f"{cfg_light.specular_multiplier:.2f}x", self._on_lighting_changed
+            light_form, self._t("specular_scale"), 0, 300, int(round(cfg_light.specular_multiplier * 100)),
+            f"{cfg_light.specular_multiplier:.2f}x", self._on_lighting_changed,
+            "specular_scale",
         )
         self.slider_env, self.lbl_env_val = self._add_slider_row(
-            light_form, "Env Reflection:", 0, 300, int(round(cfg_light.env_reflection_multiplier * 100)),
-            f"{cfg_light.env_reflection_multiplier:.2f}x", self._on_lighting_changed
+            light_form, self._t("env_reflection"), 0, 300, int(round(cfg_light.env_reflection_multiplier * 100)),
+            f"{cfg_light.env_reflection_multiplier:.2f}x", self._on_lighting_changed,
+            "env_reflection",
         )
 
         scroll_layout.addWidget(light_group)
 
         # Skyrim Shader Features Group
-        shader_group = QGroupBox("Skyrim BSLightingShader Options")
+        shader_group = QGroupBox()
+        self._bind_text(shader_group, "shader_options", "setTitle")
         shader_layout = QVBoxLayout(shader_group)
 
-        self.chk_show_textures = self._add_checkbox(
-            shader_layout, "Diffuse & Alpha Cutout (_d.dds / NiAlphaProperty)",
-            cfg_chk.show_textures, self._on_shader_toggles_changed
-        )
-        self.chk_normal_map = self._add_checkbox(
-            shader_layout, "Normal Map (_n.dds / _msn.dds)",
-            cfg_chk.enable_normal_map, self._on_shader_toggles_changed
-        )
-        self.chk_specular = self._add_checkbox(
-            shader_layout, "Normal Alpha Specular (Slot 1 Alpha)",
-            cfg_chk.enable_specular, self._on_shader_toggles_changed
-        )
-        self.chk_cubemap = self._add_checkbox(
-            shader_layout, "Environment CubeMap & Mask (_e.dds / _m.dds)",
-            cfg_chk.enable_cubemap, self._on_shader_toggles_changed
-        )
         self.chk_wireframe = self._add_checkbox(
-            shader_layout, "Wireframe Overlay",
+            shader_layout, self._t("wireframe_overlay"),
             cfg_chk.wireframe_overlay, self._on_shader_toggles_changed
         )
+        self._bind_text(self.chk_wireframe, "wireframe_overlay")
         self.chk_grid = self._add_checkbox(
-            shader_layout, "Show Ground Pedestal & Grid",
+            shader_layout, self._t("ground_grid"),
             cfg_chk.show_ground_grid, self._on_shader_toggles_changed
         )
+        self._bind_text(self.chk_grid, "ground_grid")
 
         scroll_layout.addWidget(shader_group)
         scroll_layout.addStretch(1)
@@ -846,7 +922,10 @@ class DibellasWardrobeWindow(QMainWindow):
     def save_config(self, path: Optional[Path | str] = None) -> None:
         """Save current user settings back to JSON config."""
         target_path = path if path else self.config_path
-        self.config.default_folder = str(self.current_root_dir)
+        self.config.default_folder = (
+            str(self.current_root_dir) if self.current_root_dir else ""
+        )
+        self.config.language = self.language
 
         # Lighting
         l = self.config.lighting
@@ -864,10 +943,6 @@ class DibellasWardrobeWindow(QMainWindow):
         c.hide_gnd_folder = self.chk_hide_gnd_folder.isChecked()
         c.show_mod_dir_filter = self.dir_group.isVisible()
 
-        c.show_textures = self.chk_show_textures.isChecked()
-        c.enable_normal_map = self.chk_normal_map.isChecked()
-        c.enable_specular = self.chk_specular.isChecked()
-        c.enable_cubemap = self.chk_cubemap.isChecked()
         c.wireframe_overlay = self.chk_wireframe.isChecked()
         c.show_ground_grid = self.chk_grid.isChecked()
         self.config.locked_nifs = sorted(self._locked_nif_paths)
@@ -901,8 +976,8 @@ class DibellasWardrobeWindow(QMainWindow):
         if visible:
             if not self.right_panel.isVisible():
                 self.right_panel.setVisible(True)
-                right_target_w = min(280, max(150, total_w - mesh_w - added_w - 200))
-                center_w = max(100, total_w - mesh_w - added_w - right_target_w)
+                right_target_w = min(420, max(400, total_w - mesh_w - added_w - 300))
+                center_w = max(300, total_w - mesh_w - added_w - right_target_w)
                 self.splitter.setSizes([mesh_w, added_w, center_w, right_target_w])
         else:
             if self.right_panel.isVisible():
@@ -910,8 +985,8 @@ class DibellasWardrobeWindow(QMainWindow):
                 center_w = total_w - mesh_w - added_w
                 self.splitter.setSizes([mesh_w, added_w, center_w, 0])
 
-    @staticmethod
     def _add_slider_row(
+        self,
         form: QFormLayout,
         label_text: str,
         min_val: int,
@@ -919,6 +994,7 @@ class DibellasWardrobeWindow(QMainWindow):
         init_val: int,
         val_text: str,
         callback,
+        label_key: str,
     ) -> tuple[QSlider, QLabel]:
         slider = QSlider(Qt.Orientation.Horizontal)
         slider.setRange(min_val, max_val)
@@ -936,7 +1012,9 @@ class DibellasWardrobeWindow(QMainWindow):
         layout.addWidget(slider, stretch=1)
         layout.addWidget(value_label)
 
-        form.addRow(label_text, row)
+        label = QLabel(label_text)
+        self._bind_text(label, label_key)
+        form.addRow(label, row)
         return slider, value_label
 
     @staticmethod
@@ -947,13 +1025,12 @@ class DibellasWardrobeWindow(QMainWindow):
         layout.addWidget(chk)
         return chk
 
-    @staticmethod
-    def _create_folder_tree_item(parent: QTreeWidget | QTreeWidgetItem, name: str, path: str, color: str) -> QTreeWidgetItem:
+    def _create_folder_tree_item(self, parent: QTreeWidget | QTreeWidgetItem, name: str, path: str, color: str) -> QTreeWidgetItem:
         folder_item = QTreeWidgetItem(parent, [name])
         folder_item.setData(0, ROLE_FOLDER_PATH, path)
         folder_item.setData(0, ROLE_IS_LOADED, False)
         folder_item.setForeground(0, QColor(color))
-        QTreeWidgetItem(folder_item, ["Loading...", ""])
+        QTreeWidgetItem(folder_item, [self._t("loading"), ""])
         return folder_item
 
     @staticmethod
@@ -986,8 +1063,8 @@ class DibellasWardrobeWindow(QMainWindow):
     def _on_browse_root_folder(self) -> None:
         chosen = QFileDialog.getExistingDirectory(
             self,
-            "Select Skyrim Mod Directory or MO2 'mods' Folder",
-            str(self.current_root_dir),
+            self._t("select_mod_directory"),
+            str(self.current_root_dir) if self.current_root_dir else "",
         )
         if chosen:
             self.set_root_directory(Path(chosen))
@@ -1010,7 +1087,7 @@ class DibellasWardrobeWindow(QMainWindow):
 
     def _start_search_worker(self) -> None:
         query = self.search_edit.text().strip()
-        if not query:
+        if not query or self.current_root_dir is None:
             self.populate_file_tree()
             return
 
@@ -1047,8 +1124,8 @@ class DibellasWardrobeWindow(QMainWindow):
     def populate_file_tree(self) -> None:
         r"""
         Dynamically populate top-level directory entries on demand.
-        Does NOT recursively scan or expand, ensuring instant loading even
-        for massive directories like E:\Skyrim\MO2\mods (500+ mods, 29,000+ NIFs).
+        Does NOT recursively scan or expand, ensuring instant loading for
+        large mod directories.
         """
         if self._search_thread and self._search_thread.isRunning():
             self._search_thread.cancel()
@@ -1056,6 +1133,10 @@ class DibellasWardrobeWindow(QMainWindow):
 
         self._updating_tree = True
         self.file_tree.clear()
+
+        if self.current_root_dir is None:
+            self._updating_tree = False
+            return
 
         hide_0 = self.chk_hide_low_weight.isChecked()
         hide_gnd_folder = self.chk_hide_gnd_folder.isChecked()
@@ -1111,7 +1192,8 @@ class DibellasWardrobeWindow(QMainWindow):
         meshes_caliente_only = self.chk_meshes_and_caliente_only.isChecked()
 
         is_mod_level = (
-            Path(folder_path).parent == self.current_root_dir
+            self.current_root_dir is not None
+            and Path(folder_path).parent == self.current_root_dir
             and not mod_has_mesh_or_caliente_folder(self.current_root_dir)
         )
 
@@ -1135,7 +1217,7 @@ class DibellasWardrobeWindow(QMainWindow):
                     added_any = True
 
             if not added_any:
-                empty_item = QTreeWidgetItem(item, ["(no .nif files)"])
+                empty_item = QTreeWidgetItem(item, [self._t("no_nif_files")])
                 empty_item.setForeground(0, QColor("#6c7285"))
                 empty_item.setFlags(Qt.ItemFlag.NoItemFlags)
 
@@ -1179,8 +1261,12 @@ class DibellasWardrobeWindow(QMainWindow):
             if show_error:
                 QMessageBox.warning(
                     self,
-                    "NIF Load Error",
-                    f"Could not parse '{Path(nif_key).name}':\n{exc}",
+                    self._t("nif_load_error"),
+                    self._t(
+                        "nif_load_error_message",
+                        filename=Path(nif_key).name,
+                        error=exc,
+                    ),
                 )
             return False
 
@@ -1209,6 +1295,8 @@ class DibellasWardrobeWindow(QMainWindow):
 
     def _mod_name_for_nif(self, nif_key: str) -> str:
         nif_path = Path(nif_key)
+        if self.current_root_dir is None:
+            return nif_path.parent.name
         try:
             relative_path = nif_path.resolve().relative_to(self.current_root_dir)
         except ValueError:
@@ -1239,12 +1327,14 @@ class DibellasWardrobeWindow(QMainWindow):
                 self._unlock_nif(k) if locked else self._lock_nif(k)
             ),
             visible=self._nif_visibility.get(nif_key, True),
-            remove_tooltip="Unlock this NIF" if locked else "Remove this NIF",
+            remove_tooltip=self._t("unlock_nif") if locked else self._t("remove_nif"),
+            hide_tooltip=self._t("hide_nif"),
+            show_tooltip=self._t("show_nif"),
         )
         row_widget.setToolTip(
-            "Double-click to unlock this NIF"
+            self._t("double_click_unlock")
             if locked
-            else "Double-click to move this NIF to the Locked Wardrobe"
+            else self._t("double_click_lock")
         )
         vp_width = max(100, target_list.viewport().width())
         item.setSizeHint(QSize(vp_width, 26))
@@ -1264,10 +1354,10 @@ class DibellasWardrobeWindow(QMainWindow):
 
     def _update_added_nif_count(self) -> None:
         self.added_nifs_group.setTitle(
-            f"Wardrobe ({len(self._added_nif_items)})"
+            self._t("wardrobe", count=len(self._added_nif_items))
         )
         self.locked_nifs_group.setTitle(
-            f"Locked Wardrobe ({len(self._locked_nif_items)})"
+            self._t("locked_wardrobe", count=len(self._locked_nif_items))
         )
 
     def _on_added_nif_clicked(self, item: QListWidgetItem) -> None:
@@ -1321,6 +1411,8 @@ class DibellasWardrobeWindow(QMainWindow):
         ]
 
     def _select_nif_in_tree(self, nif_key: str) -> None:
+        if self.current_root_dir is None:
+            return
         try:
             nif_path = Path(nif_key).resolve()
             relative_path = nif_path.relative_to(self.current_root_dir)
@@ -1400,12 +1492,18 @@ class DibellasWardrobeWindow(QMainWindow):
         s.env_reflection_multiplier = env_m
         self.viewport.update()
 
+    def _reset_lighting_controls(self) -> None:
+        defaults = LightingConfig()
+        self.slider_light_azimuth.setValue(int(round(defaults.light_azimuth_deg)))
+        self.slider_light_elevation.setValue(int(round(defaults.light_elevation_deg)))
+        self.slider_key_intensity.setValue(int(round(defaults.light_intensity * 100)))
+        self.slider_ambient.setValue(int(round(defaults.ambient_intensity * 100)))
+        self.slider_specular.setValue(int(round(defaults.specular_multiplier * 100)))
+        self.slider_env.setValue(int(round(defaults.env_reflection_multiplier * 100)))
+        self._on_lighting_changed()
+
     def _on_shader_toggles_changed(self) -> None:
         s = self.viewport.settings
-        s.show_textures = self.chk_show_textures.isChecked()
-        s.enable_normal_map = self.chk_normal_map.isChecked()
-        s.enable_specular = self.chk_specular.isChecked()
-        s.enable_cubemap = self.chk_cubemap.isChecked()
         s.wireframe_overlay = self.chk_wireframe.isChecked()
         s.show_ground_grid = self.chk_grid.isChecked()
         self.viewport.update()
