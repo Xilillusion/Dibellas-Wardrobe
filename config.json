@@ -19,5 +19,10 @@
     "enable_cubemap": true,
     "wireframe_overlay": false,
     "show_ground_grid": true
-  }
+  },
+  "locked_nifs": [
+    "E:\\Skyrim\\MO2\\mods\\CBBE 3BA\\meshes\\actors\\character\\unique\\female\\femalebody_1.nif",
+    "E:\\Skyrim\\MO2\\mods\\CBBE 3BA\\meshes\\actors\\character\\unique\\female\\femalefeet_1.nif",
+    "E:\\Skyrim\\MO2\\mods\\CBBE 3BA\\meshes\\actors\\character\\unique\\female\\femalehands_1.nif"
+  ]
 }

@@ -51,6 +51,7 @@ class AppConfig:
     default_folder: str = r"E:\Skyrim\MO2\mods"
     lighting: LightingConfig = field(default_factory=LightingConfig)
     checkboxes: CheckboxConfig = field(default_factory=CheckboxConfig)
+    locked_nifs: list[str] = field(default_factory=list)
 
     @classmethod
     def load(cls, path: Optional[Path | str] = None) -> AppConfig:
@@ -70,6 +71,10 @@ class AppConfig:
         # default_folder
         if "default_folder" in data and isinstance(data["default_folder"], str):
             cfg.default_folder = data["default_folder"]
+
+        locked_nifs = data.get("locked_nifs", [])
+        if isinstance(locked_nifs, list):
+            cfg.locked_nifs = [path for path in locked_nifs if isinstance(path, str)]
 
         # lighting (supports both nested {"lighting": {...}} and flat keys)
         l_data = data.get("lighting", {})

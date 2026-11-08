@@ -240,17 +240,22 @@ class ElidedLabel(QLabel):
 
 
 class AddedNifRowWidget(QWidget):
-    """Row widget for currently added NIFs with filename, mod name, and a pinned '✕' remove button."""
+    """Row widget for a wardrobe NIF with visibility and remove/unlock controls."""
 
     def __init__(
         self,
         text: str,
         on_remove,
         on_select,
+        on_toggle_visibility,
+        on_double_click,
+        visible: bool = True,
+        remove_tooltip: str = "Remove this NIF",
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
         self._on_select = on_select
+        self._on_double_click = on_double_click
         layout = QHBoxLayout(self)
         layout.setContentsMargins(4, 1, 4, 1)
         layout.setSpacing(4)
@@ -259,8 +264,30 @@ class AddedNifRowWidget(QWidget):
         self.label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         layout.addWidget(self.label, stretch=1)
 
+        self.btn_visibility = QPushButton()
+        self.btn_visibility.setFixedSize(20, 20)
+        self.btn_visibility.setStyleSheet(
+            """
+            QPushButton {
+                background: transparent;
+                border: none;
+                color: #aeb8cc;
+                font-size: 13px;
+                padding: 0px;
+            }
+            QPushButton:hover {
+                color: #ffffff;
+                background-color: #303543;
+                border-radius: 3px;
+            }
+            """
+        )
+        self.btn_visibility.clicked.connect(on_toggle_visibility)
+        layout.addWidget(self.btn_visibility, stretch=0)
+        self.set_visible(visible)
+
         self.btn_remove = QPushButton("✕")
-        self.btn_remove.setToolTip("Remove this NIF")
+        self.btn_remove.setToolTip(remove_tooltip)
         self.btn_remove.setFixedSize(18, 18)
         self.btn_remove.setStyleSheet(
             """
@@ -289,6 +316,17 @@ class AddedNifRowWidget(QWidget):
         super().mousePressEvent(event)
         if event.button() == Qt.MouseButton.LeftButton:
             self._on_select()
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._on_double_click()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+    def set_visible(self, visible: bool) -> None:
+        self.btn_visibility.setText("◉" if visible else "○")
+        self.btn_visibility.setToolTip("Hide this NIF" if visible else "Show this NIF")
 
 
 class NeatTreeWidget(QTreeWidget):
@@ -399,6 +437,11 @@ class DibellasWardrobeWindow(QMainWindow):
 
         self._checked_nif_paths: Set[str] = set()
         self._added_nif_items: Dict[str, QListWidgetItem] = {}
+        self._locked_nif_paths: Set[str] = {
+            str(Path(path).resolve()) for path in self.config.locked_nifs if path
+        }
+        self._locked_nif_items: Dict[str, QListWidgetItem] = {}
+        self._nif_visibility: Dict[str, bool] = {}
         self._highlighted_tree_items: List[QTreeWidgetItem] = []
         self._loaded_nif_cache: Dict[str, LoadedNifData] = {}
         self._updating_tree: bool = False
@@ -413,6 +456,7 @@ class DibellasWardrobeWindow(QMainWindow):
         self._apply_dark_theme()
         self._build_ui()
         self.populate_file_tree()
+        self._autoload_locked_nifs()
 
     # ------------------------------------------------------------------
     # UI Construction
@@ -588,6 +632,16 @@ class DibellasWardrobeWindow(QMainWindow):
         added_layout.setContentsMargins(2, 2, 2, 2)
         added_layout.setSpacing(6)
 
+        locked_group = QGroupBox("Locked Wardrobe (0)")
+        locked_group_layout = QVBoxLayout(locked_group)
+        self.locked_nifs_list = QListWidget()
+        self.locked_nifs_list.setMinimumHeight(72)
+        self.locked_nifs_list.setMaximumHeight(210)
+        self.locked_nifs_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.locked_nifs_list.itemClicked.connect(self._on_added_nif_clicked)
+        locked_group_layout.addWidget(self.locked_nifs_list, stretch=1)
+        added_layout.addWidget(locked_group)
+
         added_group = QGroupBox("Wardrobe (0)")
         added_group_layout = QVBoxLayout(added_group)
         self.added_nifs_list = QListWidget()
@@ -595,8 +649,9 @@ class DibellasWardrobeWindow(QMainWindow):
         self.added_nifs_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.added_nifs_list.itemClicked.connect(self._on_added_nif_clicked)
         added_group_layout.addWidget(self.added_nifs_list, stretch=1)
+        self.locked_nifs_group = locked_group
 
-        self.btn_clear_all_added = QPushButton("Clear All")
+        self.btn_clear_all_added = QPushButton("Clear Unlocked")
         self.btn_clear_all_added.clicked.connect(self.uncheck_all_nifs)
         added_group_layout.addWidget(self.btn_clear_all_added)
 
@@ -815,6 +870,7 @@ class DibellasWardrobeWindow(QMainWindow):
         c.enable_cubemap = self.chk_cubemap.isChecked()
         c.wireframe_overlay = self.chk_wireframe.isChecked()
         c.show_ground_grid = self.chk_grid.isChecked()
+        self.config.locked_nifs = sorted(self._locked_nif_paths)
 
         self.config.save(target_path)
 
@@ -1097,12 +1153,15 @@ class DibellasWardrobeWindow(QMainWindow):
         if not nif_key:
             return
 
+        if nif_key in self._locked_nif_paths:
+            return
+
         if nif_key not in self._checked_nif_paths:
             self._load_and_attach_outfit_nif(nif_key)
         else:
             self._detach_outfit_nif(nif_key)
 
-    def _load_and_attach_outfit_nif(self, nif_key: str) -> None:
+    def _load_and_attach_outfit_nif(self, nif_key: str, show_error: bool = True) -> bool:
         try:
             nif_data = self._loaded_nif_cache.get(nif_key)
             if nif_data is None:
@@ -1111,29 +1170,41 @@ class DibellasWardrobeWindow(QMainWindow):
 
             self.viewport.add_nif(nif_key, nif_data)
             self._checked_nif_paths.add(nif_key)
-            self._add_nif_to_added_list(nif_key)
+            self._nif_visibility.setdefault(nif_key, True)
+            self.viewport.set_nif_visible(nif_key, self._nif_visibility[nif_key])
+            self._add_nif_to_wardrobe_list(nif_key)
+            return True
         except Exception as exc:
             log.error("Failed loading NIF %s: %s", nif_key, exc)
-            QMessageBox.warning(
-                self,
-                "NIF Load Error",
-                f"Could not parse '{Path(nif_key).name}':\n{exc}",
-            )
+            if show_error:
+                QMessageBox.warning(
+                    self,
+                    "NIF Load Error",
+                    f"Could not parse '{Path(nif_key).name}':\n{exc}",
+                )
+            return False
 
     def _detach_outfit_nif(self, nif_key: str) -> None:
+        was_locked = nif_key in self._locked_nif_paths
         self._checked_nif_paths.discard(nif_key)
         self._loaded_nif_cache.pop(nif_key, None)
+        self._nif_visibility.pop(nif_key, None)
         self.viewport.remove_nif(nif_key)
         list_item = self._added_nif_items.pop(nif_key, None)
         if list_item is not None:
             self.added_nifs_list.takeItem(self.added_nifs_list.row(list_item))
+        locked_item = self._locked_nif_items.pop(nif_key, None)
+        if locked_item is not None:
+            self.locked_nifs_list.takeItem(self.locked_nifs_list.row(locked_item))
+        self._locked_nif_paths.discard(nif_key)
+        if was_locked:
+            self.save_config()
         self._update_added_nif_count()
 
     def uncheck_all_nifs(self) -> None:
-        """Remove all added outfit meshes from VRAM."""
-        self._checked_nif_paths.clear()
-        self._loaded_nif_cache.clear()
-        self.viewport.clear_outfit_nifs()
+        """Remove unlocked outfit meshes while preserving the locked wardrobe."""
+        for nif_key in tuple(self._checked_nif_paths - self._locked_nif_paths):
+            self._detach_outfit_nif(nif_key)
         self._refresh_added_nifs()
 
     def _mod_name_for_nif(self, nif_key: str) -> str:
@@ -1146,8 +1217,11 @@ class DibellasWardrobeWindow(QMainWindow):
             return self.current_root_dir.name
         return relative_path.parts[0] if len(relative_path.parts) > 1 else self.current_root_dir.name
 
-    def _add_nif_to_added_list(self, nif_key: str) -> None:
-        if nif_key in self._added_nif_items:
+    def _add_nif_to_wardrobe_list(self, nif_key: str) -> None:
+        locked = nif_key in self._locked_nif_paths
+        target_list = self.locked_nifs_list if locked else self.added_nifs_list
+        target_items = self._locked_nif_items if locked else self._added_nif_items
+        if nif_key in target_items:
             return
         item = QListWidgetItem()
         item.setData(ROLE_ADDED_NIF_PATH, nif_key)
@@ -1156,32 +1230,87 @@ class DibellasWardrobeWindow(QMainWindow):
         display_text = f"{Path(nif_key).name} ({self._mod_name_for_nif(nif_key)})"
         row_widget = AddedNifRowWidget(
             text=display_text,
-            on_remove=lambda _checked=False, k=nif_key: self._detach_outfit_nif(k),
+            on_remove=lambda _checked=False, k=nif_key: (
+                self._unlock_nif(k) if locked else self._detach_outfit_nif(k)
+            ),
             on_select=lambda k=nif_key: self._select_nif_in_tree(k),
+            on_toggle_visibility=lambda _checked=False, k=nif_key: self._toggle_nif_visibility(k),
+            on_double_click=lambda k=nif_key: (
+                self._unlock_nif(k) if locked else self._lock_nif(k)
+            ),
+            visible=self._nif_visibility.get(nif_key, True),
+            remove_tooltip="Unlock this NIF" if locked else "Remove this NIF",
         )
-        vp_width = max(100, self.added_nifs_list.viewport().width())
+        row_widget.setToolTip(
+            "Double-click to unlock this NIF"
+            if locked
+            else "Double-click to move this NIF to the Locked Wardrobe"
+        )
+        vp_width = max(100, target_list.viewport().width())
         item.setSizeHint(QSize(vp_width, 26))
-        self.added_nifs_list.addItem(item)
-        self.added_nifs_list.setItemWidget(item, row_widget)
-        self._added_nif_items[nif_key] = item
+        target_list.addItem(item)
+        target_list.setItemWidget(item, row_widget)
+        target_items[nif_key] = item
         self._update_added_nif_count()
 
     def _refresh_added_nifs(self) -> None:
         self.added_nifs_list.clear()
+        self.locked_nifs_list.clear()
         self._added_nif_items.clear()
+        self._locked_nif_items.clear()
         for nif_key in sorted(self._checked_nif_paths):
-            self._add_nif_to_added_list(nif_key)
+            self._add_nif_to_wardrobe_list(nif_key)
         self._update_added_nif_count()
 
     def _update_added_nif_count(self) -> None:
         self.added_nifs_group.setTitle(
             f"Wardrobe ({len(self._added_nif_items)})"
         )
+        self.locked_nifs_group.setTitle(
+            f"Locked Wardrobe ({len(self._locked_nif_items)})"
+        )
 
     def _on_added_nif_clicked(self, item: QListWidgetItem) -> None:
         nif_key = item.data(ROLE_ADDED_NIF_PATH)
         if nif_key:
             self._select_nif_in_tree(nif_key)
+
+    def _autoload_locked_nifs(self) -> None:
+        """Load NIFs saved in the locked wardrobe without showing startup dialogs."""
+        for nif_key in sorted(self._locked_nif_paths):
+            if not Path(nif_key).is_file():
+                log.warning("Locked NIF is not available: %s", nif_key)
+                continue
+            self._load_and_attach_outfit_nif(nif_key, show_error=False)
+
+    def _lock_nif(self, nif_key: str) -> None:
+        if nif_key not in self._checked_nif_paths or nif_key in self._locked_nif_paths:
+            return
+        self._locked_nif_paths.add(nif_key)
+        self.save_config()
+        self._refresh_added_nifs()
+
+    def _unlock_nif(self, nif_key: str) -> None:
+        if nif_key not in self._locked_nif_paths:
+            return
+        self._locked_nif_paths.discard(nif_key)
+        self.save_config()
+        self._refresh_added_nifs()
+
+    def _toggle_nif_visibility(self, nif_key: str) -> None:
+        visible = not self._nif_visibility.get(nif_key, True)
+        self._nif_visibility[nif_key] = visible
+        self.viewport.set_nif_visible(nif_key, visible)
+
+        item = self._locked_nif_items.get(nif_key) or self._added_nif_items.get(nif_key)
+        if item is not None:
+            row_widget = (
+                self.locked_nifs_list.itemWidget(item)
+                if nif_key in self._locked_nif_items
+                else self.added_nifs_list.itemWidget(item)
+            )
+            if isinstance(row_widget, AddedNifRowWidget):
+                row_widget.set_visible(visible)
 
     def _tree_siblings(self, parent_item: Optional[QTreeWidgetItem]) -> List[QTreeWidgetItem]:
         if parent_item is not None:

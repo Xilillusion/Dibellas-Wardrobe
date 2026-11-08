@@ -107,6 +107,7 @@ class OutfitViewportWidget(QOpenGLWidget):
         # Pending CPU LoadedNifData waiting for GL context, and active GPU shapes
         self._pending_nifs: Dict[str, LoadedNifData] = {}
         self._gpu_nifs: Dict[str, List[GpuShapeItem]] = {}
+        self._nif_visibility: Dict[str, bool] = {}
         self._base_body_visible: bool = True
 
         self.settings = ViewportRenderSettings()
@@ -148,6 +149,7 @@ class OutfitViewportWidget(QOpenGLWidget):
         """
         Upload all shapes of `nif_data` to GPU VRAM under `key` (or queue if GL is not yet initialized).
         """
+        self._nif_visibility.setdefault(key, True)
         if self.ctx is None:
             self._pending_nifs[key] = nif_data
             return
@@ -167,6 +169,7 @@ class OutfitViewportWidget(QOpenGLWidget):
     def remove_nif(self, key: str) -> None:
         """Remove a `.nif` and release its GPU buffers/textures from VRAM."""
         self._pending_nifs.pop(key, None)
+        self._nif_visibility.pop(key, None)
         if self.ctx is not None and key in self._gpu_nifs:
             self.makeCurrent()
             try:
@@ -176,9 +179,23 @@ class OutfitViewportWidget(QOpenGLWidget):
         self._emit_stats()
         self.update()
 
+    def set_nif_visible(self, key: str, visible: bool) -> None:
+        """Toggle a loaded NIF's visibility without releasing its scene resources."""
+        self._nif_visibility[key] = bool(visible)
+        self._emit_stats()
+        self.update()
+
+    def is_nif_visible(self, key: str) -> bool:
+        """Return whether a loaded NIF is visible."""
+        return self._nif_visibility.get(key, True)
+
     def clear_outfit_nifs(self) -> None:
         """Remove all loaded outfit `.nif` meshes while keeping the base mannequin."""
-        keys = [k for k in list(self._gpu_nifs.keys()) if k != self.BASE_BODY_KEY]
+        keys = [
+            k
+            for k in set(self._gpu_nifs) | set(self._pending_nifs)
+            if k != self.BASE_BODY_KEY
+        ]
         for k in keys:
             self.remove_nif(k)
 
@@ -266,6 +283,8 @@ class OutfitViewportWidget(QOpenGLWidget):
 
         for key, items in self._gpu_nifs.items():
             if key == self.BASE_BODY_KEY and not self._base_body_visible:
+                continue
+            if not self._nif_visibility.get(key, True):
                 continue
             for item in items:
                 ap = item.shape_data.alpha_prop
@@ -648,6 +667,8 @@ class OutfitViewportWidget(QOpenGLWidget):
         tri_count = 0
         for key, items in self._gpu_nifs.items():
             if key == self.BASE_BODY_KEY and not self._base_body_visible:
+                continue
+            if not self._nif_visibility.get(key, True):
                 continue
             if key != self.BASE_BODY_KEY:
                 nif_count += 1
