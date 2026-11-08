@@ -47,6 +47,7 @@ from PySide6.QtWidgets import (
 )
 
 from .config import AppConfig, LightingConfig, load_locales
+from .mod_scanner import ModScanner
 from .nif_loader import LoadedNifData, NifLoader
 from .texture_resolver import TextureResolver
 from .viewport import OutfitViewportWidget
@@ -57,6 +58,10 @@ ROLE_NIF_PATH = Qt.ItemDataRole.UserRole + 1
 ROLE_FOLDER_PATH = Qt.ItemDataRole.UserRole + 2
 ROLE_IS_LOADED = Qt.ItemDataRole.UserRole + 3
 ROLE_ADDED_NIF_PATH = Qt.ItemDataRole.UserRole
+ROLE_MOD_ROOT_PATH = Qt.ItemDataRole.UserRole + 4
+ROLE_MOD_RELATIVE_PATH = Qt.ItemDataRole.UserRole + 5
+ROLE_OVERWRITE_FALLBACK = Qt.ItemDataRole.UserRole + 6
+ROLE_OVERWRITE_RELATIVE_PATH = Qt.ItemDataRole.UserRole + 7
 
 TARGET_MOD_FOLDERS = {"meshes", "calientetools"}
 
@@ -104,6 +109,17 @@ def mod_has_mesh_or_caliente_folder(mod_path: Path | str) -> bool:
     return False
 
 
+def normalize_mods_root(folder: Path) -> Path:
+    """Use MO2's mods subdirectory when the user selected the MO2 instance root."""
+    if (
+        folder.name.casefold() != "mods"
+        and (folder / "mods").is_dir()
+        and (folder / "overwrite").is_dir()
+    ):
+        return folder / "mods"
+    return folder
+
+
 class NifSearchThread(QThread):
     """
     Background worker that recursively searches `root_dir` for .nif files
@@ -119,6 +135,7 @@ class NifSearchThread(QThread):
         hide_0: bool,
         hide_gnd_folder: bool = True,
         meshes_and_caliente_only: bool = True,
+        mod_scanner: Optional[ModScanner] = None,
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
@@ -127,6 +144,7 @@ class NifSearchThread(QThread):
         self.hide_0 = hide_0
         self.hide_gnd_folder = hide_gnd_folder
         self.meshes_and_caliente_only = meshes_and_caliente_only
+        self.mod_scanner = mod_scanner
         self._cancelled = False
 
     def cancel(self) -> None:
@@ -171,9 +189,42 @@ class NifSearchThread(QThread):
                         return
                     if is_filtered_nif_filename(fname, self.hide_0):
                         continue
+                    if self.mod_scanner:
+                        try:
+                            relative_parts = root_path.relative_to(
+                                self.root_dir
+                            ).parts
+                            if relative_parts:
+                                mod_path = self.root_dir / relative_parts[0]
+                                if self.mod_scanner.is_overridden_mod_file(
+                                    mod_path, relative_parts[1:] + (fname,)
+                                ):
+                                    continue
+                        except ValueError:
+                            pass
 
                     full_path = str((root_path / fname).resolve())
                     self.matchFound.emit(group_name, fname, full_path)
+            if self.mod_scanner:
+                for group_name, file_name, nif_path in self.mod_scanner.search_entries():
+                    if self._cancelled:
+                        return
+                    if self.query not in group_name.casefold():
+                        continue
+                    if is_filtered_nif_filename(nif_path.name, self.hide_0):
+                        continue
+                    target = self.mod_scanner.target_for_nif(nif_path)
+                    relative_parts = (
+                        target[1]
+                        if target
+                        else self.mod_scanner.fallback_target_for_nif(nif_path)
+                    )
+                    if self.hide_gnd_folder and relative_parts and any(
+                        is_filtered_folder_name(part, True)
+                        for part in relative_parts[:-1]
+                    ):
+                        continue
+                    self.matchFound.emit(group_name, file_name, str(nif_path))
         except Exception as exc:
             log.warning("Search error: %s", exc)
 
@@ -344,6 +395,7 @@ class AddedNifRowWidget(QWidget):
         remove_tooltip: str = "Remove this NIF",
         hide_tooltip: str = "Hide this NIF",
         show_tooltip: str = "Show this NIF",
+        show_remove: bool = True,
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
@@ -381,31 +433,32 @@ class AddedNifRowWidget(QWidget):
         layout.addWidget(self.btn_visibility, stretch=0)
         self.set_visible(visible)
 
-        self.btn_remove = QPushButton("✕")
-        self.btn_remove.setToolTip(remove_tooltip)
-        self.btn_remove.setFixedSize(18, 18)
-        self.btn_remove.setStyleSheet(
-            """
-            QPushButton {
-                background: transparent;
-                border: none;
-                color: #8f98b0;
-                font-size: 11px;
-                font-weight: bold;
-                padding: 0px;
-            }
-            QPushButton:hover {
-                color: #ff6b6b;
-                background-color: #382424;
-                border-radius: 3px;
-            }
-            QPushButton:pressed {
-                color: #ff4040;
-            }
-            """
-        )
-        self.btn_remove.clicked.connect(on_remove)
-        layout.addWidget(self.btn_remove, stretch=0)
+        if show_remove:
+            self.btn_remove = QPushButton("✕")
+            self.btn_remove.setToolTip(remove_tooltip)
+            self.btn_remove.setFixedSize(18, 18)
+            self.btn_remove.setStyleSheet(
+                """
+                QPushButton {
+                    background: transparent;
+                    border: none;
+                    color: #8f98b0;
+                    font-size: 11px;
+                    font-weight: bold;
+                    padding: 0px;
+                }
+                QPushButton:hover {
+                    color: #ff6b6b;
+                    background-color: #382424;
+                    border-radius: 3px;
+                }
+                QPushButton:pressed {
+                    color: #ff4040;
+                }
+                """
+            )
+            self.btn_remove.clicked.connect(on_remove)
+            layout.addWidget(self.btn_remove, stretch=0)
 
     def mousePressEvent(self, event) -> None:
         super().mousePressEvent(event)
@@ -524,17 +577,27 @@ class DibellasWardrobeWindow(QMainWindow):
         cfg_folder = Path(self.config.default_folder) if self.config.default_folder else None
 
         if initial_root_dir:
-            initial_folder = Path(initial_root_dir).resolve()
+            initial_folder = normalize_mods_root(Path(initial_root_dir).resolve())
             self.current_root_dir: Optional[Path] = (
                 initial_folder if initial_folder.is_dir() else None
             )
         elif cfg_folder and cfg_folder.is_dir():
-            self.current_root_dir = cfg_folder.resolve()
+            self.current_root_dir = normalize_mods_root(cfg_folder.resolve())
         else:
             self.current_root_dir = None
 
+        self.mod_scanner = (
+            ModScanner(self.current_root_dir)
+            if self.current_root_dir and self.current_root_dir.name.casefold() == "mods"
+            else None
+        )
         extra_roots = [self.current_root_dir] if self.current_root_dir else None
         self.resolver = TextureResolver(extra_roots=extra_roots)
+        if self.mod_scanner:
+            self.resolver.configure_mo2_paths(
+                self.current_root_dir,
+                self.mod_scanner.overwrite_root,
+            )
         self.loader = NifLoader(resolver=self.resolver)
 
         self._checked_nif_paths: Set[str] = set()
@@ -549,6 +612,7 @@ class DibellasWardrobeWindow(QMainWindow):
         self._updating_tree: bool = False
         self._search_thread: Optional[NifSearchThread] = None
         self._search_groups: Dict[str, QTreeWidgetItem] = {}
+        self._startup_locked_nif_refresh_pending = False
 
         self._search_timer = QTimer(self)
         self._search_timer.setSingleShot(True)
@@ -559,6 +623,12 @@ class DibellasWardrobeWindow(QMainWindow):
         self._build_ui()
         self.populate_file_tree()
         self._autoload_locked_nifs()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if self._startup_locked_nif_refresh_pending:
+            self._startup_locked_nif_refresh_pending = False
+            QTimer.singleShot(0, self._refresh_added_nifs)
 
     def _t(self, key: str, **values: object) -> str:
         translations = self._translations.get(self.language, {})
@@ -824,8 +894,7 @@ class DibellasWardrobeWindow(QMainWindow):
             self._t("restore"),
         )
         self.locked_nifs_list = QListWidget()
-        self.locked_nifs_list.setMinimumHeight(72)
-        self.locked_nifs_list.setMaximumHeight(210)
+        self.locked_nifs_list.setMinimumHeight(0)
         self.locked_nifs_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.locked_nifs_list.itemClicked.connect(self._on_added_nif_clicked)
         locked_group_layout.addWidget(self.locked_nifs_list, stretch=1)
@@ -1176,10 +1245,26 @@ class DibellasWardrobeWindow(QMainWindow):
         layout.addWidget(chk)
         return chk
 
-    def _create_folder_tree_item(self, parent: QTreeWidget | QTreeWidgetItem, name: str, path: str, color: str) -> QTreeWidgetItem:
+    def _create_folder_tree_item(
+        self,
+        parent: QTreeWidget | QTreeWidgetItem,
+        name: str,
+        path: str,
+        color: str,
+        mod_root: Optional[Path] = None,
+        mod_relative_path: tuple[str, ...] = (),
+        overwrite_fallback: bool = False,
+        overwrite_relative_path: tuple[str, ...] = (),
+    ) -> QTreeWidgetItem:
         folder_item = QTreeWidgetItem(parent, [name])
         folder_item.setData(0, ROLE_FOLDER_PATH, path)
         folder_item.setData(0, ROLE_IS_LOADED, False)
+        if mod_root is not None:
+            folder_item.setData(0, ROLE_MOD_ROOT_PATH, str(mod_root))
+            folder_item.setData(0, ROLE_MOD_RELATIVE_PATH, mod_relative_path)
+        if overwrite_fallback:
+            folder_item.setData(0, ROLE_OVERWRITE_FALLBACK, True)
+            folder_item.setData(0, ROLE_OVERWRITE_RELATIVE_PATH, overwrite_relative_path)
         folder_item.setForeground(0, QColor(color))
         QTreeWidgetItem(folder_item, [self._t("loading"), ""])
         return folder_item
@@ -1198,12 +1283,20 @@ class DibellasWardrobeWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def set_root_directory(self, folder: Path | str) -> None:
-        target = Path(folder).resolve()
+        target = normalize_mods_root(Path(folder).resolve())
         if not target.is_dir():
             return
         self.current_root_dir = target
+        self.mod_scanner = (
+            ModScanner(target) if target.name.casefold() == "mods" else None
+        )
+        self.resolver.configure_mo2_paths(
+            target if self.mod_scanner else None,
+            self.mod_scanner.overwrite_root if self.mod_scanner else None,
+        )
         self.root_path_edit.setText(str(target))
-        self.resolver.add_search_root(target)
+        if not self.mod_scanner:
+            self.resolver.add_search_root(target)
         self._refresh_added_nifs()
         self.populate_file_tree()
         try:
@@ -1257,6 +1350,7 @@ class DibellasWardrobeWindow(QMainWindow):
             hide_0=self.chk_hide_low_weight.isChecked(),
             hide_gnd_folder=self.chk_hide_gnd_folder.isChecked(),
             meshes_and_caliente_only=self.chk_meshes_and_caliente_only.isChecked(),
+            mod_scanner=self.mod_scanner,
             parent=self,
         )
         self._search_thread.matchFound.connect(self._on_search_match_found)
@@ -1307,6 +1401,21 @@ class DibellasWardrobeWindow(QMainWindow):
 
         for entry in entries:
             try:
+                if self.mod_scanner and self.mod_scanner.is_mods_root:
+                    if not entry.is_dir():
+                        continue
+                    if is_filtered_folder_name(entry.name, hide_gnd_folder):
+                        continue
+                    if meshes_caliente_only and not mod_has_mesh_or_caliente_folder(entry.path):
+                        continue
+                    self._create_folder_tree_item(
+                        self.file_tree,
+                        entry.name,
+                        entry.path,
+                        "#e0d2b4",
+                        mod_root=Path(entry.path),
+                    )
+                    continue
                 if entry.is_dir():
                     if is_filtered_folder_name(entry.name, hide_gnd_folder):
                         continue
@@ -1322,6 +1431,8 @@ class DibellasWardrobeWindow(QMainWindow):
             except OSError:
                 continue
 
+        if self.mod_scanner:
+            self._ensure_overwrite_fallback_item()
         self._updating_tree = False
 
     def _on_tree_item_expanded(self, item: QTreeWidgetItem) -> None:
@@ -1332,7 +1443,13 @@ class DibellasWardrobeWindow(QMainWindow):
             return
 
         folder_path = item.data(0, ROLE_FOLDER_PATH)
-        if not folder_path or not os.path.isdir(folder_path):
+        mod_root_value = item.data(0, ROLE_MOD_ROOT_PATH)
+        is_overwrite_fallback = bool(item.data(0, ROLE_OVERWRITE_FALLBACK))
+        if not folder_path or (
+            not os.path.isdir(folder_path)
+            and not mod_root_value
+            and not is_overwrite_fallback
+        ):
             return
 
         self._updating_tree = True
@@ -1349,22 +1466,75 @@ class DibellasWardrobeWindow(QMainWindow):
         )
 
         try:
+            mod_root = Path(mod_root_value).resolve() if mod_root_value else None
+            mod_relative_path = tuple(
+                item.data(0, ROLE_MOD_RELATIVE_PATH) or ()
+            )
+            fallback_relative_path = tuple(
+                item.data(0, ROLE_OVERWRITE_RELATIVE_PATH) or ()
+            )
+            local_entries = []
+            if os.path.isdir(folder_path) and not is_overwrite_fallback:
+                local_entries = sorted(
+                    list(os.scandir(folder_path)),
+                    key=lambda e: (not e.is_dir(), e.name.lower()),
+                )
+
+            overlay_entries = []
+            if self.mod_scanner and mod_root is not None:
+                overlay_entries = self.mod_scanner.mod_overlay_entries(
+                    mod_root, mod_relative_path
+                )
+                self._ensure_overwrite_fallback_item()
+            elif self.mod_scanner and is_overwrite_fallback:
+                overlay_entries = self.mod_scanner.fallback_entries(
+                    fallback_relative_path
+                )
+
+            merged_entries = {
+                entry.name.casefold(): (entry.name, entry.is_dir(), entry.path, False)
+                for entry in local_entries
+            }
+            for entry in overlay_entries:
+                merged_entries[entry.name.casefold()] = (
+                    entry.name,
+                    entry.is_dir,
+                    entry.path,
+                    not entry.is_dir,
+                )
             entries = sorted(
-                list(os.scandir(folder_path)),
-                key=lambda e: (not e.is_dir(), e.name.lower()),
+                merged_entries.values(),
+                key=lambda entry: (not entry[1], entry[0].casefold()),
             )
             added_any = False
-            for entry in entries:
-                if entry.is_dir():
-                    if is_filtered_folder_name(entry.name, hide_gnd_folder):
+            for name, is_dir, entry_path, is_overwritten in entries:
+                if is_dir:
+                    if is_filtered_folder_name(name, hide_gnd_folder):
                         continue
-                    if meshes_caliente_only and is_mod_level:
-                        if entry.name.lower() not in TARGET_MOD_FOLDERS and entry.name.lower() != "data":
+                    if meshes_caliente_only and (
+                        is_mod_level or (mod_root is not None and not mod_relative_path)
+                    ):
+                        if name.lower() not in TARGET_MOD_FOLDERS and name.lower() != "data":
                             continue
-                    self._create_folder_tree_item(item, entry.name, entry.path, "#c5cee2")
+                    relative_child_path = mod_relative_path + (name,)
+                    self._create_folder_tree_item(
+                        item,
+                        name,
+                        str(entry_path),
+                        "#c5cee2",
+                        mod_root=mod_root,
+                        mod_relative_path=relative_child_path if mod_root else (),
+                        overwrite_fallback=is_overwrite_fallback,
+                        overwrite_relative_path=(
+                            fallback_relative_path + (name,)
+                            if is_overwrite_fallback
+                            else ()
+                        ),
+                    )
                     added_any = True
-                elif entry.is_file() and not is_filtered_nif_filename(entry.name, hide_0):
-                    self._create_nif_tree_item(item, entry.name, entry.path)
+                elif name.casefold().endswith(".nif") and not is_filtered_nif_filename(name, hide_0):
+                    display_name = f"[{name}]" if is_overwritten else name
+                    self._create_nif_tree_item(item, display_name, str(entry_path))
                     added_any = True
 
             if not added_any:
@@ -1377,6 +1547,26 @@ class DibellasWardrobeWindow(QMainWindow):
             log.warning("Error expanding %s: %s", folder_path, exc)
         finally:
             self._updating_tree = False
+
+    def _ensure_overwrite_fallback_item(self) -> None:
+        if not self.mod_scanner or not self.mod_scanner.has_fallback():
+            return
+        for index in range(self.file_tree.topLevelItemCount()):
+            item = self.file_tree.topLevelItem(index)
+            if item.data(0, ROLE_OVERWRITE_FALLBACK):
+                return
+        overwrite_root = self.mod_scanner.overwrite_root
+        if overwrite_root is None:
+            return
+        meshes_root = overwrite_root / "meshes"
+        fallback_path = meshes_root if meshes_root.is_dir() else overwrite_root
+        self._create_folder_tree_item(
+            self.file_tree,
+            "[Overwrite]",
+            str(fallback_path),
+            "#f0d59c",
+            overwrite_fallback=True,
+        )
 
     def _on_tree_item_clicked(self, item: QTreeWidgetItem, _column: int) -> None:
         if self._updating_tree:
@@ -1396,6 +1586,9 @@ class DibellasWardrobeWindow(QMainWindow):
 
     def _load_and_attach_outfit_nif(self, nif_key: str, show_error: bool = True) -> bool:
         try:
+            owner = self.mod_scanner.owner_for_nif(nif_key) if self.mod_scanner else None
+            if owner is not None:
+                self.resolver.register_nif_owner(nif_key, owner)
             nif_data = self._loaded_nif_cache.get(nif_key)
             if nif_data is None:
                 nif_data = self.loader.load_nif(nif_key)
@@ -1445,6 +1638,14 @@ class DibellasWardrobeWindow(QMainWindow):
         self._refresh_added_nifs()
 
     def _mod_name_for_nif(self, nif_key: str) -> str:
+        owner = self.mod_scanner.owner_for_nif(nif_key) if self.mod_scanner else None
+        if owner is not None:
+            return owner.name
+        if (
+            self.mod_scanner
+            and self.mod_scanner.fallback_target_for_nif(nif_key) is not None
+        ):
+            return "[Overwrite]"
         nif_path = Path(nif_key)
         if self.current_root_dir is None:
             return nif_path.parent.name
@@ -1466,7 +1667,10 @@ class DibellasWardrobeWindow(QMainWindow):
         item.setData(ROLE_ADDED_NIF_PATH, nif_key)
         item.setToolTip(nif_key)
 
-        display_text = f"{Path(nif_key).name} ({self._mod_name_for_nif(nif_key)})"
+        nif_name = Path(nif_key).name
+        if self.mod_scanner and self.mod_scanner.is_overwrite_nif(nif_key):
+            nif_name = f"[{nif_name}]"
+        display_text = f"{nif_name} ({self._mod_name_for_nif(nif_key)})"
         row_widget = AddedNifRowWidget(
             text=display_text,
             on_remove=lambda _checked=False, k=nif_key: (
@@ -1481,6 +1685,7 @@ class DibellasWardrobeWindow(QMainWindow):
             remove_tooltip=self._t("unlock_nif") if locked else self._t("remove_nif"),
             hide_tooltip=self._t("hide_nif"),
             show_tooltip=self._t("show_nif"),
+            show_remove=not locked,
         )
         row_widget.setToolTip(
             self._t("double_click_unlock")
@@ -1510,6 +1715,16 @@ class DibellasWardrobeWindow(QMainWindow):
         self.locked_nifs_group.setTitle(
             self._t("locked_wardrobe", count=len(self._locked_nif_items))
         )
+        locked_row_height = sum(
+            max(
+                self.locked_nifs_list.item(index).sizeHint().height(),
+                self.locked_nifs_list.sizeHintForRow(index),
+            )
+            for index in range(self.locked_nifs_list.count())
+        )
+        locked_list_height = locked_row_height + 2 * self.locked_nifs_list.frameWidth() + 2
+        self.locked_nifs_list.setFixedHeight(locked_list_height)
+        self.locked_nifs_list.setVisible(bool(self._locked_nif_items))
 
     def _on_added_nif_clicked(self, item: QListWidgetItem) -> None:
         nif_key = item.data(ROLE_ADDED_NIF_PATH)
@@ -1531,6 +1746,7 @@ class DibellasWardrobeWindow(QMainWindow):
 
         for nif_key in sorted(self._locked_nif_paths):
             self._load_and_attach_outfit_nif(nif_key, show_error=False)
+        self._startup_locked_nif_refresh_pending = bool(self._locked_nif_items)
 
     def _lock_nif(self, nif_key: str) -> None:
         if nif_key not in self._checked_nif_paths or nif_key in self._locked_nif_paths:
@@ -1572,6 +1788,131 @@ class DibellasWardrobeWindow(QMainWindow):
     def _select_nif_in_tree(self, nif_key: str) -> None:
         if self.current_root_dir is None:
             return
+        overlay_target = (
+            self.mod_scanner.target_for_nif(nif_key) if self.mod_scanner else None
+        )
+        fallback_target = (
+            self.mod_scanner.fallback_target_for_nif(nif_key)
+            if self.mod_scanner
+            else None
+        )
+        if overlay_target is not None:
+            if self.search_edit.text():
+                self.search_edit.clear()
+            mod_root, target_parts = overlay_target
+            mod_item = next(
+                (
+                    self.file_tree.topLevelItem(index)
+                    for index in range(self.file_tree.topLevelItemCount())
+                    if self.file_tree.topLevelItem(index).data(0, ROLE_MOD_ROOT_PATH)
+                    and Path(
+                        self.file_tree.topLevelItem(index).data(0, ROLE_MOD_ROOT_PATH)
+                    ).resolve()
+                    == mod_root
+                ),
+                None,
+            )
+            if mod_item is None:
+                return
+            parent_item = mod_item
+            relative_parts: tuple[str, ...] = ()
+            for folder_name in target_parts[:-1]:
+                self._on_tree_item_expanded(parent_item)
+                relative_parts += (folder_name,)
+                parent_item = next(
+                    (
+                        parent_item.child(index)
+                        for index in range(parent_item.childCount())
+                        if tuple(
+                            str(part).casefold()
+                            for part in (
+                                parent_item.child(index).data(
+                                    0, ROLE_MOD_RELATIVE_PATH
+                                )
+                                or ()
+                            )
+                        )
+                        == tuple(part.casefold() for part in relative_parts)
+                    ),
+                    None,
+                )
+                if parent_item is None:
+                    return
+                parent_item.setExpanded(True)
+            self._on_tree_item_expanded(parent_item)
+            target_item = next(
+                (
+                    parent_item.child(index)
+                    for index in range(parent_item.childCount())
+                    if parent_item.child(index).data(0, ROLE_NIF_PATH)
+                    and Path(
+                        parent_item.child(index).data(0, ROLE_NIF_PATH)
+                    ).resolve()
+                    == Path(nif_key).resolve()
+                ),
+                None,
+            )
+            if target_item is None:
+                return
+            self._highlight_tree_item(target_item)
+            return
+        if fallback_target is not None:
+            if self.search_edit.text():
+                self.search_edit.clear()
+            fallback_item = next(
+                (
+                    self.file_tree.topLevelItem(index)
+                    for index in range(self.file_tree.topLevelItemCount())
+                    if self.file_tree.topLevelItem(index).data(
+                        0, ROLE_OVERWRITE_FALLBACK
+                    )
+                ),
+                None,
+            )
+            if fallback_item is None:
+                return
+            parent_item = fallback_item
+            relative_parts: tuple[str, ...] = ()
+            for folder_name in fallback_target[:-1]:
+                self._on_tree_item_expanded(parent_item)
+                relative_parts += (folder_name,)
+                parent_item = next(
+                    (
+                        parent_item.child(index)
+                        for index in range(parent_item.childCount())
+                        if tuple(
+                            str(part).casefold()
+                            for part in (
+                                parent_item.child(index).data(
+                                    0, ROLE_OVERWRITE_RELATIVE_PATH
+                                )
+                                or ()
+                            )
+                        )
+                        == tuple(part.casefold() for part in relative_parts)
+                    ),
+                    None,
+                )
+                if parent_item is None:
+                    return
+                parent_item.setExpanded(True)
+            self._on_tree_item_expanded(parent_item)
+            target_item = next(
+                (
+                    parent_item.child(index)
+                    for index in range(parent_item.childCount())
+                    if parent_item.child(index).data(0, ROLE_NIF_PATH)
+                    and Path(
+                        parent_item.child(index).data(0, ROLE_NIF_PATH)
+                    ).resolve()
+                    == Path(nif_key).resolve()
+                ),
+                None,
+            )
+            if target_item is None:
+                return
+            self._highlight_tree_item(target_item)
+            return
         try:
             nif_path = Path(nif_key).resolve()
             relative_path = nif_path.relative_to(self.current_root_dir)
@@ -1612,6 +1953,9 @@ class DibellasWardrobeWindow(QMainWindow):
         if target_item is None:
             return
 
+        self._highlight_tree_item(target_item)
+
+    def _highlight_tree_item(self, target_item: QTreeWidgetItem) -> None:
         for previous in self._highlighted_tree_items:
             previous.setBackground(0, QBrush())
         self._highlighted_tree_items = []

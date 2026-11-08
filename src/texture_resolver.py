@@ -37,8 +37,7 @@ class ResolvedTexture:
 
 def normalize_nif_texture_path(raw_path: str) -> str:
     """
-    Normalize a raw NIF texture string into a clean relative path starting with `textures/...`
-    using OS-neutral forward slashes.
+    Normalize a texture or CharGen-relative path using OS-neutral forward slashes.
     """
     if not raw_path:
         return ""
@@ -52,8 +51,8 @@ def normalize_nif_texture_path(raw_path: str) -> str:
         cleaned = cleaned[5:]
         lower = cleaned.lower()
 
-    # If the path does not start with "textures/", prepend it when it looks like a relative sub-path
-    if not lower.startswith("textures/"):
+    # CharGen exports can reference SKSE assets directly; other relative paths are textures.
+    if not lower.startswith(("textures/", "skse/plugins/chargen/")):
         idx = lower.find("textures/")
         if idx != -1:
             cleaned = cleaned[idx:]
@@ -118,9 +117,18 @@ class TextureResolver:
     Caches decoded RGBA8 arrays in memory so shared textures are only decoded once.
     """
 
-    def __init__(self, extra_roots: Optional[List[Path | str]] = None) -> None:
+    def __init__(
+        self,
+        extra_roots: Optional[List[Path | str]] = None,
+        overwrite_root: Optional[Path | str] = None,
+    ) -> None:
         self.extra_roots: List[Path] = []
+        self.overwrite_root = Path(overwrite_root).resolve() if overwrite_root else None
+        self._overwrite_indexed = False
+        self._overwrite_path_index: Dict[str, Path] = {}
+        self._nif_owners: Dict[Path, Path] = {}
         self._path_cache: Dict[Tuple[str, str], Optional[Path]] = {}
+        self._root_path_cache: Dict[str, Optional[Path]] = {}
         self._image_cache: Dict[Path, np.ndarray] = {}
         self._fallback_cache: Dict[str, np.ndarray] = {}
         self._mod_subdirs_cache: Dict[Path, List[Path]] = {}
@@ -128,16 +136,78 @@ class TextureResolver:
             for r in extra_roots:
                 self.add_search_root(r)
 
+    def configure_mo2_paths(
+        self,
+        mods_root: Optional[Path | str],
+        overwrite_root: Optional[Path | str],
+    ) -> None:
+        """Set the MO2 roots used for overwrite-first and mod-specific texture lookup."""
+        self.overwrite_root = Path(overwrite_root).resolve() if overwrite_root else None
+        self._overwrite_indexed = False
+        self._overwrite_path_index.clear()
+        self.extra_roots.clear()
+        self._mod_subdirs_cache.clear()
+        if mods_root:
+            self.add_search_root(mods_root)
+        self._nif_owners.clear()
+        self._path_cache.clear()
+        self._root_path_cache.clear()
+
+    def register_nif_owner(
+        self, nif_path: Path | str, mod_path: Path | str
+    ) -> None:
+        """Register the owning mod for a NIF physically stored outside its mod folder."""
+        self._nif_owners[Path(nif_path).resolve()] = Path(mod_path).resolve()
+        self._path_cache.clear()
+
     def add_search_root(self, root: Path | str) -> None:
         """Register an additional root directory (e.g. selected mod folder or Data folder)."""
         p = Path(root).resolve()
         if p.is_dir() and p not in self.extra_roots:
             self.extra_roots.append(p)
             self._path_cache.clear()
+            self._root_path_cache.clear()
 
     def clear_cache(self) -> None:
         self._path_cache.clear()
+        self._root_path_cache.clear()
         self._image_cache.clear()
+        self._mod_subdirs_cache.clear()
+        self._overwrite_path_index.clear()
+        self._overwrite_indexed = False
+
+    def _index_overwrite_textures(self) -> None:
+        if self._overwrite_indexed:
+            return
+        self._overwrite_indexed = True
+        if not self.overwrite_root:
+            return
+
+        search_roots = (
+            self.overwrite_root / "textures",
+            self.overwrite_root / "SKSE" / "Plugins" / "CharGen",
+        )
+        for search_root in search_roots:
+            if not search_root.is_dir():
+                continue
+            for root, dirs, files in os.walk(
+                search_root, onerror=self._log_overwrite_walk_error
+            ):
+                dirs.sort(key=str.casefold)
+                root_path = Path(root)
+                for file_name in sorted(files, key=str.casefold):
+                    if not file_name.casefold().endswith(".dds"):
+                        continue
+                    path = root_path / file_name
+                    try:
+                        key = path.relative_to(self.overwrite_root).as_posix().lower()
+                    except ValueError:
+                        continue
+                    self._overwrite_path_index.setdefault(key, path.resolve())
+
+    @staticmethod
+    def _log_overwrite_walk_error(error: OSError) -> None:
+        log.warning("Could not index overwrite texture directory %s: %s", error.filename, error)
 
     def resolve_path(
         self, raw_nif_path: str, nif_file_path: Optional[Path | str] = None
@@ -146,20 +216,46 @@ class TextureResolver:
         Locate the `.dds` file on disk for `raw_nif_path`.
 
         Search order:
-        1. Upward parent directories from `nif_file_path` (up to 8 levels), checking both
-           `<ancestor>/textures/...` and `<ancestor>/Data/textures/...`.
-        2. Same filename in the `.nif` file's own directory (for flat-exported NIF+DDS folders).
-        3. Registered `extra_roots` (and immediate child mod folders if an MO2 `mods/` folder
-           is registered as root).
+        1. MO2 overwrite root.
+        2. The NIF's owning mod.
+        3. Nearby NIF directories, then registered roots and their mod folders.
         """
         norm_rel = normalize_nif_texture_path(raw_nif_path)
         if not norm_rel:
             return None
 
-        nif_dir_key = str(Path(nif_file_path).resolve().parent) if nif_file_path else ""
+        nif_path = Path(nif_file_path).resolve() if nif_file_path else None
+        nif_dir_key = str(nif_path) if nif_path else ""
         cache_key = (nif_dir_key, norm_rel.lower())
         if cache_key in self._path_cache:
             return self._path_cache[cache_key]
+
+        if self.overwrite_root:
+            self._index_overwrite_textures()
+            overwrite_key = norm_rel.replace("\\", "/").lower()
+            found = self._overwrite_path_index.get(overwrite_key)
+            if found:
+                self._path_cache[cache_key] = found
+                return found
+
+        matched_mod = self._nif_owners.get(nif_path) if nif_path else None
+        if matched_mod is None and nif_path:
+            for root in self.extra_roots:
+                if root.name.casefold() != "mods":
+                    continue
+                try:
+                    mod_name = nif_path.relative_to(root).parts[0]
+                except (ValueError, IndexError):
+                    continue
+                candidate_mod = root / mod_name
+                if candidate_mod.is_dir():
+                    matched_mod = candidate_mod
+                    break
+        if matched_mod:
+            found = _resolve_case_insensitive(matched_mod, norm_rel)
+            if found:
+                self._path_cache[cache_key] = found
+                return found
 
         sub_after_textures = (
             norm_rel[len("textures/") :]
@@ -168,8 +264,8 @@ class TextureResolver:
         )
 
         # 1. Search upward from the NIF file's directory
-        if nif_file_path:
-            nif_dir = Path(nif_file_path).resolve().parent
+        if nif_path:
+            nif_dir = nif_path.parent
             current = nif_dir
             for _ in range(9):
                 # Check <current>/textures/...
@@ -203,31 +299,30 @@ class TextureResolver:
                 self._path_cache[cache_key] = same_dir_match
                 return same_dir_match
 
-        # 3. Search registered extra roots (e.g. workspace root, MO2 mods folder, Data folder)
+        root_cache_key = norm_rel.lower()
+        found = self._root_path_cache.get(root_cache_key)
+        if found is None:
+            found = self._resolve_from_roots(norm_rel)
+            if found is not None:
+                self._root_path_cache[root_cache_key] = found
+        self._path_cache[cache_key] = found
+        return found
+
+    def _resolve_from_roots(self, norm_rel: str) -> Optional[Path]:
+        """Resolve a shared texture once across roots, caching by normalized path."""
         for root in self.extra_roots:
             found = _resolve_case_insensitive(root, norm_rel)
             if found:
-                self._path_cache[cache_key] = found
                 return found
 
-            found_data = _resolve_case_insensitive(root / "Data", norm_rel)
-            if found_data:
-                self._path_cache[cache_key] = found_data
-                return found_data
+            found = _resolve_case_insensitive(root / "Data", norm_rel)
+            if found:
+                return found
 
-            # If root is an MO2 `mods/` container, check child mod folders that have a textures/ dir
-            mod_dirs = self._get_mod_texture_subdirs(root)
-            for mod_dir in mod_dirs:
-                child_candidate = mod_dir / norm_rel
-                try:
-                    if child_candidate.is_file():
-                        res = child_candidate.resolve()
-                        self._path_cache[cache_key] = res
-                        return res
-                except OSError:
-                    continue
-
-        self._path_cache[cache_key] = None
+            for mod_dir in self._get_mod_texture_subdirs(root):
+                found = _resolve_case_insensitive(mod_dir, norm_rel)
+                if found:
+                    return found
         return None
 
     def _get_mod_texture_subdirs(self, root: Path) -> List[Path]:
