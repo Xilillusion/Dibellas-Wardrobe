@@ -23,17 +23,22 @@ _NIFLY_DIR = _REPO_ROOT / "io_scene_nifly"
 if str(_NIFLY_DIR) not in sys.path:
     sys.path.insert(0, str(_NIFLY_DIR))
 
-from pyn.nifdefs import (  # noqa: E402
+from pyn.nifdefs import (  # type: ignore[import-not-found]  # noqa: E402
     BSLSPShaderType,
     PynBufferTypes,
     ShaderFlags1,
     ShaderFlags2,
+    VERTEX_WEIGHT_PAIR,
 )
-from pyn.pynifly import NifFile  # noqa: E402
+from pyn.niflydll import nifly  # type: ignore[import-not-found]  # noqa: E402
+from pyn.pynifly import NifFile  # type: ignore[import-not-found]  # noqa: E402
 
 from .texture_resolver import ResolvedTexture, TextureResolver  # noqa: E402
 
 log = logging.getLogger("dibellas_wardrobe.nif_loader")
+
+_VW_DTYPE = np.dtype([("vertex", "<u2"), ("_pad", "<u2"), ("weight", "<f4")])
+MAX_SHADER_BONES = 256
 
 
 @dataclass
@@ -119,6 +124,15 @@ class ShapeMeshData:
     alpha_prop: AlphaPropertyData
     bbox_min: np.ndarray     # (3,) float32
     bbox_max: np.ndarray     # (3,) float32
+    bone_indices: np.ndarray = field(
+        default_factory=lambda: np.zeros((0, 4), dtype=np.int32)
+    )  # (V, 4) int32
+    bone_weights: np.ndarray = field(
+        default_factory=lambda: np.zeros((0, 4), dtype=np.float32)
+    )  # (V, 4) float32
+    bone_skin_matrices: np.ndarray = field(
+        default_factory=lambda: np.zeros((0, 4, 4), dtype=np.float32)
+    )  # (B, 4, 4) float32 inverse-bind (skin_to_bone) matrices
 
 
 @dataclass
@@ -446,6 +460,164 @@ def _extract_alpha_property(shape) -> AlphaPropertyData:
     return alpha_data
 
 
+def _extract_skin_data(
+    nif, shape, num_verts: int
+) -> Tuple[bool, List[str], np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Extract unique bone names, `(B, 4, 4)` inverse-bind (`skin_to_bone`) matrices,
+    and per-vertex top-4 `(V, 4)` bone indices and normalized weights for GPU LBS.
+    """
+    default_indices = np.zeros((num_verts, 4), dtype=np.int32)
+    default_weights = np.zeros((num_verts, 4), dtype=np.float32)
+    default_weights[:, 0] = 1.0
+    default_mats = np.zeros((0, 4, 4), dtype=np.float32)
+
+    if not bool(getattr(shape, "has_skin_instance", False)) or num_verts <= 0:
+        return False, [], default_indices, default_weights, default_mats
+
+    try:
+        raw_names = list(shape.bone_names)
+        raw_ids = list(shape.bone_ids)
+    except Exception as exc:
+        log.debug("Failed reading bone list on shape %s: %s", getattr(shape, "name", "?"), exc)
+        return False, [], default_indices, default_weights, default_mats
+
+    if not raw_names or not raw_ids:
+        return False, [], default_indices, default_weights, default_mats
+
+    unique_names: List[str] = []
+    id_to_unique_idx: Dict[int, int] = {}
+    for nm, bid in zip(raw_names, raw_ids):
+        if bid not in id_to_unique_idx:
+            if len(unique_names) >= MAX_SHADER_BONES:
+                continue
+            id_to_unique_idx[bid] = len(unique_names)
+            unique_names.append(nm)
+
+    num_bones = len(unique_names)
+    if num_bones == 0:
+        return False, [], default_indices, default_weights, default_mats
+
+    # Extract per-bone skin_to_bone inverse-bind 4x4 matrices
+    skin_mats = np.repeat(np.eye(4, dtype=np.float32)[None, :, :], num_bones, axis=0)
+    for b_idx, b_name in enumerate(unique_names):
+        try:
+            s2b = shape.get_shape_skin_to_bone(b_name)
+            if s2b is not None:
+                rot = np.array(
+                    [
+                        list(s2b.rotation[0]),
+                        list(s2b.rotation[1]),
+                        list(s2b.rotation[2]),
+                    ],
+                    dtype=np.float32,
+                )
+                skin_mats[b_idx, :3, :3] = rot
+                skin_mats[b_idx, :3, 3] = [
+                    float(s2b.translation[0]),
+                    float(s2b.translation[1]),
+                    float(s2b.translation[2]),
+                ]
+        except Exception:
+            pass
+
+    # If the shape itself had a non-identity local transform applied to `positions`,
+    # fold its inverse into skin_mats so vertices in NIF root space transform properly.
+    try:
+        xf = shape.transform
+        scale = float(xf.scale) if xf.scale != 0.0 else 1.0
+        rot = np.array(
+            [list(xf.rotation[0]), list(xf.rotation[1]), list(xf.rotation[2])],
+            dtype=np.float32,
+        )
+        trans = np.array(
+            [float(xf.translation[0]), float(xf.translation[1]), float(xf.translation[2])],
+            dtype=np.float32,
+        )
+        is_identity = (
+            abs(scale - 1.0) < 1e-5
+            and np.allclose(rot, np.eye(3, dtype=np.float32), atol=1e-5)
+            and np.allclose(trans, 0.0, atol=1e-5)
+        )
+        if not is_identity:
+            sh_mat = np.eye(4, dtype=np.float32)
+            sh_mat[:3, :3] = rot * scale
+            sh_mat[:3, 3] = trans
+            sh_inv = np.linalg.inv(sh_mat).astype(np.float32)
+            skin_mats = skin_mats @ sh_inv[None, :, :]
+    except Exception:
+        pass
+
+    # Fast ctypes + NumPy extraction of per-vertex weights across all partition bone slots
+    v_list: List[np.ndarray] = []
+    b_list: List[np.ndarray] = []
+    w_list: List[np.ndarray] = []
+    for pos, bid in enumerate(raw_ids):
+        u_idx = id_to_unique_idx.get(bid)
+        if u_idx is None:
+            continue
+        try:
+            cnt = int(nifly.getShapeBoneWeightsCount(nif._handle, shape._handle, pos))
+            if cnt <= 0:
+                continue
+            buf = (VERTEX_WEIGHT_PAIR * cnt)()
+            nifly.getShapeBoneWeights(nif._handle, shape._handle, pos, buf, cnt)
+            arr = np.frombuffer(buf, dtype=_VW_DTYPE, count=cnt)
+            v_idx = arr["vertex"].astype(np.int32)
+            w_val = arr["weight"].copy()
+            valid = (v_idx >= 0) & (v_idx < num_verts) & (w_val > 1e-5)
+            if np.any(valid):
+                valid_count = int(np.count_nonzero(valid))
+                v_list.append(v_idx[valid])
+                b_list.append(np.full(valid_count, u_idx, dtype=np.int32))
+                w_list.append(w_val[valid])
+        except Exception:
+            continue
+
+    if not v_list:
+        return False, unique_names, default_indices, default_weights, skin_mats
+
+    all_v = np.concatenate(v_list)
+    all_b = np.concatenate(b_list)
+    all_w = np.concatenate(w_list)
+
+    # Aggregate weights for the same (vertex, unique_bone) pair across partitions
+    vb_key = all_v.astype(np.int64) * num_bones + all_b.astype(np.int64)
+    uniq_vb, inv_idx = np.unique(vb_key, return_inverse=True)
+    sum_w = np.bincount(inv_idx, weights=all_w).astype(np.float32)
+    u_v = (uniq_vb // num_bones).astype(np.int32)
+    u_b = (uniq_vb % num_bones).astype(np.int32)
+
+    # Sort by vertex index ascending, weight descending, and keep top 4 per vertex
+    order = np.lexsort((-sum_w, u_v))
+    u_v = u_v[order]
+    u_b = u_b[order]
+    sum_w = sum_w[order]
+
+    first_idx = np.unique(u_v, return_index=True)[1]
+    group_id = np.searchsorted(first_idx, np.arange(len(u_v)), side="right") - 1
+    rank = np.arange(len(u_v)) - first_idx[group_id]
+    keep = rank < 4
+
+    bone_indices = np.zeros((num_verts, 4), dtype=np.int32)
+    bone_weights = np.zeros((num_verts, 4), dtype=np.float32)
+    bone_indices[u_v[keep], rank[keep]] = u_b[keep]
+    bone_weights[u_v[keep], rank[keep]] = sum_w[keep]
+
+    w_sum = bone_weights.sum(axis=1, keepdims=True)
+    has_w = w_sum[:, 0] > 1e-6
+    bone_weights[has_w] /= w_sum[has_w]
+    bone_weights[~has_w, 0] = 1.0
+
+    return (
+        True,
+        unique_names,
+        np.ascontiguousarray(bone_indices, dtype=np.int32),
+        np.ascontiguousarray(bone_weights, dtype=np.float32),
+        np.ascontiguousarray(skin_mats, dtype=np.float32),
+    )
+
+
 class NifLoader:
     """Loads `.nif` files via `pynifly` and resolves their textures via `TextureResolver`."""
 
@@ -458,105 +630,110 @@ class NifLoader:
         if not path.is_file():
             raise FileNotFoundError(f"NIF file not found: {path}")
 
-        nif = NifFile(str(path))
-        game = getattr(nif, "game", "SKYRIMSE") or "SKYRIMSE"
-        root_name = getattr(nif, "rootName", "Scene Root") or "Scene Root"
+        with NifFile(str(path)) as nif:
+            game = getattr(nif, "game", "SKYRIMSE") or "SKYRIMSE"
+            root_name = getattr(nif, "rootName", "Scene Root") or "Scene Root"
 
-        shapes_out: List[ShapeMeshData] = []
-        global_min = np.array([np.inf, np.inf, np.inf], dtype=np.float32)
-        global_max = np.array([-np.inf, -np.inf, -np.inf], dtype=np.float32)
+            shapes_out: List[ShapeMeshData] = []
+            global_min = np.array([np.inf, np.inf, np.inf], dtype=np.float32)
+            global_max = np.array([-np.inf, -np.inf, -np.inf], dtype=np.float32)
 
-        for shape in nif.shapes:
-            raw_verts = shape.verts
-            raw_tris = shape.tris
-            if not raw_verts or not raw_tris:
-                continue
+            for shape in nif.shapes:
+                raw_verts = shape.verts
+                raw_tris = shape.tris
+                if not raw_verts or not raw_tris:
+                    continue
 
-            positions = np.asarray(raw_verts, dtype=np.float32)
-            triangles = np.asarray(raw_tris, dtype=np.uint32)
-            num_verts = len(positions)
+                positions = np.asarray(raw_verts, dtype=np.float32)
+                triangles = np.asarray(raw_tris, dtype=np.uint32)
+                num_verts = len(positions)
 
-            # Normals
-            raw_normals = shape.normals
-            if raw_normals and len(raw_normals) == num_verts:
-                normals = np.asarray(raw_normals, dtype=np.float32)
-            else:
-                normals = compute_normals(positions, triangles)
+                # Normals
+                raw_normals = shape.normals
+                if raw_normals and len(raw_normals) == num_verts:
+                    normals = np.asarray(raw_normals, dtype=np.float32)
+                else:
+                    normals = compute_normals(positions, triangles)
 
-            # Apply local shape transform if present
-            positions, normals = _apply_shape_transform(positions, normals, shape)
+                # Apply local shape transform if present
+                positions, normals = _apply_shape_transform(positions, normals, shape)
 
-            # UVs
-            try:
-                raw_uvs = shape.uvs
-            except Exception:
-                raw_uvs = None
-            if raw_uvs and len(raw_uvs) == num_verts:
-                uvs = np.asarray(raw_uvs, dtype=np.float32)
-            else:
-                uvs = np.zeros((num_verts, 2), dtype=np.float32)
+                # UVs
+                try:
+                    raw_uvs = shape.uvs
+                except Exception:
+                    raw_uvs = None
+                if raw_uvs and len(raw_uvs) == num_verts:
+                    uvs = np.asarray(raw_uvs, dtype=np.float32)
+                else:
+                    uvs = np.zeros((num_verts, 2), dtype=np.float32)
 
-            # Tangents and bitangents
-            tangents, bitangents = compute_tangents_bitangents(positions, normals, uvs, triangles)
+                # Tangents and bitangents
+                tangents, bitangents = compute_tangents_bitangents(positions, normals, uvs, triangles)
 
-            # Vertex colors
-            try:
-                raw_colors = shape.colors
-            except Exception:
-                raw_colors = None
-            if raw_colors and len(raw_colors) == num_verts:
-                colors = np.asarray(raw_colors, dtype=np.float32)
-            else:
-                colors = np.ones((num_verts, 4), dtype=np.float32)
+                # Vertex colors
+                try:
+                    raw_colors = shape.colors
+                except Exception:
+                    raw_colors = None
+                if raw_colors and len(raw_colors) == num_verts:
+                    colors = np.asarray(raw_colors, dtype=np.float32)
+                else:
+                    colors = np.ones((num_verts, 4), dtype=np.float32)
 
-            shader_data = _extract_shader_data(shape, path, self.resolver)
-            if not shader_data.b_vertex_colors:
-                colors = np.ones((num_verts, 4), dtype=np.float32)
-            elif not shader_data.b_vertex_alpha:
-                colors[:, 3] = 1.0
+                shader_data = _extract_shader_data(shape, path, self.resolver)
+                if not shader_data.b_vertex_colors:
+                    colors = np.ones((num_verts, 4), dtype=np.float32)
+                elif not shader_data.b_vertex_alpha:
+                    colors[:, 3] = 1.0
 
-            alpha_data = _extract_alpha_property(shape)
+                alpha_data = _extract_alpha_property(shape)
 
-            is_skinned = bool(getattr(shape, "has_skin_instance", False))
-            try:
-                bone_names = list(shape.bone_names) if is_skinned else []
-            except Exception:
-                bone_names = []
+                (
+                    is_skinned,
+                    bone_names,
+                    bone_indices,
+                    bone_weights,
+                    bone_skin_matrices,
+                ) = _extract_skin_data(nif, shape, num_verts)
 
-            s_min = positions.min(axis=0)
-            s_max = positions.max(axis=0)
-            global_min = np.minimum(global_min, s_min)
-            global_max = np.maximum(global_max, s_max)
+                s_min = positions.min(axis=0)
+                s_max = positions.max(axis=0)
+                global_min = np.minimum(global_min, s_min)
+                global_max = np.maximum(global_max, s_max)
 
-            shapes_out.append(
-                ShapeMeshData(
-                    name=shape.name or shape.blockname,
-                    block_name=shape.blockname,
-                    positions=np.ascontiguousarray(positions, dtype=np.float32),
-                    normals=np.ascontiguousarray(normals, dtype=np.float32),
-                    uvs=np.ascontiguousarray(uvs, dtype=np.float32),
-                    tangents=np.ascontiguousarray(tangents, dtype=np.float32),
-                    bitangents=np.ascontiguousarray(bitangents, dtype=np.float32),
-                    colors=np.ascontiguousarray(colors, dtype=np.float32),
-                    triangles=np.ascontiguousarray(triangles, dtype=np.uint32),
-                    is_skinned=is_skinned,
-                    bone_names=bone_names,
-                    shader=shader_data,
-                    alpha_prop=alpha_data,
-                    bbox_min=s_min,
-                    bbox_max=s_max,
+                shapes_out.append(
+                    ShapeMeshData(
+                        name=shape.name or shape.blockname,
+                        block_name=shape.blockname,
+                        positions=np.ascontiguousarray(positions, dtype=np.float32),
+                        normals=np.ascontiguousarray(normals, dtype=np.float32),
+                        uvs=np.ascontiguousarray(uvs, dtype=np.float32),
+                        tangents=np.ascontiguousarray(tangents, dtype=np.float32),
+                        bitangents=np.ascontiguousarray(bitangents, dtype=np.float32),
+                        colors=np.ascontiguousarray(colors, dtype=np.float32),
+                        triangles=np.ascontiguousarray(triangles, dtype=np.uint32),
+                        is_skinned=is_skinned,
+                        bone_names=bone_names,
+                        shader=shader_data,
+                        alpha_prop=alpha_data,
+                        bbox_min=s_min,
+                        bbox_max=s_max,
+                        bone_indices=bone_indices,
+                        bone_weights=bone_weights,
+                        bone_skin_matrices=bone_skin_matrices,
+                    )
                 )
+
+            if not np.all(np.isfinite(global_min)):
+                global_min = np.zeros(3, dtype=np.float32)
+                global_max = np.ones(3, dtype=np.float32)
+
+            return LoadedNifData(
+                filepath=path,
+                game=game,
+                root_name=root_name,
+                shapes=shapes_out,
+                bbox_min=global_min,
+                bbox_max=global_max,
             )
-
-        if not np.all(np.isfinite(global_min)):
-            global_min = np.zeros(3, dtype=np.float32)
-            global_max = np.ones(3, dtype=np.float32)
-
-        return LoadedNifData(
-            filepath=path,
-            game=game,
-            root_name=root_name,
-            shapes=shapes_out,
-            bbox_min=global_min,
-            bbox_max=global_max,
-        )

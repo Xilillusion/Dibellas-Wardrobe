@@ -5,6 +5,7 @@ Dibella's Wardrobe is a desktop previewer for Skyrim Special Edition and Anniver
 ## Features
 
 - Preview multiple Skyrim `.nif` meshes together in an interactive OpenGL viewport.
+- Play Skyrim `.hkx` animations (`meshes/actors/character/animations/...`) with real-time GPU Linear Blend Skinning driven by `skeleton_female.nif` and a bottom playback toolbar (Play/Pause, Loop, Timeline Scrubber, and Stop/Reset to bind pose).
 - Browse a mod directory or Mod Organizer 2 (MO2) `mods` folder, with filters for low-weight meshes and `gnd` folders.
 - Resolve material textures from the mesh's mod, nearby folders, registered roots, and MO2 `overwrite`.
 - Merge matching MO2 `overwrite/meshes` NIFs into their owning mod in the tree. Overwritten files are shown in brackets; unmatched overwrite meshes appear under `[Overwrite]`.

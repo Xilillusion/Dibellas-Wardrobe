@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -17,11 +18,12 @@ from typing import Dict, List, Optional, Tuple
 import glm
 import moderngl
 import numpy as np
-from PySide6.QtCore import QPointF, Qt, Signal
+from PySide6.QtCore import QPointF, Qt, QTimer, Signal
 from PySide6.QtGui import QMouseEvent, QSurfaceFormat, QWheelEvent
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 
-from .nif_loader import LoadedNifData, ShapeMeshData
+from .anim_engine import AnimEngine, LoadedAnimation
+from .nif_loader import MAX_SHADER_BONES, LoadedNifData, ShapeMeshData
 from .texture_resolver import ResolvedTexture, TextureResolver
 
 log = logging.getLogger("dibellas_wardrobe.viewport")
@@ -40,6 +42,10 @@ class GpuShapeItem:
     ibo: moderngl.Buffer
     vao: moderngl.VertexArray
     textures: Dict[str, moderngl.Texture] = field(default_factory=dict)
+    mapped_bone_names: List[str] = field(default_factory=list)
+    effective_skin_matrices: np.ndarray = field(
+        default_factory=lambda: np.zeros((0, 4, 4), dtype=np.float32)
+    )
 
     def release(self) -> None:
         """Release VAO, VBO, and IBO from GPU VRAM."""
@@ -91,6 +97,9 @@ class OutfitViewportWidget(QOpenGLWidget):
     """
 
     statsChanged = Signal(int, int, int)  # (nif_count, shape_count, triangle_count)
+    animationTimeChanged = Signal(float, float)  # (current_time, duration)
+    animationStateChanged = Signal(bool, bool)  # (is_playing, is_looping)
+    animationStopped = Signal()
 
     BASE_BODY_KEY = "__base_body__"
 
@@ -109,6 +118,10 @@ class OutfitViewportWidget(QOpenGLWidget):
 
         self.ctx: Optional[moderngl.Context] = None
         self.prog: Optional[moderngl.Program] = None
+        self.bone_ubo: Optional[moderngl.Buffer] = None
+        self._bone_palette_scratch = np.repeat(
+            np.eye(4, dtype=np.float32)[None, :, :], MAX_SHADER_BONES, axis=0
+        )
         self.post_prog: Optional[moderngl.Program] = None
         self.post_vao: Optional[moderngl.VertexArray] = None
         self.scene_color: Optional[moderngl.Texture] = None
@@ -131,6 +144,18 @@ class OutfitViewportWidget(QOpenGLWidget):
         self._base_body_visible: bool = True
 
         self.settings = ViewportRenderSettings()
+
+        # Headless HKX Animation & Skeleton Engine
+        self.anim_engine = AnimEngine()
+        self._anim_playing: bool = False
+        self._anim_loop: bool = True
+        self._anim_current_time: float = 0.0
+        self._anim_last_tick: float = 0.0
+        self._current_pose_matrices: Optional[Dict[str, np.ndarray]] = None
+
+        self._anim_timer = QTimer(self)
+        self._anim_timer.setInterval(16)  # ~60 FPS render/tick loop
+        self._anim_timer.timeout.connect(self._on_animation_tick)
 
         # Orbit camera state (Skyrim Z-up coordinate system: feet at Z=0, head at Z~120)
         self.cam_target = glm.vec3(0.0, 0.0, 62.0)
@@ -227,6 +252,140 @@ class OutfitViewportWidget(QOpenGLWidget):
         self.cam_distance = 185.0
         self.update()
 
+    # ------------------------------------------------------------------
+    # Public HKX Animation Playback API
+    # ------------------------------------------------------------------
+
+    @property
+    def active_animation(self) -> Optional[LoadedAnimation]:
+        return self.anim_engine.active_animation
+
+    @property
+    def is_animation_playing(self) -> bool:
+        return self._anim_playing
+
+    @property
+    def is_animation_looping(self) -> bool:
+        return self._anim_loop
+
+    @property
+    def animation_time(self) -> float:
+        return self._anim_current_time
+
+    @property
+    def animation_duration(self) -> float:
+        anim = self.anim_engine.active_animation
+        return anim.duration if anim is not None else 0.0
+
+    def load_animation(self, hkx_path: Path | str, auto_play: bool = True) -> LoadedAnimation:
+        """Load an `.hkx` animation clip, reset time to 0.0, and optionally start playback."""
+        loaded = self.anim_engine.load_animation(hkx_path)
+        self._anim_current_time = 0.0
+        self._anim_last_tick = time.perf_counter()
+        self._current_pose_matrices = self.anim_engine.evaluate_pose(0.0)
+        if auto_play:
+            self._anim_playing = True
+            self._anim_timer.start()
+        else:
+            self._anim_playing = False
+            self._anim_timer.stop()
+        self.animationStateChanged.emit(self._anim_playing, self._anim_loop)
+        self.animationTimeChanged.emit(self._anim_current_time, loaded.duration)
+        self.update()
+        return loaded
+
+    def play_animation(self) -> None:
+        """Resume or start playback of the loaded `.hkx` animation."""
+        if self.anim_engine.active_animation is None:
+            return
+        if (
+            self._anim_current_time >= self.animation_duration
+            and self.animation_duration > 0.0
+        ):
+            self._anim_current_time = 0.0
+        self._anim_playing = True
+        self._anim_last_tick = time.perf_counter()
+        if not self._anim_timer.isActive():
+            self._anim_timer.start()
+        self.animationStateChanged.emit(self._anim_playing, self._anim_loop)
+        self.update()
+
+    def pause_animation(self) -> None:
+        """Pause the active `.hkx` animation at the current frame."""
+        if not self._anim_playing:
+            return
+        self._anim_playing = False
+        self._anim_timer.stop()
+        self.animationStateChanged.emit(self._anim_playing, self._anim_loop)
+        self.update()
+
+    def toggle_play_pause(self) -> bool:
+        """Toggle between Play and Pause; returns the new `is_playing` state."""
+        if self._anim_playing:
+            self.pause_animation()
+        else:
+            self.play_animation()
+        return self._anim_playing
+
+    def set_animation_loop(self, loop: bool) -> None:
+        """Enable or disable looping when playback reaches the end of the clip."""
+        self._anim_loop = bool(loop)
+        self.animationStateChanged.emit(self._anim_playing, self._anim_loop)
+
+    def seek_animation(self, time_sec: float) -> None:
+        """Scrub/seek the active animation to `time_sec` seconds and refresh the viewport."""
+        anim = self.anim_engine.active_animation
+        if anim is None:
+            return
+        self._anim_current_time = max(0.0, min(float(time_sec), anim.duration))
+        self._anim_last_tick = time.perf_counter()
+        self._current_pose_matrices = self.anim_engine.evaluate_pose(self._anim_current_time)
+        self.animationTimeChanged.emit(self._anim_current_time, anim.duration)
+        self.update()
+
+    def stop_animation(self) -> None:
+        """
+        Stop playback, unload the active animation, reset the skeleton and attached
+        meshes back to the default bind pose, and emit `animationStopped`.
+        """
+        self._anim_playing = False
+        self._anim_timer.stop()
+        self._anim_current_time = 0.0
+        self.anim_engine.clear_animation()
+        self._current_pose_matrices = None
+        self.animationStateChanged.emit(False, self._anim_loop)
+        self.animationTimeChanged.emit(0.0, 0.0)
+        self.animationStopped.emit()
+        self.update()
+
+    def _on_animation_tick(self) -> None:
+        anim = self.anim_engine.active_animation
+        if anim is None or not self._anim_playing:
+            self._anim_timer.stop()
+            return
+
+        now = time.perf_counter()
+        delta_time = max(0.0, min(0.1, now - self._anim_last_tick))
+        self._anim_last_tick = now
+
+        if anim.duration > 0.0:
+            next_time = self._anim_current_time + delta_time
+            if next_time >= anim.duration:
+                if self._anim_loop:
+                    next_time = math.fmod(next_time, anim.duration)
+                else:
+                    next_time = anim.duration
+                    self._anim_playing = False
+                    self._anim_timer.stop()
+                    self.animationStateChanged.emit(self._anim_playing, self._anim_loop)
+            self._anim_current_time = next_time
+        else:
+            self._anim_current_time = 0.0
+
+        self._current_pose_matrices = self.anim_engine.evaluate_pose(self._anim_current_time)
+        self.animationTimeChanged.emit(self._anim_current_time, anim.duration)
+        self.update()
+
     def grab_viewport_image(self) -> np.ndarray:
         """Capture the current viewport framebuffer as an RGBA8 numpy array (for verification/export)."""
         qimg = self.grabFramebuffer().convertToFormat(
@@ -248,6 +407,12 @@ class OutfitViewportWidget(QOpenGLWidget):
         vert_src = (_SHADER_DIR / "default.vert").read_text(encoding="utf-8")
         frag_src = (_SHADER_DIR / "default.frag").read_text(encoding="utf-8")
         self.prog = self.ctx.program(vertex_shader=vert_src, fragment_shader=frag_src)
+        if "BonePalette" in self.prog:
+            self.prog["BonePalette"].binding = 0
+        self.bone_ubo = self.ctx.buffer(
+            np.ascontiguousarray(self._bone_palette_scratch.swapaxes(1, 2)).tobytes()
+        )
+        self.bone_ubo.bind_to_uniform_block(0)
 
         post_vert_src = (_SHADER_DIR / "postprocess.vert").read_text(encoding="utf-8")
         post_frag_src = (_SHADER_DIR / "postprocess.frag").read_text(encoding="utf-8")
@@ -330,6 +495,9 @@ class OutfitViewportWidget(QOpenGLWidget):
                     opaque_items.append(item)
 
         self._setup_global_shader_uniforms(proj, view, model, mv_inv, normal_mat)
+
+        if self.anim_engine.active_animation is not None and self._current_pose_matrices is None:
+            self._current_pose_matrices = self.anim_engine.evaluate_pose(self._anim_current_time)
 
         # Pass 1: Opaque & Alpha-Cutout meshes
         self.ctx.enable(moderngl.DEPTH_TEST)
@@ -593,13 +761,33 @@ class OutfitViewportWidget(QOpenGLWidget):
     def _upload_shape(self, key: str, sh: ShapeMeshData) -> GpuShapeItem:
         assert self.ctx is not None and self.prog is not None
         num_verts = len(sh.positions)
-        interleaved = np.empty((num_verts, 18), dtype=np.float32)
-        interleaved[:, 0:3] = sh.positions
-        interleaved[:, 3:6] = sh.normals
-        interleaved[:, 6:8] = sh.uvs
-        interleaved[:, 8:11] = sh.tangents
-        interleaved[:, 11:14] = sh.bitangents
-        interleaved[:, 14:18] = sh.colors
+        v_dtype = np.dtype(
+            [
+                ("pos", "3f4"),
+                ("norm", "3f4"),
+                ("uv", "2f4"),
+                ("tan", "3f4"),
+                ("bitan", "3f4"),
+                ("col", "4f4"),
+                ("bone_idx", "4i4"),
+                ("bone_w", "4f4"),
+            ]
+        )
+        interleaved = np.empty(num_verts, dtype=v_dtype)
+        interleaved["pos"] = sh.positions
+        interleaved["norm"] = sh.normals
+        interleaved["uv"] = sh.uvs
+        interleaved["tan"] = sh.tangents
+        interleaved["bitan"] = sh.bitangents
+        interleaved["col"] = sh.colors
+        if len(sh.bone_indices) == num_verts:
+            interleaved["bone_idx"] = sh.bone_indices
+        else:
+            interleaved["bone_idx"] = 0
+        if len(sh.bone_weights) == num_verts:
+            interleaved["bone_w"] = sh.bone_weights
+        else:
+            interleaved["bone_w"] = (1.0, 0.0, 0.0, 0.0)
 
         vbo = self.ctx.buffer(interleaved.tobytes())
         ibo = self.ctx.buffer(sh.triangles.astype(np.uint32).tobytes())
@@ -608,13 +796,15 @@ class OutfitViewportWidget(QOpenGLWidget):
             [
                 (
                     vbo,
-                    "3f 3f 2f 3f 3f 4f",
+                    "3f 3f 2f 3f 3f 4f 4i 4f",
                     "in_position",
                     "in_normal",
                     "in_uv",
                     "in_tangent",
                     "in_bitangent",
                     "in_color",
+                    "in_bone_indices",
+                    "in_bone_weights",
                 )
             ],
             index_buffer=ibo,
@@ -627,6 +817,36 @@ class OutfitViewportWidget(QOpenGLWidget):
                 continue  # Handled via cubemap unit
             gpu_textures[slot] = self._acquire_2d_texture(res_tex)
 
+        mapped_bone_names: List[str] = []
+        num_bones = min(len(sh.bone_names), MAX_SHADER_BONES)
+        effective_skin_mats = np.repeat(
+            np.eye(4, dtype=np.float32)[None, :, :], num_bones, axis=0
+        )
+        if sh.is_skinned and num_bones > 0:
+            for b_idx in range(num_bones):
+                b_name = sh.bone_names[b_idx]
+                resolved = self.anim_engine.resolve_bone_name(b_name)
+                if resolved is not None:
+                    mapped_bone_names.append(resolved)
+                    if b_idx < len(sh.bone_skin_matrices):
+                        effective_skin_mats[b_idx] = sh.bone_skin_matrices[b_idx]
+                else:
+                    bind_pos: Optional[np.ndarray] = None
+                    if b_idx < len(sh.bone_skin_matrices):
+                        try:
+                            bind_pos = np.linalg.inv(sh.bone_skin_matrices[b_idx])[:3, 3]
+                        except np.linalg.LinAlgError:
+                            bind_pos = None
+                    ancestor = self.anim_engine.find_fallback_ancestor(b_name, bind_pos)
+                    if ancestor is not None and ancestor in self.anim_engine.node_by_name:
+                        mapped_bone_names.append(ancestor)
+                        effective_skin_mats[b_idx] = (
+                            self.anim_engine.node_by_name[ancestor].inverse_bind_matrix
+                        )
+                    else:
+                        fallback_root = self.anim_engine.nodes[0].name
+                        mapped_bone_names.append(fallback_root)
+
         return GpuShapeItem(
             source_key=key,
             shape_data=sh,
@@ -634,6 +854,8 @@ class OutfitViewportWidget(QOpenGLWidget):
             ibo=ibo,
             vao=vao,
             textures=gpu_textures,
+            mapped_bone_names=mapped_bone_names,
+            effective_skin_matrices=effective_skin_mats,
         )
 
     def _release_nif_internal(self, key: str) -> None:
@@ -757,6 +979,25 @@ class OutfitViewportWidget(QOpenGLWidget):
 
         self.ctx.wireframe = bool(wireframe)
         self._set_uniform("bWireframe", bool(wireframe))
+
+        use_skinning = (
+            self.anim_engine.active_animation is not None
+            and self._current_pose_matrices is not None
+            and item.shape_data.is_skinned
+            and len(item.mapped_bone_names) > 0
+            and self.bone_ubo is not None
+        )
+        self._set_uniform("bSkinned", bool(use_skinning))
+        if use_skinning and self._current_pose_matrices is not None and self.bone_ubo is not None:
+            pose_stack = np.stack(
+                [self._current_pose_matrices[name] for name in item.mapped_bone_names],
+                axis=0,
+            )
+            skin_mats = pose_stack @ item.effective_skin_matrices
+            # Upload column-major matrices for GLSL std140 mat4 array
+            col_major = np.ascontiguousarray(skin_mats.swapaxes(1, 2), dtype=np.float32)
+            self.bone_ubo.write(col_major.tobytes(), offset=0)
+            self.bone_ubo.bind_to_uniform_block(0)
 
         self._set_uniform("bNormalMap", bool(s.enable_normal_map and mat.b_normal_map))
         self._set_uniform("bModelSpace", bool(mat.b_model_space))

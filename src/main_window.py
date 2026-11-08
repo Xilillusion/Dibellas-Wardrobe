@@ -17,7 +17,7 @@ import os
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
-from PySide6.QtCore import QModelIndex, QRect, QSize, Qt, QThread, QTimer, Signal
+from PySide6.QtCore import QModelIndex, QRect, QSignalBlocker, QSize, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QColor, QBrush, QKeySequence, QPainter, QPen, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -48,7 +48,7 @@ from PySide6.QtWidgets import (
 )
 
 from .config import AppConfig, LightingConfig, ViewportEffectsConfig, load_locales
-from .mod_scanner import ModScanner
+from .mod_scanner import ModScanner, is_animation_hkx
 from .nif_loader import LoadedNifData, NifLoader
 from .texture_resolver import TextureResolver
 from .viewport import OutfitViewportWidget
@@ -63,6 +63,7 @@ ROLE_MOD_ROOT_PATH = Qt.ItemDataRole.UserRole + 4
 ROLE_MOD_RELATIVE_PATH = Qt.ItemDataRole.UserRole + 5
 ROLE_OVERWRITE_FALLBACK = Qt.ItemDataRole.UserRole + 6
 ROLE_OVERWRITE_RELATIVE_PATH = Qt.ItemDataRole.UserRole + 7
+ROLE_HKX_PATH = Qt.ItemDataRole.UserRole + 8
 
 TARGET_MOD_FOLDERS = {"meshes", "calientetools"}
 
@@ -188,7 +189,13 @@ class NifSearchThread(QThread):
                 for fname in files:
                     if self._cancelled:
                         return
-                    if is_filtered_nif_filename(fname, self.hide_0):
+                    lower_fname = fname.casefold()
+                    if lower_fname.endswith(".nif"):
+                        if is_filtered_nif_filename(fname, self.hide_0):
+                            continue
+                    elif is_animation_hkx(fname, rel_parts if "rel_parts" in locals() else ()):
+                        pass
+                    else:
                         continue
                     if self.mod_scanner:
                         try:
@@ -212,7 +219,9 @@ class NifSearchThread(QThread):
                         return
                     if self.query not in group_name.casefold():
                         continue
-                    if is_filtered_nif_filename(nif_path.name, self.hide_0):
+                    if nif_path.name.casefold().endswith(".nif") and is_filtered_nif_filename(
+                        nif_path.name, self.hide_0
+                    ):
                         continue
                     target = self.mod_scanner.target_for_nif(nif_path)
                     relative_parts = (
@@ -523,8 +532,10 @@ class NeatTreeWidget(QTreeWidget):
             painter.drawLine(gx, y_top, gx, y_bottom)
 
         # 2. Draw branch indicator for the current item
-        is_nif = bool(item.data(0, ROLE_NIF_PATH))
-        has_children = item.childCount() > 0 or not is_nif
+        is_leaf_file = bool(
+            item.data(0, ROLE_NIF_PATH) or item.data(0, ROLE_HKX_PATH)
+        )
+        has_children = item.childCount() > 0 or not is_leaf_file
 
         if has_children:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -548,6 +559,168 @@ class NeatTreeWidget(QTreeWidget):
                 painter.drawLine(conn_x, y_mid, conn_x + (indent // 2) + 2, y_mid)
 
         painter.restore()
+
+
+class AnimationPlaybackToolbar(QFrame):
+    """
+    Docked bottom playback toolbar for `.hkx` animations.
+
+    Displays metadata (`[Mod Name (Parent Directory)] - [Filename.hkx]`), a formatted
+    timestamp counter (`MM:SS.CC / MM:SS.CC`), an interactive timeline scrubber, and
+    Play/Pause, Loop, and Close/Reset controls.
+    """
+
+    SCRUB_STEPS = 1000
+
+    def __init__(
+        self,
+        on_toggle_play,
+        on_toggle_loop,
+        on_seek,
+        on_close,
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        self._on_seek = on_seek
+        self._duration: float = 0.0
+        self._is_playing: bool = False
+        self._play_text = "▶"
+        self._pause_text = "Ⅱ"
+        self._play_tooltip = "Play"
+        self._pause_tooltip = "Pause"
+
+        self.setObjectName("animPlaybackToolbar")
+        self.setStyleSheet(
+            """
+            QFrame#animPlaybackToolbar {
+                background-color: #161820;
+                border: 1px solid #30364a;
+                border-radius: 6px;
+            }
+            """
+        )
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 6, 10, 6)
+        layout.setSpacing(4)
+
+        top_row = QHBoxLayout()
+        top_row.setContentsMargins(0, 0, 0, 0)
+        top_row.setSpacing(8)
+
+        self.lbl_metadata = QLabel("")
+        self.lbl_metadata.setStyleSheet(
+            "color: #f0d59c; font-weight: 600; font-size: 12px;"
+        )
+        self.lbl_metadata.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+        )
+
+        self.lbl_time = QLabel("00:00.00 / 00:00.00")
+        self.lbl_time.setStyleSheet(
+            "color: #9da6be; font-family: 'Consolas', monospace; font-size: 12px;"
+        )
+        self.lbl_time.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+
+        top_row.addWidget(self.lbl_metadata, stretch=1)
+        top_row.addWidget(self.lbl_time)
+        layout.addLayout(top_row)
+
+        bottom_row = QHBoxLayout()
+        bottom_row.setContentsMargins(0, 0, 0, 0)
+        bottom_row.setSpacing(8)
+
+        self.btn_play_pause = QPushButton(self._pause_text)
+        self.btn_play_pause.setFixedSize(32, 30)
+        self.btn_play_pause.clicked.connect(on_toggle_play)
+
+        self.slider_timeline = QSlider(Qt.Orientation.Horizontal)
+        self.slider_timeline.setRange(0, self.SCRUB_STEPS)
+        self.slider_timeline.setValue(0)
+        self.slider_timeline.valueChanged.connect(self._on_slider_value_changed)
+
+        self.chk_loop = QCheckBox("Loop")
+        self.chk_loop.setChecked(True)
+        self.chk_loop.toggled.connect(on_toggle_loop)
+
+        self.btn_close = QPushButton("×")
+        self.btn_close.setFixedSize(32, 30)
+        self.btn_close.clicked.connect(on_close)
+
+        bottom_row.addWidget(self.btn_play_pause)
+        bottom_row.addWidget(self.slider_timeline, stretch=1)
+        bottom_row.addWidget(self.chk_loop)
+        bottom_row.addWidget(self.btn_close)
+        layout.addLayout(bottom_row)
+
+    @staticmethod
+    def format_timestamp(seconds: float) -> str:
+        seconds = max(0.0, float(seconds))
+        mins = int(seconds // 60.0)
+        rem = seconds - mins * 60.0
+        return f"{mins:02d}:{rem:05.2f}"
+
+    def set_translations(
+        self,
+        play_text: str,
+        pause_text: str,
+        loop_text: str,
+        close_text: str,
+        close_tooltip: str,
+    ) -> None:
+        self._play_text = "▶"
+        self._pause_text = "Ⅱ"
+        self._play_tooltip = play_text
+        self._pause_tooltip = pause_text
+        self.btn_play_pause.setText(
+            self._pause_text if self._is_playing else self._play_text
+        )
+        self.btn_play_pause.setToolTip(
+            self._pause_tooltip if self._is_playing else self._play_tooltip
+        )
+        self.chk_loop.setText(loop_text)
+        self.btn_close.setText("×")
+        self.btn_close.setToolTip(close_tooltip or close_text)
+        self.btn_close.setAccessibleName(close_text)
+
+    def set_metadata(self, label_text: str, duration: float) -> None:
+        self._duration = max(0.0, float(duration))
+        self.lbl_metadata.setText(label_text)
+        self.lbl_metadata.setToolTip(label_text)
+        self.update_time(0.0, self._duration)
+
+    def update_state(self, is_playing: bool, is_looping: bool) -> None:
+        self._is_playing = bool(is_playing)
+        self.btn_play_pause.setText(
+            self._pause_text if self._is_playing else self._play_text
+        )
+        self.btn_play_pause.setToolTip(
+            self._pause_tooltip if self._is_playing else self._play_tooltip
+        )
+        with QSignalBlocker(self.chk_loop):
+            self.chk_loop.setChecked(bool(is_looping))
+
+    def update_time(self, current_time: float, duration: float) -> None:
+        self._duration = max(0.0, float(duration))
+        cur_str = self.format_timestamp(current_time)
+        dur_str = self.format_timestamp(self._duration)
+        self.lbl_time.setText(f"{cur_str} / {dur_str}")
+
+        if not self.slider_timeline.isSliderDown():
+            with QSignalBlocker(self.slider_timeline):
+                if self._duration > 0.0:
+                    ratio = max(0.0, min(1.0, current_time / self._duration))
+                    self.slider_timeline.setValue(int(round(ratio * self.SCRUB_STEPS)))
+                else:
+                    self.slider_timeline.setValue(0)
+
+    def _on_slider_value_changed(self, value: int) -> None:
+        if self._duration <= 0.0:
+            return
+        target_time = (float(value) / float(self.SCRUB_STEPS)) * self._duration
+        self._on_seek(target_time)
 
 
 class DibellasWardrobeWindow(QMainWindow):
@@ -614,6 +787,7 @@ class DibellasWardrobeWindow(QMainWindow):
         self._search_thread: Optional[NifSearchThread] = None
         self._search_groups: Dict[str, QTreeWidgetItem] = {}
         self._startup_locked_nif_refresh_pending = False
+        self._active_hkx_path: Optional[str] = None
 
         self._search_timer = QTimer(self)
         self._search_timer.setSingleShot(True)
@@ -658,6 +832,14 @@ class DibellasWardrobeWindow(QMainWindow):
                     self._t("minimize"),
                     self._t("restore"),
                 )
+        if hasattr(self, "anim_toolbar"):
+            self.anim_toolbar.set_translations(
+                self._t("anim_play"),
+                self._t("anim_pause"),
+                self._t("anim_loop"),
+                self._t("anim_stop"),
+                self._t("anim_stop_tip"),
+            )
         self._retranslate_tree_helpers()
         self._refresh_added_nifs()
         self._update_added_nif_count()
@@ -866,6 +1048,7 @@ class DibellasWardrobeWindow(QMainWindow):
         self.file_tree = NeatTreeWidget()
         self.file_tree.itemExpanded.connect(self._on_tree_item_expanded)
         self.file_tree.itemClicked.connect(self._on_tree_item_clicked)
+        self.file_tree.itemDoubleClicked.connect(self._on_tree_item_double_clicked)
         tree_layout.addWidget(self.file_tree, stretch=1)
 
         mesh_layout.addWidget(tree_group, stretch=1)
@@ -959,6 +1142,26 @@ class DibellasWardrobeWindow(QMainWindow):
         s.show_ground_grid = cfg_chk.show_ground_grid
 
         center_layout.addWidget(self.viewport, stretch=1)
+
+        self.anim_toolbar = AnimationPlaybackToolbar(
+            on_toggle_play=self.viewport.toggle_play_pause,
+            on_toggle_loop=self.viewport.set_animation_loop,
+            on_seek=self.viewport.seek_animation,
+            on_close=self._on_stop_animation,
+            parent=center_panel,
+        )
+        self.anim_toolbar.set_translations(
+            self._t("anim_play"),
+            self._t("anim_pause"),
+            self._t("anim_loop"),
+            self._t("anim_stop"),
+            self._t("anim_stop_tip"),
+        )
+        self.anim_toolbar.setVisible(False)
+        self.viewport.animationTimeChanged.connect(self.anim_toolbar.update_time)
+        self.viewport.animationStateChanged.connect(self.anim_toolbar.update_state)
+        self.viewport.animationStopped.connect(self._on_viewport_animation_stopped)
+        center_layout.addWidget(self.anim_toolbar)
 
         cam_hint_row = QHBoxLayout()
         cam_hint = QLabel()
@@ -1443,6 +1646,16 @@ class DibellasWardrobeWindow(QMainWindow):
         nif_item.setFlags(nif_item.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
         return nif_item
 
+    @staticmethod
+    def _create_hkx_tree_item(parent: QTreeWidget | QTreeWidgetItem, name: str, path: str) -> QTreeWidgetItem:
+        label = name if name.startswith("[HKX]") else f"[HKX] {name}"
+        hkx_item = QTreeWidgetItem(parent, [label])
+        hkx_item.setData(0, ROLE_HKX_PATH, path)
+        hkx_item.setToolTip(0, path)
+        hkx_item.setForeground(0, QColor("#7fd4ff"))
+        hkx_item.setFlags(hkx_item.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
+        return hkx_item
+
     # ------------------------------------------------------------------
     # Dynamic On-Demand Tree Population & Background Search
     # ------------------------------------------------------------------
@@ -1528,7 +1741,10 @@ class DibellasWardrobeWindow(QMainWindow):
             grp_item.setForeground(0, QColor("#f0d59c"))
             self._search_groups[group_name] = grp_item
 
-        self._create_nif_tree_item(self._search_groups[group_name], file_name, full_path)
+        if full_path.casefold().endswith(".hkx"):
+            self._create_hkx_tree_item(self._search_groups[group_name], file_name, full_path)
+        else:
+            self._create_nif_tree_item(self._search_groups[group_name], file_name, full_path)
         self._updating_tree = False
 
     def populate_file_tree(self) -> None:
@@ -1593,6 +1809,8 @@ class DibellasWardrobeWindow(QMainWindow):
                     self._create_folder_tree_item(self.file_tree, entry.name, entry.path, "#e0d2b4")
                 elif entry.is_file() and not is_filtered_nif_filename(entry.name, hide_0):
                     self._create_nif_tree_item(self.file_tree, entry.name, entry.path)
+                elif entry.is_file() and is_animation_hkx(entry.name):
+                    self._create_hkx_tree_item(self.file_tree, entry.name, entry.path)
             except OSError:
                 continue
 
@@ -1701,6 +1919,10 @@ class DibellasWardrobeWindow(QMainWindow):
                     display_name = f"[{name}]" if is_overwritten else name
                     self._create_nif_tree_item(item, display_name, str(entry_path))
                     added_any = True
+                elif is_animation_hkx(name, mod_relative_path or fallback_relative_path):
+                    display_name = f"[{name}]" if is_overwritten else name
+                    self._create_hkx_tree_item(item, display_name, str(entry_path))
+                    added_any = True
 
             if not added_any:
                 empty_item = QTreeWidgetItem(item, [self._t("no_nif_files")])
@@ -1737,6 +1959,11 @@ class DibellasWardrobeWindow(QMainWindow):
         if self._updating_tree:
             return
 
+        hkx_key = item.data(0, ROLE_HKX_PATH)
+        if hkx_key:
+            self._load_and_play_animation(hkx_key)
+            return
+
         nif_key = item.data(0, ROLE_NIF_PATH)
         if not nif_key:
             return
@@ -1748,6 +1975,57 @@ class DibellasWardrobeWindow(QMainWindow):
             self._load_and_attach_outfit_nif(nif_key)
         else:
             self._detach_outfit_nif(nif_key)
+
+    def _on_tree_item_double_clicked(self, item: QTreeWidgetItem, _column: int) -> None:
+        if self._updating_tree:
+            return
+        hkx_key = item.data(0, ROLE_HKX_PATH)
+        if hkx_key:
+            self._load_and_play_animation(hkx_key)
+
+    def _format_animation_metadata(self, hkx_path: Path) -> str:
+        mod_name = self._mod_name_for_nif(str(hkx_path))
+        parent_name = hkx_path.parent.name
+        if parent_name and parent_name.casefold() != mod_name.casefold():
+            return f"{mod_name} ({parent_name}) - {hkx_path.name}"
+        return f"{mod_name} - {hkx_path.name}"
+
+    def _load_and_play_animation(self, hkx_key: str, show_error: bool = True) -> bool:
+        resolved_key = str(Path(hkx_key).resolve())
+        try:
+            loaded = self.viewport.load_animation(resolved_key, auto_play=True)
+            self._active_hkx_path = resolved_key
+            meta_label = self._format_animation_metadata(loaded.filepath)
+            self.anim_toolbar.set_metadata(meta_label, loaded.duration)
+            self.anim_toolbar.update_state(
+                self.viewport.is_animation_playing,
+                self.viewport.is_animation_looping,
+            )
+            self.anim_toolbar.setVisible(True)
+            return True
+        except Exception as exc:
+            log.error("Failed loading HKX animation %s: %s", hkx_key, exc)
+            if show_error:
+                QMessageBox.warning(
+                    self,
+                    self._t("hkx_load_error"),
+                    self._t(
+                        "hkx_load_error_message",
+                        filename=Path(hkx_key).name,
+                        error=exc,
+                    ),
+                )
+            return False
+
+    def _on_stop_animation(self) -> None:
+        self._active_hkx_path = None
+        self.viewport.stop_animation()
+        self.anim_toolbar.setVisible(False)
+
+    def _on_viewport_animation_stopped(self) -> None:
+        self._active_hkx_path = None
+        if hasattr(self, "anim_toolbar"):
+            self.anim_toolbar.setVisible(False)
 
     def _load_and_attach_outfit_nif(self, nif_key: str, show_error: bool = True) -> bool:
         try:

@@ -7,20 +7,26 @@ from PyInstaller.utils.hooks import collect_submodules
 
 ROOT = Path(SPECPATH).resolve()
 NIFLY_ROOT = ROOT / "io_scene_nifly"
+HKX_ROOT = NIFLY_ROOT / "hkx"
 sys.path.insert(0, str(NIFLY_ROOT))
+sys.path.insert(0, str(HKX_ROOT))
 
 analysis = Analysis(
     [str(ROOT / "main.py")],
-    pathex=[str(ROOT), str(NIFLY_ROOT)],
+    pathex=[str(ROOT), str(NIFLY_ROOT), str(HKX_ROOT)],
     binaries=[
         (str(NIFLY_ROOT / "NiflyDLL.dll"), "."),
     ],
     datas=[
         (str(ROOT / "shaders"), "shaders"),
+        (
+            str(NIFLY_ROOT / "skeletons" / "Skyrim" / "skeleton_female.nif"),
+            "io_scene_nifly/skeletons/Skyrim",
+        ),
         (str(ROOT / "locales.json"), "."),
         (str(ROOT / "config.json"), "."),
     ],
-    hiddenimports=collect_submodules("pyn"),
+    hiddenimports=collect_submodules("pyn") + ["anim_fo4", "anim_skyrim"],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

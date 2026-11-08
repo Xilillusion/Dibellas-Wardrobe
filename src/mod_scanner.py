@@ -10,6 +10,37 @@ from typing import Dict, Iterable, Optional
 
 log = logging.getLogger("dibellas_wardrobe.mod_scanner")
 
+_NON_ANIM_HKX_NAMES = frozenset(
+    {
+        "0_master.hkx",
+        "defaultfemale.hkx",
+        "defaultmale.hkx",
+        "mt_behavior.hkx",
+    }
+)
+_NON_ANIM_HKX_DIRS = frozenset(
+    {
+        "behaviors",
+        "character assets",
+        "character assets female",
+    }
+)
+
+
+def is_animation_hkx(file_name: str, relative_parts: Iterable[str] = ()) -> bool:
+    """Return True if `file_name` is a playable `.hkx` animation (excluding behaviors/skeletons)."""
+    lower_name = file_name.casefold()
+    if not lower_name.endswith(".hkx"):
+        return False
+    if lower_name.startswith("skeleton") or lower_name in _NON_ANIM_HKX_NAMES:
+        return False
+    norm_parts = tuple(p.casefold() for p in relative_parts)
+    if any(part in _NON_ANIM_HKX_DIRS for part in norm_parts):
+        return False
+    if "meshes" in norm_parts:
+        return "animations" in norm_parts
+    return True
+
 
 @dataclass(frozen=True)
 class OverlayEntry:
@@ -173,7 +204,11 @@ class ModScanner:
                 )
                 if mod_data and visible_parts[0].casefold() == "meshes":
                     for file_name in files:
-                        if not file_name.casefold().endswith(".nif"):
+                        lower_name = file_name.casefold()
+                        if not (
+                            lower_name.endswith(".nif")
+                            or is_animation_hkx(file_name, visible_parts)
+                        ):
                             continue
                         mesh_parts = visible_parts + (file_name,)
                         mesh = MeshItem(
@@ -273,8 +308,13 @@ class ModScanner:
             ):
                 root_path = Path(root)
                 relative_directory = root_path.relative_to(meshes_root)
+                rel_parts = ("meshes",) + relative_directory.parts
                 for file_name in files:
-                    if not file_name.casefold().endswith(".nif"):
+                    lower_name = file_name.casefold()
+                    if not (
+                        lower_name.endswith(".nif")
+                        or is_animation_hkx(file_name, rel_parts)
+                    ):
                         continue
                     nif_path = (root_path / file_name).resolve()
                     relative_mesh = relative_directory / file_name
