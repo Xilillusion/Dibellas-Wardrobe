@@ -38,6 +38,8 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSlider,
     QSplitter,
+    QStyle,
+    QStyleOptionGroupBox,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -177,41 +179,129 @@ class NifSearchThread(QThread):
 
 
 class RefreshableGroupBox(QGroupBox):
-    """QGroupBox featuring a compact refresh icon button in the top right corner."""
+    """Group box with boxed refresh and optional minimize header actions."""
 
-    def __init__(self, title: str, on_refresh, parent: Optional[QWidget] = None) -> None:
+    def __init__(
+        self,
+        title: str,
+        on_refresh=None,
+        minimizable: bool = False,
+        parent: Optional[QWidget] = None,
+    ) -> None:
         super().__init__(title, parent)
-        self.btn_refresh = QPushButton("↻", self)
-        self.btn_refresh.setObjectName("refreshTreeBtn")
-        self.btn_refresh.setToolTip("Refresh Tree")
-        self.btn_refresh.setFixedSize(24, 20)
-        self.btn_refresh.setStyleSheet(
+        self._collapsible_content: Optional[QWidget] = None
+        self._collapsed = False
+
+        self.header_actions = QFrame(self)
+        self.header_actions.setObjectName("headerActions")
+        self.header_actions.setStyleSheet(
             """
-            QPushButton#refreshTreeBtn {
-                background: transparent;
-                border: 1px solid transparent;
+            QFrame#headerActions {
+                background-color: #1b1d24;
+                border: 1px solid #41485f;
                 border-radius: 4px;
+            }
+            QPushButton#headerActionButton {
+                background: transparent;
+                border: none;
+                border-radius: 3px;
                 color: #9da6be;
-                font-size: 15px;
+                font-size: 14px;
                 font-weight: bold;
                 padding: 0px;
             }
-            QPushButton#refreshTreeBtn:hover {
+            QPushButton#headerActionButton:hover {
                 background-color: #2b3040;
-                border: 1px solid #41485f;
                 color: #f0d59c;
             }
-            QPushButton#refreshTreeBtn:pressed {
+            QPushButton#headerActionButton:pressed {
                 background-color: #1f222e;
                 color: #dfb86c;
             }
             """
         )
-        self.btn_refresh.clicked.connect(on_refresh)
+        actions_layout = QHBoxLayout(self.header_actions)
+        actions_layout.setContentsMargins(1, 1, 1, 1)
+        actions_layout.setSpacing(2)
+
+        self.btn_refresh: Optional[QPushButton] = None
+        if on_refresh is not None:
+            self.btn_refresh = QPushButton("↻", self.header_actions)
+            self.btn_refresh.setObjectName("headerActionButton")
+            self.btn_refresh.setToolTip("Refresh")
+            self.btn_refresh.setFixedSize(22, 22)
+            self.btn_refresh.clicked.connect(on_refresh)
+            actions_layout.addWidget(self.btn_refresh)
+
+        self.btn_minimize: Optional[QPushButton] = None
+        if minimizable:
+            self.btn_minimize = QPushButton("−", self.header_actions)
+            self.btn_minimize.setObjectName("headerActionButton")
+            self.btn_minimize.setToolTip("Minimize")
+            self.btn_minimize.setFixedSize(22, 22)
+            self.btn_minimize.clicked.connect(self._toggle_content)
+            actions_layout.addWidget(self.btn_minimize)
+
+        self.header_actions.adjustSize()
+        self.header_actions.setVisible(on_refresh is not None or minimizable)
+
+    def set_collapsible_content(self, content: QWidget) -> None:
+        self._collapsible_content = content
+
+    def setTitle(self, title: str) -> None:
+        super().setTitle(title)
+        if hasattr(self, "header_actions"):
+            QTimer.singleShot(0, self._position_header_actions)
+
+    def set_collapsed(self, collapsed: bool) -> None:
+        if self._collapsible_content is None or self.btn_minimize is None:
+            return
+        self._collapsed = collapsed
+        self._collapsible_content.setVisible(not collapsed)
+        self.btn_minimize.setText("+" if collapsed else "−")
+        self._update_minimize_tooltip()
+
+    def set_minimize_tooltips(self, minimize: str, restore: str) -> None:
+        self._minimize_tooltip = minimize
+        self._restore_tooltip = restore
+        self._update_minimize_tooltip()
+
+    def _toggle_content(self) -> None:
+        if self._collapsible_content is None or self.btn_minimize is None:
+            return
+        self.set_collapsed(not self._collapsed)
+
+    def _update_minimize_tooltip(self) -> None:
+        if self.btn_minimize is None:
+            return
+        self.btn_minimize.setToolTip(
+            getattr(self, "_restore_tooltip", "Restore")
+            if self._collapsed
+            else getattr(self, "_minimize_tooltip", "Minimize")
+        )
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
-        self.btn_refresh.move(max(0, self.width() - self.btn_refresh.width() - 8), 1)
+        self._position_header_actions()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        QTimer.singleShot(0, self._position_header_actions)
+
+    def _position_header_actions(self) -> None:
+        if self.header_actions.isVisible():
+            option = QStyleOptionGroupBox()
+            self.initStyleOption(option)
+            title_rect = self.style().subControlRect(
+                QStyle.ComplexControl.CC_GroupBox,
+                option,
+                QStyle.SubControl.SC_GroupBoxLabel,
+                self,
+            )
+            self.header_actions.move(
+                max(0, self.width() - self.header_actions.width() - 8),
+                max(0, title_rect.center().y() - self.header_actions.height() // 2),
+            )
 
 
 class ElidedLabel(QLabel):
@@ -434,7 +524,10 @@ class DibellasWardrobeWindow(QMainWindow):
         cfg_folder = Path(self.config.default_folder) if self.config.default_folder else None
 
         if initial_root_dir:
-            self.current_root_dir: Optional[Path] = Path(initial_root_dir).resolve()
+            initial_folder = Path(initial_root_dir).resolve()
+            self.current_root_dir: Optional[Path] = (
+                initial_folder if initial_folder.is_dir() else None
+            )
         elif cfg_folder and cfg_folder.is_dir():
             self.current_root_dir = cfg_folder.resolve()
         else:
@@ -488,6 +581,12 @@ class DibellasWardrobeWindow(QMainWindow):
     def retranslate_ui(self) -> None:
         for widget, key, setter in self._i18n_bindings:
             getattr(widget, setter)(self._t(key))
+        for group in self.findChildren(RefreshableGroupBox):
+            if group.btn_minimize is not None:
+                group.set_minimize_tooltips(
+                    self._t("minimize"),
+                    self._t("restore"),
+                )
         self._retranslate_tree_helpers()
         self._refresh_added_nifs()
         self._update_added_nif_count()
@@ -625,9 +724,21 @@ class DibellasWardrobeWindow(QMainWindow):
         mesh_layout.setContentsMargins(2, 2, 2, 2)
         mesh_layout.setSpacing(6)
 
-        dir_group = QGroupBox()
+        dir_group = RefreshableGroupBox(
+            self._t("mod_directory"),
+            minimizable=True,
+        )
         self._bind_text(dir_group, "mod_directory", "setTitle")
-        dir_layout = QVBoxLayout(dir_group)
+        dir_content = QWidget()
+        dir_layout = QVBoxLayout(dir_content)
+        dir_layout.setContentsMargins(0, 0, 0, 0)
+        dir_group_layout = QVBoxLayout(dir_group)
+        dir_group_layout.addWidget(dir_content)
+        dir_group.set_collapsible_content(dir_content)
+        dir_group.set_minimize_tooltips(
+            self._t("minimize"),
+            self._t("restore"),
+        )
 
         path_row = QHBoxLayout()
         self.root_path_edit = QLineEdit(
@@ -663,7 +774,7 @@ class DibellasWardrobeWindow(QMainWindow):
         self._bind_text(self.chk_hide_gnd_folder, "hide_gnd")
 
         self.dir_group = dir_group
-        self.dir_group.setVisible(cfg_chk.show_mod_dir_filter)
+        self.dir_group.setVisible(True)
         mesh_layout.addWidget(dir_group)
 
         tree_group = RefreshableGroupBox(
@@ -672,6 +783,7 @@ class DibellasWardrobeWindow(QMainWindow):
         )
         self._bind_text(tree_group, "outfit_meshes", "setTitle")
         self.btn_refresh_tree = tree_group.btn_refresh
+        assert self.btn_refresh_tree is not None
         self._bind_text(self.btn_refresh_tree, "refresh_tree", "setToolTip")
         tree_layout = QVBoxLayout(tree_group)
 
@@ -697,8 +809,20 @@ class DibellasWardrobeWindow(QMainWindow):
         added_layout.setContentsMargins(2, 2, 2, 2)
         added_layout.setSpacing(6)
 
-        locked_group = QGroupBox(self._t("locked_wardrobe", count=0))
-        locked_group_layout = QVBoxLayout(locked_group)
+        locked_group = RefreshableGroupBox(
+            self._t("locked_wardrobe", count=0),
+            minimizable=True,
+        )
+        locked_content = QWidget()
+        locked_group_layout = QVBoxLayout(locked_content)
+        locked_group_layout.setContentsMargins(0, 0, 0, 0)
+        locked_group_box_layout = QVBoxLayout(locked_group)
+        locked_group_box_layout.addWidget(locked_content)
+        locked_group.set_collapsible_content(locked_content)
+        locked_group.set_minimize_tooltips(
+            self._t("minimize"),
+            self._t("restore"),
+        )
         self.locked_nifs_list = QListWidget()
         self.locked_nifs_list.setMinimumHeight(72)
         self.locked_nifs_list.setMaximumHeight(210)
@@ -808,18 +932,7 @@ class DibellasWardrobeWindow(QMainWindow):
             """
         )
         btn_close_sidebar.clicked.connect(lambda: self._toggle_settings_sidebar(False))
-        language_label = QLabel()
-        self._bind_text(language_label, "language")
-        self.language_combo = QComboBox()
-        for language_code, translations in self._translations.items():
-            self.language_combo.addItem(translations["language_name"], language_code)
-        self.language_combo.setCurrentIndex(
-            self.language_combo.findData(self.language)
-        )
-        self.language_combo.currentIndexChanged.connect(self._on_language_changed)
         sidebar_header.addWidget(sidebar_title)
-        sidebar_header.addWidget(language_label)
-        sidebar_header.addWidget(self.language_combo)
         sidebar_header.addStretch(1)
         sidebar_header.addWidget(btn_close_sidebar)
         right_layout.addLayout(sidebar_header)
@@ -841,7 +954,21 @@ class DibellasWardrobeWindow(QMainWindow):
         light_form = QFormLayout(light_group)
 
         self.btn_reset_lighting = light_group.btn_refresh
+        assert self.btn_reset_lighting is not None
         self._bind_text(self.btn_reset_lighting, "reset_lighting", "setToolTip")
+
+        language_group = QGroupBox()
+        self._bind_text(language_group, "language_section", "setTitle")
+        language_layout = QHBoxLayout(language_group)
+        self.language_combo = QComboBox()
+        for language_code, translations in self._translations.items():
+            self.language_combo.addItem(translations["language_name"], language_code)
+        self.language_combo.setCurrentIndex(
+            self.language_combo.findData(self.language)
+        )
+        self.language_combo.currentIndexChanged.connect(self._on_language_changed)
+        language_layout.addWidget(self.language_combo, stretch=1)
+        scroll_layout.addWidget(language_group)
 
         self.slider_light_azimuth, self.lbl_azimuth_val = self._add_slider_row(
             light_form, self._t("light_rotation"), -180, 180, int(round(cfg_light.light_azimuth_deg)),
@@ -899,6 +1026,16 @@ class DibellasWardrobeWindow(QMainWindow):
         right_layout.addWidget(scroll, stretch=1)
 
         self.right_panel = right_panel
+        right_layout.activate()
+        scroll_content.ensurePolished()
+        scroll_layout.activate()
+        scroll_content.adjustSize()
+        content_width = max(
+            scroll_content.minimumSizeHint().width(),
+            scroll_layout.minimumSize().width(),
+        )
+        self._settings_sidebar_min_width = content_width + 12
+        right_panel.setMinimumWidth(self._settings_sidebar_min_width)
         splitter.addWidget(right_panel)
         self.right_panel.setVisible(False)
 
@@ -957,12 +1094,10 @@ class DibellasWardrobeWindow(QMainWindow):
         super().closeEvent(event)
 
     def _toggle_mod_dir_filter(self, visible: Optional[bool] = None) -> None:
-        """Toggle visibility of the Mod Directory & NIF Filter group to expand the outfit meshes box."""
+        """Minimize or restore the Mod Directory controls."""
         if visible is None:
-            visible = not self.dir_group.isVisible()
-        self.dir_group.setVisible(visible)
-        if hasattr(self, "act_toggle_filter"):
-            self.act_toggle_filter.setChecked(visible)
+            visible = self.dir_group._collapsed
+        self.dir_group.set_collapsed(not visible)
 
     def _toggle_settings_sidebar(self, visible: Optional[bool] = None) -> None:
         if visible is None:
@@ -976,7 +1111,22 @@ class DibellasWardrobeWindow(QMainWindow):
         if visible:
             if not self.right_panel.isVisible():
                 self.right_panel.setVisible(True)
-                right_target_w = min(420, max(400, total_w - mesh_w - added_w - 300))
+                self.right_panel.ensurePolished()
+                scroll = self.right_panel.findChild(QScrollArea)
+                if scroll is not None and scroll.widget() is not None:
+                    content = scroll.widget()
+                    content.ensurePolished()
+                    if content.layout() is not None:
+                        content.layout().activate()
+                        content.adjustSize()
+                        self._settings_sidebar_min_width = max(
+                            content.minimumSizeHint().width(),
+                            content.layout().minimumSize().width(),
+                        ) + 12
+                        self.right_panel.setMinimumWidth(
+                            self._settings_sidebar_min_width
+                        )
+                right_target_w = self._settings_sidebar_min_width
                 center_w = max(300, total_w - mesh_w - added_w - right_target_w)
                 self.splitter.setSizes([mesh_w, added_w, center_w, right_target_w])
         else:
@@ -999,6 +1149,7 @@ class DibellasWardrobeWindow(QMainWindow):
         slider = QSlider(Qt.Orientation.Horizontal)
         slider.setRange(min_val, max_val)
         slider.setValue(init_val)
+        slider.setMinimumWidth(80)
         slider.valueChanged.connect(callback)
 
         value_label = QLabel(val_text)
@@ -1367,10 +1518,18 @@ class DibellasWardrobeWindow(QMainWindow):
 
     def _autoload_locked_nifs(self) -> None:
         """Load NIFs saved in the locked wardrobe without showing startup dialogs."""
+        missing_nifs = {
+            nif_key
+            for nif_key in self._locked_nif_paths
+            if not Path(nif_key).is_file()
+        }
+        if missing_nifs:
+            for nif_key in sorted(missing_nifs):
+                log.warning("Removing unavailable locked NIF from config: %s", nif_key)
+            self._locked_nif_paths.difference_update(missing_nifs)
+            self.save_config()
+
         for nif_key in sorted(self._locked_nif_paths):
-            if not Path(nif_key).is_file():
-                log.warning("Locked NIF is not available: %s", nif_key)
-                continue
             self._load_and_attach_outfit_nif(nif_key, show_error=False)
 
     def _lock_nif(self, nif_key: str) -> None:

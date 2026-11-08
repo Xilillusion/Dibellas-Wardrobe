@@ -1,6 +1,6 @@
 {
   "default_folder": "E:\\Skyrim\\MO2\\mods",
-  "language": "zh",
+  "language": "en",
   "lighting": {
     "light_azimuth_deg": 35.0,
     "light_elevation_deg": 28.0,
@@ -13,7 +13,7 @@
     "meshes_and_caliente_only": true,
     "hide_low_weight": true,
     "hide_gnd_folder": true,
-    "show_mod_dir_filter": false,
+    "show_mod_dir_filter": true,
     "wireframe_overlay": false,
     "show_ground_grid": true
   },
