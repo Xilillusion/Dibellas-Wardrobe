@@ -1,6 +1,6 @@
 {
   "default_folder": "E:\\Skyrim\\MO2\\mods",
-  "language": "en",
+  "language": "zh",
   "lighting": {
     "light_azimuth_deg": 35.0,
     "light_elevation_deg": 28.0,
@@ -43,5 +43,20 @@
     "E:\\Skyrim\\MO2\\overwrite\\meshes\\Coco_Cloths\\Ahri_uniforms_v2\\skirt_1.nif",
     "E:\\Skyrim\\MO2\\overwrite\\meshes\\Coco_Cloths\\Ahri_uniforms_v2\\stock_1.nif",
     "E:\\Skyrim\\MO2\\overwrite\\meshes\\Coco_Cloths\\Ahri_uniforms_v2\\top_1.nif"
-  ]
+  ],
+  "locked_presets": {
+    "1": [
+      "E:\\Skyrim\\MO2\\mods\\CBBE 3BA\\meshes\\actors\\character\\unique\\female\\femalehands_1.nif",
+      "E:\\Skyrim\\MO2\\overwrite\\meshes\\Coco_Cloths\\Ahri_uniforms_v2\\bra_1.nif",
+      "E:\\Skyrim\\MO2\\overwrite\\meshes\\Coco_Cloths\\Ahri_uniforms_v2\\briefs_1.nif",
+      "E:\\Skyrim\\MO2\\overwrite\\meshes\\Coco_Cloths\\Ahri_uniforms_v2\\necklace_1.nif",
+      "E:\\Skyrim\\MO2\\overwrite\\meshes\\Coco_Cloths\\Ahri_uniforms_v2\\shoes_1.nif",
+      "E:\\Skyrim\\MO2\\overwrite\\meshes\\Coco_Cloths\\Ahri_uniforms_v2\\skirt_1.nif",
+      "E:\\Skyrim\\MO2\\overwrite\\meshes\\Coco_Cloths\\Ahri_uniforms_v2\\stock_1.nif",
+      "E:\\Skyrim\\MO2\\overwrite\\meshes\\Coco_Cloths\\Ahri_uniforms_v2\\top_1.nif"
+    ]
+  },
+  "locked_preset_names": {
+    "1": "COCO Ahri"
+  }
 }

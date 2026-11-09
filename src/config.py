@@ -87,6 +87,7 @@ class AppConfig:
     checkboxes: CheckboxConfig = field(default_factory=CheckboxConfig)
     locked_nifs: list[str] = field(default_factory=list)
     locked_presets: Dict[str, list[str]] = field(default_factory=dict)
+    locked_preset_names: Dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def load(
@@ -128,10 +129,23 @@ class AppConfig:
                 for page, paths in locked_presets.items()
                 if isinstance(page, str)
                 and page.isdigit()
+                and int(page) > 0
                 and isinstance(paths, list)
             }
         elif cfg.locked_nifs:
             cfg.locked_presets = {"1": list(cfg.locked_nifs)}
+
+        preset_names = data.get("locked_preset_names")
+        if isinstance(preset_names, dict):
+            cfg.locked_preset_names = {
+                page: name.strip()
+                for page, name in preset_names.items()
+                if isinstance(page, str)
+                and page.isdigit()
+                and int(page) > 0
+                and isinstance(name, str)
+                and name.strip()
+            }
 
         # lighting (supports both nested {"lighting": {...}} and flat keys)
         l_data = data.get("lighting", {})
