@@ -616,8 +616,29 @@ class DibellasWardrobeWindow(QMainWindow):
         btn_reset_cam.setShortcut("R")
         btn_reset_cam.clicked.connect(self.viewport.reset_camera)
 
-        self.btn_settings = QPushButton()
-        self._bind_text(self.btn_settings, "settings")
+        self.btn_settings = QPushButton("⚙")
+        self.btn_settings.setFixedSize(30, 30)
+        self.btn_settings.setStyleSheet(
+            """
+            QPushButton {
+                background-color: #2e3444;
+                border: 1px solid #454d68;
+                border-radius: 4px;
+                color: #e4e7ef;
+                font-size: 16px;
+                padding: 0px;
+            }
+            QPushButton:hover {
+                background-color: #3b4358;
+                border-color: #f0d59c;
+                color: #ffffff;
+            }
+            QPushButton:pressed {
+                background-color: #242834;
+            }
+            """
+        )
+        self._bind_text(self.btn_settings, "settings", "setToolTip")
         self.btn_settings.setShortcut("S")
         self.btn_settings.clicked.connect(lambda: self._toggle_settings_sidebar())
 

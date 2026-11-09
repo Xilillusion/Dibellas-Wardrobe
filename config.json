@@ -14,7 +14,7 @@
     "ssr_step_size": 1.0,
     "ssr_max_steps": 32,
     "ssr_thickness": 2.0,
-    "enable_ao": true,
+    "enable_ao": false,
     "ao_radius": 8.0,
     "ao_intensity": 1.0,
     "ao_bias": 0.02,
