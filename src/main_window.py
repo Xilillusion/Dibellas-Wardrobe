@@ -1094,6 +1094,7 @@ class DibellasWardrobeWindow(QMainWindow):
             parent=self,
         )
         self._search_thread.matchFound.connect(self._on_search_match_found)
+        self._search_thread.finished.connect(self._auto_expand_search_results)
         self._search_thread.start()
 
     def _on_search_match_found(
@@ -1130,6 +1131,22 @@ class DibellasWardrobeWindow(QMainWindow):
         else:
             self._create_nif_tree_item(parent_item, file_name, full_path)
         self._updating_tree = False
+
+    def _auto_expand_search_results(self) -> None:
+        """Expand search-result folder chains with only one visible child folder."""
+        for group_item in self._search_groups.values():
+            self._auto_expand_search_item(group_item)
+
+    def _auto_expand_search_item(self, item: QTreeWidgetItem) -> None:
+        if item.childCount() != 1:
+            return
+
+        child = item.child(0)
+        if not child.data(0, ROLE_IS_LOADED):
+            return
+
+        child.setExpanded(True)
+        self._auto_expand_search_item(child)
 
     def populate_file_tree(self) -> None:
         if self._search_thread and self._search_thread.isRunning():
@@ -1278,10 +1295,23 @@ class DibellasWardrobeWindow(QMainWindow):
                 empty_item.setFlags(Qt.ItemFlag.NoItemFlags)
 
             item.setData(0, ROLE_IS_LOADED, True)
+            self._auto_expand_single_folder_child(item)
         except Exception as exc:
             log.warning("Error expanding %s: %s", folder_path, exc)
         finally:
             self._updating_tree = False
+
+    def _auto_expand_single_folder_child(self, item: QTreeWidgetItem) -> None:
+        """Expand a folder chain while each folder has one visible folder child."""
+        if item.childCount() != 1:
+            return
+
+        child = item.child(0)
+        if not child.data(0, ROLE_FOLDER_PATH):
+            return
+
+        child.setExpanded(True)
+        self._on_tree_item_expanded(child)
 
     def _ensure_overwrite_fallback_item(self) -> None:
         if not self.mod_scanner or not self.mod_scanner.has_fallback():
