@@ -261,7 +261,6 @@ class DibellasWardrobeWindow(QMainWindow):
             self.anim_toolbar.set_translations(
                 self._t("anim_play"),
                 self._t("anim_pause"),
-                self._t("anim_loop"),
                 self._t("anim_stop"),
                 self._t("anim_stop_tip"),
             )
@@ -592,7 +591,6 @@ class DibellasWardrobeWindow(QMainWindow):
 
         self.anim_toolbar = AnimationPlaybackToolbar(
             on_toggle_play=self.viewport.toggle_play_pause,
-            on_toggle_loop=self.viewport.set_animation_loop,
             on_seek=self.viewport.seek_animation,
             on_close=self._on_stop_animation,
             parent=center_panel,
@@ -600,7 +598,6 @@ class DibellasWardrobeWindow(QMainWindow):
         self.anim_toolbar.set_translations(
             self._t("anim_play"),
             self._t("anim_pause"),
-            self._t("anim_loop"),
             self._t("anim_stop"),
             self._t("anim_stop_tip"),
         )
@@ -1376,10 +1373,7 @@ class DibellasWardrobeWindow(QMainWindow):
             self._active_hkx_path = resolved_key
             meta_label = self._format_animation_metadata(loaded.filepath)
             self.anim_toolbar.set_metadata(meta_label, loaded.duration)
-            self.anim_toolbar.update_state(
-                self.viewport.is_animation_playing,
-                self.viewport.is_animation_looping,
-            )
+            self.anim_toolbar.update_state(self.viewport.is_animation_playing)
             self.anim_toolbar.setVisible(True)
             return True
         except Exception as exc:

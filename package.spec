@@ -20,8 +20,8 @@ analysis = Analysis(
     datas=[
         (str(ROOT / "shaders"), "shaders"),
         (
-            str(NIFLY_ROOT / "skeletons" / "Skyrim" / "skeleton_female.nif"),
-            "io_scene_nifly/skeletons/Skyrim",
+            str(ROOT / "assets" / "skeleton_female.nif"),
+            "assets",
         ),
         (str(ROOT / "locales.json"), "."),
         (str(ROOT / "config.json"), "."),

@@ -23,6 +23,7 @@ log = logging.getLogger("dibellas_wardrobe.anim_engine")
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _NIFLY_DIR = _REPO_ROOT / "io_scene_nifly"
 _HKX_DIR = _NIFLY_DIR / "hkx"
+_RESOURCE_ROOT = Path(getattr(sys, "_MEIPASS", _REPO_ROOT))
 
 # Add io_scene_nifly and io_scene_nifly/hkx directly so we never trigger Blender's top-level __init__.py
 if str(_NIFLY_DIR) not in sys.path:
@@ -34,7 +35,7 @@ import anim_fo4  # type: ignore[import-not-found]  # noqa: E402
 import anim_skyrim  # type: ignore[import-not-found]  # noqa: E402
 from pyn.pynifly import NifFile  # type: ignore[import-not-found]  # noqa: E402
 
-DEFAULT_SKELETON_PATH = _NIFLY_DIR / "skeletons" / "Skyrim" / "skeleton_female.nif"
+DEFAULT_SKELETON_PATH = _RESOURCE_ROOT / "assets" / "skeleton_female.nif"
 
 # Canonical Skyrim SE / XPMSSE human Havok bone table (indices 0..98 = vanilla 99 bones,
 # indices 99..125 = XPMSSE extended bones). Used when an HKX animation omits explicit

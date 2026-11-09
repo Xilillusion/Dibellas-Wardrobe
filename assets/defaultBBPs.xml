@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<default-bbps>
+	<map shape="MaleBody" file="SKSE\Plugins\hdtSkinnedMeshConfigs\MaleBody.xml"/>
+	<map shape="MaleHead" file="SKSE\Plugins\hdtSkinnedMeshConfigs\HeadMale.xml"/>
+	<map shape="MaleHands" file="SKSE\Plugins\hdtSkinnedMeshConfigs\MaleHands.xml"/>
+	<map shape="MaleGenitals" file="SKSE\Plugins\hdtSkinnedMeshConfigs\MaleGenitals.xml"/>
+	<map shape="penis" file="SKSE\Plugins\hdtSkinnedMeshConfigs\penis.xml"/>
+	<map shape="Boner" file="SKSE\Plugins\hdtSkinnedMeshConfigs\Boner.xml"/>
+	<map shape="ElinTail" file="SKSE\Plugins\hdtSkinnedMeshConfigs\tailSMP.xml"/>
+	<map shape="ElinEar" file="SKSE\Plugins\hdtSkinnedMeshConfigs\earSMP.xml"/>
+</default-bbps>

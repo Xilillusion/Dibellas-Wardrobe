@@ -98,7 +98,7 @@ class OutfitViewportWidget(QOpenGLWidget):
 
     statsChanged = Signal(int, int, int)  # (nif_count, shape_count, triangle_count)
     animationTimeChanged = Signal(float, float)  # (current_time, duration)
-    animationStateChanged = Signal(bool, bool)  # (is_playing, is_looping)
+    animationStateChanged = Signal(bool)  # (is_playing)
     animationStopped = Signal()
 
     BASE_BODY_KEY = "__base_body__"
@@ -148,7 +148,6 @@ class OutfitViewportWidget(QOpenGLWidget):
         # Headless HKX Animation & Skeleton Engine
         self.anim_engine = AnimEngine()
         self._anim_playing: bool = False
-        self._anim_loop: bool = True
         self._anim_current_time: float = 0.0
         self._anim_last_tick: float = 0.0
         self._current_pose_matrices: Optional[Dict[str, np.ndarray]] = None
@@ -360,10 +359,6 @@ class OutfitViewportWidget(QOpenGLWidget):
         return self._anim_playing
 
     @property
-    def is_animation_looping(self) -> bool:
-        return self._anim_loop
-
-    @property
     def animation_time(self) -> float:
         return self._anim_current_time
 
@@ -384,7 +379,7 @@ class OutfitViewportWidget(QOpenGLWidget):
         else:
             self._anim_playing = False
             self._anim_timer.stop()
-        self.animationStateChanged.emit(self._anim_playing, self._anim_loop)
+        self.animationStateChanged.emit(self._anim_playing)
         self.animationTimeChanged.emit(self._anim_current_time, loaded.duration)
         self.update()
         return loaded
@@ -402,7 +397,7 @@ class OutfitViewportWidget(QOpenGLWidget):
         self._anim_last_tick = time.perf_counter()
         if not self._anim_timer.isActive():
             self._anim_timer.start()
-        self.animationStateChanged.emit(self._anim_playing, self._anim_loop)
+        self.animationStateChanged.emit(self._anim_playing)
         self.update()
 
     def pause_animation(self) -> None:
@@ -411,7 +406,7 @@ class OutfitViewportWidget(QOpenGLWidget):
             return
         self._anim_playing = False
         self._anim_timer.stop()
-        self.animationStateChanged.emit(self._anim_playing, self._anim_loop)
+        self.animationStateChanged.emit(self._anim_playing)
         self.update()
 
     def toggle_play_pause(self) -> bool:
@@ -421,11 +416,6 @@ class OutfitViewportWidget(QOpenGLWidget):
         else:
             self.play_animation()
         return self._anim_playing
-
-    def set_animation_loop(self, loop: bool) -> None:
-        """Enable or disable looping when playback reaches the end of the clip."""
-        self._anim_loop = bool(loop)
-        self.animationStateChanged.emit(self._anim_playing, self._anim_loop)
 
     def seek_animation(self, time_sec: float) -> None:
         """Scrub/seek the active animation to `time_sec` seconds and refresh the viewport."""
@@ -448,7 +438,7 @@ class OutfitViewportWidget(QOpenGLWidget):
         self._anim_current_time = 0.0
         self.anim_engine.clear_animation()
         self._current_pose_matrices = None
-        self.animationStateChanged.emit(False, self._anim_loop)
+        self.animationStateChanged.emit(False)
         self.animationTimeChanged.emit(0.0, 0.0)
         self.animationStopped.emit()
         self.update()
@@ -466,13 +456,7 @@ class OutfitViewportWidget(QOpenGLWidget):
         if anim.duration > 0.0:
             next_time = self._anim_current_time + delta_time
             if next_time >= anim.duration:
-                if self._anim_loop:
-                    next_time = math.fmod(next_time, anim.duration)
-                else:
-                    next_time = anim.duration
-                    self._anim_playing = False
-                    self._anim_timer.stop()
-                    self.animationStateChanged.emit(self._anim_playing, self._anim_loop)
+                next_time = math.fmod(next_time, anim.duration)
             self._anim_current_time = next_time
         else:
             self._anim_current_time = 0.0

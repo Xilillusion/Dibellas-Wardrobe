@@ -5,22 +5,18 @@ Custom UI widgets and components for Dibella's Wardrobe.
 from __future__ import annotations
 
 import logging
-from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Callable, Optional
 
 from PySide6.QtCore import (
     QModelIndex,
     QMimeData,
     QPoint,
     QRect,
-    QSize,
     Qt,
     QTimer,
-    Signal,
 )
 from PySide6.QtGui import (
     QColor,
-    QBrush,
     QDrag,
     QPainter,
     QPen,
@@ -39,8 +35,6 @@ from PySide6.QtWidgets import (
     QStyle,
     QStyleOptionGroupBox,
     QTreeWidget,
-    QTreeWidgetItem,
-    QVBoxLayout,
     QWidget,
 )
 
@@ -497,7 +491,7 @@ class AnimationPlaybackToolbar(QFrame):
 
     Displays metadata (`[Mod Name (Parent Directory)] - [Filename.hkx]`), a formatted
     timestamp counter (`MM:SS.CC / MM:SS.CC`), an interactive timeline scrubber, and
-    Play/Pause, Loop, and Close/Reset controls.
+    Play/Pause and Close/Reset controls.
     """
 
     SCRUB_STEPS = 1000
@@ -505,7 +499,6 @@ class AnimationPlaybackToolbar(QFrame):
     def __init__(
         self,
         on_toggle_play,
-        on_toggle_loop,
         on_seek,
         on_close,
         parent: Optional[QWidget] = None,
@@ -558,32 +551,6 @@ class AnimationPlaybackToolbar(QFrame):
         )
         self.btn_play.clicked.connect(on_toggle_play)
         layout.addWidget(self.btn_play)
-
-        self.btn_loop = QPushButton("🔁")
-        self.btn_loop.setCheckable(True)
-        self.btn_loop.setChecked(True)
-        self.btn_loop.setFixedSize(28, 28)
-        self.btn_loop.setToolTip("Loop")
-        self.btn_loop.setStyleSheet(
-            """
-            QPushButton {
-                background-color: #242834;
-                border: 1px solid #454d68;
-                border-radius: 4px;
-                font-size: 13px;
-                padding: 0px;
-            }
-            QPushButton:checked {
-                background-color: #3b3724;
-                border-color: #8f793b;
-            }
-            QPushButton:hover {
-                background-color: #313747;
-            }
-            """
-        )
-        self.btn_loop.toggled.connect(on_toggle_loop)
-        layout.addWidget(self.btn_loop)
 
         self.btn_close = QPushButton("×")
         self.btn_close.setFixedSize(28, 28)
@@ -638,7 +605,6 @@ class AnimationPlaybackToolbar(QFrame):
         self,
         play_text: str,
         pause_text: str,
-        loop_text: str,
         close_text: str,
         close_tooltip: Optional[str] = None,
     ) -> None:
@@ -647,7 +613,6 @@ class AnimationPlaybackToolbar(QFrame):
         self.btn_play.setToolTip(
             self._pause_tooltip if self._is_playing else self._play_tooltip
         )
-        self.btn_loop.setToolTip(loop_text)
         self.btn_close.setText("×")
         self.btn_close.setToolTip(close_tooltip or close_text)
 
@@ -657,14 +622,12 @@ class AnimationPlaybackToolbar(QFrame):
         self.lbl_metadata.setToolTip(label_text)
         self.update_time(0.0, self._duration)
 
-    def update_state(self, is_playing: bool, is_looping: bool) -> None:
+    def update_state(self, is_playing: bool) -> None:
         self._is_playing = bool(is_playing)
         self.btn_play.setText(self._pause_text if is_playing else self._play_text)
         self.btn_play.setToolTip(
             self._pause_tooltip if is_playing else self._play_tooltip
         )
-        with self.btn_loop.blockSignals(True) if hasattr(self.btn_loop, "blockSignals") else QTimer():
-            self.btn_loop.setChecked(bool(is_looping))
 
     def update_time(self, current_time: float, duration: float) -> None:
         if duration > 0.0:

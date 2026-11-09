@@ -96,6 +96,7 @@ def validate_inputs() -> None:
         ROOT / "io_scene_nifly" / "NiflyDLL.dll",
         ROOT / "locales.json",
         ROOT / "config.json",
+        ROOT / "assets" / "skeleton_female.nif",
     )
     missing = [path for path in required_files if not path.is_file()]
     if not (ROOT / "shaders").is_dir():
