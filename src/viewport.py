@@ -234,6 +234,101 @@ class OutfitViewportWidget(QOpenGLWidget):
         """Return whether a loaded NIF is visible."""
         return self._nif_visibility.get(key, True)
 
+    def update_nif_shape_texture(
+        self,
+        key: str,
+        shape_index: int,
+        slot: str,
+        res_tex: ResolvedTexture,
+    ) -> None:
+        """Replace a texture slot on a loaded NIF shape in place without re-uploading geometry."""
+        if key in self._pending_nifs:
+            shapes = self._pending_nifs[key].shapes
+            if 0 <= shape_index < len(shapes):
+                mat = shapes[shape_index].shader
+                mat.resolved_textures[slot] = res_tex
+                self._sync_slot_flags(mat, slot, res_tex)
+            return
+
+        gpu_items = self._gpu_nifs.get(key)
+        if not gpu_items or not (0 <= shape_index < len(gpu_items)):
+            return
+
+        item = gpu_items[shape_index]
+        mat = item.shape_data.shader
+        old_res_tex = mat.resolved_textures.get(slot)
+        mat.resolved_textures[slot] = res_tex
+        self._sync_slot_flags(mat, slot, res_tex)
+
+        if self.ctx is not None and slot != "EnvMap":
+            self.makeCurrent()
+            try:
+                old_gpu_tex = item.textures.pop(slot, None)
+                if old_gpu_tex is not None:
+                    self._release_2d_texture(old_res_tex, old_gpu_tex)
+                item.textures[slot] = self._acquire_2d_texture(res_tex)
+            finally:
+                self.doneCurrent()
+        self.update()
+
+    def reset_nif_textures(self, key: str, nif_data: Optional[LoadedNifData] = None) -> None:
+        """Restore all shapes of a loaded NIF back to their original default textures."""
+        if key in self._pending_nifs:
+            for sh in self._pending_nifs[key].shapes:
+                self._restore_shader_defaults(sh.shader)
+            return
+
+        gpu_items = self._gpu_nifs.get(key)
+        if not gpu_items:
+            if nif_data is not None:
+                for sh in nif_data.shapes:
+                    self._restore_shader_defaults(sh.shader)
+            return
+
+        if self.ctx is not None:
+            self.makeCurrent()
+            try:
+                for item in gpu_items:
+                    mat = item.shape_data.shader
+                    for slot, tex in list(item.textures.items()):
+                        old_res = mat.resolved_textures.get(slot)
+                        self._release_2d_texture(old_res, tex)
+                    item.textures.clear()
+                    self._restore_shader_defaults(mat)
+                    for slot, res_tex in mat.resolved_textures.items():
+                        if slot == "EnvMap":
+                            continue
+                        item.textures[slot] = self._acquire_2d_texture(res_tex)
+            finally:
+                self.doneCurrent()
+        else:
+            for item in gpu_items:
+                self._restore_shader_defaults(item.shape_data.shader)
+        self.update()
+
+    @staticmethod
+    def _sync_slot_flags(
+        mat,
+        slot: str,
+        res_tex: ResolvedTexture,
+    ) -> None:
+        has_tex = not res_tex.is_fallback
+        if slot == "EnvMask":
+            mat.b_env_mask = has_tex
+            if has_tex:
+                mat.b_cubemap = True
+        elif slot == "Glow":
+            mat.b_glowmap = has_tex
+            if has_tex:
+                mat.b_emissive = True
+
+    @staticmethod
+    def _restore_shader_defaults(mat) -> None:
+        if mat.default_resolved_textures:
+            mat.resolved_textures = dict(mat.default_resolved_textures)
+        for flag_name, flag_val in mat.default_flags.items():
+            setattr(mat, flag_name, flag_val)
+
     def clear_outfit_nifs(self) -> None:
         """Remove all loaded outfit `.nif` meshes while keeping the base mannequin."""
         keys = [

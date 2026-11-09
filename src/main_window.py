@@ -17,8 +17,8 @@ import os
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
-from PySide6.QtCore import QModelIndex, QRect, QSignalBlocker, QSize, Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QColor, QBrush, QKeySequence, QPainter, QPen, QShortcut
+from PySide6.QtCore import QModelIndex, QPoint, QRect, QSignalBlocker, QSize, Qt, QThread, QTimer, Signal
+from PySide6.QtGui import QColor, QBrush, QGuiApplication, QKeySequence, QPainter, QPen, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -128,7 +128,7 @@ class NifSearchThread(QThread):
     matching the search query without blocking the PySide6 UI thread.
     """
 
-    matchFound = Signal(str, str, str)  # (mod_or_parent_name, file_name, full_path)
+    matchFound = Signal(str, str, str, str)  # (mod name, relative directory, file name, path)
 
     def __init__(
         self,
@@ -212,7 +212,17 @@ class NifSearchThread(QThread):
                             pass
 
                     full_path = str((root_path / fname).resolve())
-                    self.matchFound.emit(group_name, fname, full_path)
+                    relative_dirs = (
+                        rel_parts[1:]
+                        if self.mod_scanner and rel_parts
+                        else rel_parts
+                    )
+                    self.matchFound.emit(
+                        group_name,
+                        str(Path(*relative_dirs)) if relative_dirs else "",
+                        fname,
+                        full_path,
+                    )
             if self.mod_scanner:
                 for group_name, file_name, nif_path in self.mod_scanner.search_entries():
                     if self._cancelled:
@@ -234,7 +244,15 @@ class NifSearchThread(QThread):
                         for part in relative_parts[:-1]
                     ):
                         continue
-                    self.matchFound.emit(group_name, file_name, str(nif_path))
+                    relative_dirs = target[1][:-1] if target else (
+                        relative_parts[:-1] if relative_parts else ()
+                    )
+                    self.matchFound.emit(
+                        group_name,
+                        str(Path(*relative_dirs)) if relative_dirs else "",
+                        file_name,
+                        str(nif_path),
+                    )
         except Exception as exc:
             log.warning("Search error: %s", exc)
 
@@ -401,6 +419,7 @@ class AddedNifRowWidget(QWidget):
         on_select,
         on_toggle_visibility,
         on_double_click,
+        on_right_click=None,
         visible: bool = True,
         remove_tooltip: str = "Remove this NIF",
         hide_tooltip: str = "Hide this NIF",
@@ -411,6 +430,7 @@ class AddedNifRowWidget(QWidget):
         super().__init__(parent)
         self._on_select = on_select
         self._on_double_click = on_double_click
+        self._on_right_click = on_right_click
         self._hide_tooltip = hide_tooltip
         self._show_tooltip = show_tooltip
         layout = QHBoxLayout(self)
@@ -474,6 +494,16 @@ class AddedNifRowWidget(QWidget):
         super().mousePressEvent(event)
         if event.button() == Qt.MouseButton.LeftButton:
             self._on_select()
+        elif event.button() == Qt.MouseButton.RightButton and self._on_right_click is not None:
+            self._on_right_click(self)
+            event.accept()
+
+    def contextMenuEvent(self, event) -> None:
+        if self._on_right_click is not None:
+            self._on_right_click(self)
+            event.accept()
+            return
+        super().contextMenuEvent(event)
 
     def mouseDoubleClickEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
@@ -723,6 +753,407 @@ class AnimationPlaybackToolbar(QFrame):
         self._on_seek(target_time)
 
 
+ROLE_TEXTURE_PATH = Qt.ItemDataRole.UserRole + 20
+_BODY_SHAPE_TOKENS = (
+    "3ba",
+    "3bbb",
+    "cbbe",
+    "bhunp",
+    "unp",
+    "ube",
+    "femalebody",
+    "basebody",
+    "femaleshands",
+    "femalefeet",
+)
+
+
+def _is_likely_body_shape(shape_name: str) -> bool:
+    low = shape_name.casefold().strip()
+    if low in {"body", "feet", "hands", "head"}:
+        return True
+    return any(tok in low for tok in _BODY_SHAPE_TOKENS)
+
+
+def _is_diffuse_texture(filename_lower: str) -> bool:
+    stem = filename_lower[:-4] if filename_lower.endswith(".dds") else filename_lower
+    return not stem.endswith(("_n", "_msn", "_s", "_sk", "_g", "_m", "_em"))
+
+
+class NifTexturePopover(QFrame):
+    """
+    Small floating popover bar anchored to the right of a Wardrobe/Locked NIF item,
+    allowing live diffuse texture switching per shape from the mod's textures or disk.
+    """
+
+    ALL_OUTFIT_SHAPES = -1
+
+    def __init__(
+        self,
+        on_apply_texture,
+        on_reset_textures,
+        translate_fn,
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(
+            parent,
+            Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint,
+        )
+        self._on_apply_texture = on_apply_texture
+        self._on_reset_textures = on_reset_textures
+        self._t = translate_fn
+
+        self.current_nif_key: Optional[str] = None
+        self.current_nif_data: Optional[LoadedNifData] = None
+        self._mod_textures: List[tuple[str, Path]] = []
+        self._anchor_widget: Optional[QWidget] = None
+
+        self.setObjectName("nifTexturePopover")
+        self.setFixedWidth(310)
+        self.setFixedHeight(340)
+        self.setStyleSheet(
+            """
+            QFrame#nifTexturePopover {
+                background-color: #161820;
+                border: 1px solid #3d455e;
+                border-radius: 6px;
+            }
+            """
+        )
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
+
+        header_row = QHBoxLayout()
+        header_row.setContentsMargins(0, 0, 0, 0)
+        header_row.setSpacing(4)
+
+        self.lbl_title = ElidedLabel("")
+        self.lbl_title.setStyleSheet("color: #f0d59c; font-weight: 600; font-size: 12px;")
+        header_row.addWidget(self.lbl_title, stretch=1)
+
+        self.btn_reset = QPushButton("↻")
+        self.btn_reset.setFixedSize(22, 22)
+        self.btn_reset.setStyleSheet(
+            """
+            QPushButton {
+                background-color: #262b38;
+                border: 1px solid #41485f;
+                border-radius: 4px;
+                color: #d8deec;
+                font-size: 12px;
+                font-weight: 700;
+                padding: 0px;
+            }
+            QPushButton:hover {
+                background-color: #32394a;
+                color: #ffffff;
+            }
+            """
+        )
+        self.btn_reset.clicked.connect(self._handle_reset)
+        header_row.addWidget(self.btn_reset)
+
+        self.btn_close = QPushButton("×")
+        self.btn_close.setFixedSize(22, 22)
+        self.btn_close.setStyleSheet(
+            """
+            QPushButton {
+                background: transparent;
+                border: none;
+                color: #8f98b0;
+                font-weight: bold;
+                font-size: 14px;
+                padding: 0px;
+            }
+            QPushButton:hover {
+                color: #ff6b6b;
+                background-color: #382424;
+                border-radius: 3px;
+            }
+            """
+        )
+        self.btn_close.clicked.connect(self.close)
+        header_row.addWidget(self.btn_close)
+        layout.addLayout(header_row)
+
+        selectors_row = QHBoxLayout()
+        selectors_row.setContentsMargins(0, 0, 0, 0)
+        selectors_row.setSpacing(4)
+
+        self.combo_shape = QComboBox()
+        self.combo_shape.setFixedHeight(26)
+        self.combo_shape.currentIndexChanged.connect(self._on_selector_changed)
+        selectors_row.addWidget(self.combo_shape, stretch=3)
+
+        layout.addLayout(selectors_row)
+
+        self.lbl_current_tex = ElidedLabel("")
+        self.lbl_current_tex.setStyleSheet("color: #9da6be; font-size: 11px;")
+        layout.addWidget(self.lbl_current_tex)
+
+        self.filter_edit = QLineEdit()
+        self.filter_edit.setFixedHeight(24)
+        self.filter_edit.textChanged.connect(self._populate_list)
+        layout.addWidget(self.filter_edit)
+
+        self.texture_list = QListWidget()
+        self.texture_list.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.texture_list.itemClicked.connect(self._on_texture_item_clicked)
+        layout.addWidget(self.texture_list, stretch=1)
+
+        self.btn_browse = QPushButton()
+        self.btn_browse.setFixedHeight(26)
+        self.btn_browse.clicked.connect(self._handle_browse)
+        layout.addWidget(self.btn_browse)
+
+        self.retranslate_ui()
+
+    def retranslate_ui(self) -> None:
+        self.btn_reset.setToolTip(self._t("tex_reset_tip"))
+        self.btn_close.setToolTip(self._t("tex_close_tip"))
+        self.filter_edit.setPlaceholderText(self._t("tex_filter_placeholder"))
+        self.btn_browse.setText(self._t("tex_browse_dds"))
+
+        if self.current_nif_data is not None:
+            self._populate_shape_combo(preserve_selection=True)
+            self._refresh_current_label()
+            self._populate_list()
+
+    def selected_shape_index(self) -> int:
+        data = self.combo_shape.currentData()
+        return int(data) if data is not None else 0
+
+    def selected_slot(self) -> str:
+        return "Diffuse"
+
+    def outfit_shape_indices(self) -> List[int]:
+        if self.current_nif_data is None:
+            return []
+        non_body = [
+            idx
+            for idx, sh in enumerate(self.current_nif_data.shapes)
+            if not _is_likely_body_shape(sh.name)
+        ]
+        return non_body if non_body else list(range(len(self.current_nif_data.shapes)))
+
+    def target_shape_indices(self) -> List[int]:
+        if self.current_nif_data is None or not self.current_nif_data.shapes:
+            return []
+        sel = self.selected_shape_index()
+        if sel == self.ALL_OUTFIT_SHAPES:
+            return self.outfit_shape_indices()
+        if 0 <= sel < len(self.current_nif_data.shapes):
+            return [sel]
+        return [0]
+
+    def _populate_shape_combo(self, preserve_selection: bool = False) -> None:
+        prev = self.combo_shape.currentData() if preserve_selection else None
+        with QSignalBlocker(self.combo_shape):
+            self.combo_shape.clear()
+            if self.current_nif_data is None:
+                return
+            outfit_indices = self.outfit_shape_indices()
+            if len(outfit_indices) >= 2:
+                self.combo_shape.addItem(
+                    self._t("tex_all_shapes"),
+                    self.ALL_OUTFIT_SHAPES,
+                )
+            for idx, sh in enumerate(self.current_nif_data.shapes):
+                self.combo_shape.addItem(f"{idx}: {sh.name}", idx)
+
+            if prev is not None:
+                found_idx = self.combo_shape.findData(prev)
+                if found_idx >= 0:
+                    self.combo_shape.setCurrentIndex(found_idx)
+                    return
+
+            default_shape = outfit_indices[0] if outfit_indices else 0
+            found_idx = self.combo_shape.findData(default_shape)
+            self.combo_shape.setCurrentIndex(max(0, found_idx))
+
+    def show_for_nif(
+        self,
+        nif_key: str,
+        nif_data: LoadedNifData,
+        mod_textures: List[tuple[str, Path]],
+        anchor_widget: QWidget,
+    ) -> None:
+        self.current_nif_key = nif_key
+        self.current_nif_data = nif_data
+        self._mod_textures = list(mod_textures)
+        self._anchor_widget = anchor_widget
+
+        self.lbl_title.setText(Path(nif_key).name)
+        self.lbl_title.setToolTip(nif_key)
+        self._populate_shape_combo(preserve_selection=False)
+        with QSignalBlocker(self.filter_edit):
+            self.filter_edit.clear()
+
+        self._refresh_current_label()
+        self._populate_list()
+        self._position_next_to(anchor_widget)
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def _position_next_to(self, anchor_widget: QWidget) -> None:
+        global_pos = anchor_widget.mapToGlobal(QPoint(anchor_widget.width() + 6, -4))
+        screen = (
+            anchor_widget.screen()
+            or QGuiApplication.screenAt(global_pos)
+            or QGuiApplication.primaryScreen()
+        )
+        if screen is not None:
+            avail = screen.availableGeometry()
+            x = min(
+                max(avail.left() + 4, global_pos.x()),
+                avail.right() - self.width() - 4,
+            )
+            y = min(
+                max(avail.top() + 4, global_pos.y()),
+                avail.bottom() - self.height() - 4,
+            )
+            self.move(x, y)
+        else:
+            self.move(global_pos)
+
+    def _active_resolved_texture(self):
+        if self.current_nif_data is None:
+            return None
+        indices = self.target_shape_indices()
+        if not indices:
+            return None
+        sh = self.current_nif_data.shapes[indices[0]]
+        return sh.shader.resolved_textures.get(self.selected_slot())
+
+    def _refresh_current_label(self) -> None:
+        res_tex = self._active_resolved_texture()
+        if res_tex is not None and not res_tex.is_fallback and res_tex.resolved_path is not None:
+            name = res_tex.resolved_path.name
+            tooltip = str(res_tex.resolved_path)
+        elif res_tex is not None and res_tex.raw_nif_path:
+            name = Path(res_tex.raw_nif_path.replace("\\", "/")).name
+            tooltip = res_tex.raw_nif_path
+        else:
+            name = self._t("tex_missing")
+            tooltip = name
+        self.lbl_current_tex.setText(self._t("tex_current", name=name))
+        self.lbl_current_tex.setToolTip(tooltip)
+
+    def _populate_list(self) -> None:
+        self.texture_list.clear()
+        res_tex = self._active_resolved_texture()
+        active_path = (
+            res_tex.resolved_path.resolve()
+            if res_tex is not None and not res_tex.is_fallback and res_tex.resolved_path is not None
+            else None
+        )
+        active_parent = active_path.parent if active_path is not None else None
+        filter_query = self.filter_edit.text().strip().casefold()
+
+        diffuse_entries = [
+            entry
+            for entry in self._mod_textures
+            if _is_diffuse_texture(entry[1].name.casefold())
+        ]
+        sorted_entries = sorted(
+            diffuse_entries,
+            key=lambda entry: (
+                0 if active_parent is not None and entry[1].parent == active_parent else 1,
+                entry[0].casefold(),
+            ),
+        )
+        selected_item: Optional[QListWidgetItem] = None
+
+        for label, path in sorted_entries:
+            if filter_query and filter_query not in label.casefold():
+                continue
+            item = QListWidgetItem(label)
+            item.setData(ROLE_TEXTURE_PATH, str(path))
+            item.setToolTip(str(path))
+            self.texture_list.addItem(item)
+            if active_path is not None and path.resolve() == active_path:
+                selected_item = item
+
+        if self.texture_list.count() == 0:
+            empty_item = QListWidgetItem(self._t("tex_no_mod_textures"))
+            empty_item.setFlags(Qt.ItemFlag.NoItemFlags)
+            empty_item.setForeground(QColor("#7e869c"))
+            self.texture_list.addItem(empty_item)
+        elif selected_item is not None:
+            with QSignalBlocker(self.texture_list):
+                self.texture_list.setCurrentItem(selected_item)
+                self.texture_list.scrollToItem(selected_item)
+
+    def _on_selector_changed(self, _index: int = 0) -> None:
+        self._refresh_current_label()
+        self._populate_list()
+
+    def _on_texture_item_clicked(self, item: QListWidgetItem) -> None:
+        raw_path = item.data(ROLE_TEXTURE_PATH)
+        if not raw_path or self.current_nif_key is None:
+            return
+        self._apply_dds_path(Path(raw_path))
+
+    def _apply_dds_path(self, dds_path: Path) -> None:
+        if self.current_nif_key is None:
+            return
+        self._on_apply_texture(
+            self.current_nif_key,
+            self.target_shape_indices(),
+            self.selected_slot(),
+            dds_path,
+        )
+        self._refresh_current_label()
+        self._populate_list()
+
+    def _handle_reset(self) -> None:
+        if self.current_nif_key is None:
+            return
+        self._on_reset_textures(self.current_nif_key)
+        self._refresh_current_label()
+        self._populate_list()
+
+    def _handle_browse(self) -> None:
+        if self.current_nif_key is None:
+            return
+        res_tex = self._active_resolved_texture()
+        start_dir = ""
+        if res_tex is not None and res_tex.resolved_path is not None:
+            start_dir = str(res_tex.resolved_path.parent)
+        elif self._mod_textures:
+            start_dir = str(self._mod_textures[0][1].parent)
+        elif self.current_nif_key:
+            start_dir = str(Path(self.current_nif_key).parent)
+
+        anchor = self._anchor_widget
+        chosen, _ = QFileDialog.getOpenFileName(
+            self.parentWidget(),
+            self._t("tex_select_dds_title"),
+            start_dir,
+            "DDS Textures (*.dds)",
+        )
+        if chosen:
+            chosen_path = Path(chosen)
+            if _is_diffuse_texture(chosen_path.name.casefold()):
+                self._apply_dds_path(chosen_path)
+            else:
+                QMessageBox.warning(
+                    self,
+                    self._t("tex_select_dds_title"),
+                    self._t("tex_non_diffuse_error"),
+                )
+        if anchor is not None and self.current_nif_key is not None:
+            self._position_next_to(anchor)
+            self.show()
+            self.raise_()
+            self.activateWindow()
+
+
 class DibellasWardrobeWindow(QMainWindow):
     """Main desktop window for Dibella's Wardrobe."""
 
@@ -776,9 +1207,25 @@ class DibellasWardrobeWindow(QMainWindow):
 
         self._checked_nif_paths: Set[str] = set()
         self._added_nif_items: Dict[str, QListWidgetItem] = {}
-        self._locked_nif_paths: Set[str] = {
-            str(Path(path).resolve()) for path in self.config.locked_nifs if path
+        self._locked_presets: Dict[int, Set[str]] = {
+            int(page): {
+                str(Path(path).resolve()) for path in paths if path
+            }
+            for page, paths in self.config.locked_presets.items()
+            if page.isdigit()
         }
+        if not self._locked_presets:
+            self._locked_presets = {
+                1: {
+                    str(Path(path).resolve())
+                    for path in self.config.locked_nifs
+                    if path
+                }
+            }
+        self._current_locked_preset = min(self._locked_presets)
+        self._locked_nif_paths: Set[str] = set().union(
+            *self._locked_presets.values()
+        )
         self._locked_nif_items: Dict[str, QListWidgetItem] = {}
         self._nif_visibility: Dict[str, bool] = {}
         self._highlighted_tree_items: List[QTreeWidgetItem] = []
@@ -786,6 +1233,7 @@ class DibellasWardrobeWindow(QMainWindow):
         self._updating_tree: bool = False
         self._search_thread: Optional[NifSearchThread] = None
         self._search_groups: Dict[str, QTreeWidgetItem] = {}
+        self._search_folder_groups: Dict[tuple[str, tuple[str, ...]], QTreeWidgetItem] = {}
         self._startup_locked_nif_refresh_pending = False
         self._active_hkx_path: Optional[str] = None
 
@@ -795,6 +1243,12 @@ class DibellasWardrobeWindow(QMainWindow):
         self._search_timer.timeout.connect(self._start_search_worker)
 
         self._apply_dark_theme()
+        self.texture_popover = NifTexturePopover(
+            on_apply_texture=self._on_apply_nif_texture,
+            on_reset_textures=self._on_reset_nif_textures,
+            translate_fn=self._t,
+            parent=self,
+        )
         self._build_ui()
         self.populate_file_tree()
         self._autoload_locked_nifs()
@@ -826,6 +1280,8 @@ class DibellasWardrobeWindow(QMainWindow):
     def retranslate_ui(self) -> None:
         for widget, key, setter in self._i18n_bindings:
             getattr(widget, setter)(self._t(key))
+        if hasattr(self, "btn_add_locked_preset"):
+            self.btn_add_locked_preset.setToolTip(self._t("add_locked_preset"))
         for group in self.findChildren(RefreshableGroupBox):
             if group.btn_minimize is not None:
                 group.set_minimize_tooltips(
@@ -840,6 +1296,8 @@ class DibellasWardrobeWindow(QMainWindow):
                 self._t("anim_stop"),
                 self._t("anim_stop_tip"),
             )
+        if hasattr(self, "texture_popover"):
+            self.texture_popover.retranslate_ui()
         self._retranslate_tree_helpers()
         self._refresh_added_nifs()
         self._update_added_nif_count()
@@ -1080,8 +1538,28 @@ class DibellasWardrobeWindow(QMainWindow):
         self.locked_nifs_list = QListWidget()
         self.locked_nifs_list.setMinimumHeight(0)
         self.locked_nifs_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        preset_bar = QHBoxLayout()
+        preset_bar.setContentsMargins(0, 0, 0, 0)
+        preset_bar.setSpacing(4)
+        self.locked_preset_combo = QComboBox()
+        self.locked_preset_combo.setFixedHeight(26)
+        self.locked_preset_combo.currentIndexChanged.connect(
+            self._on_locked_preset_changed
+        )
+        preset_bar.addWidget(self.locked_preset_combo, stretch=1)
+        self.btn_add_locked_preset = QPushButton("+")
+        self.btn_add_locked_preset.setFixedSize(28, 26)
+        self.btn_add_locked_preset.setToolTip(self._t("add_locked_preset"))
+        self.btn_add_locked_preset.clicked.connect(self._add_locked_preset)
+        preset_bar.addWidget(self.btn_add_locked_preset)
+        locked_group_layout.addLayout(preset_bar)
+        self.locked_nifs_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.locked_nifs_list.customContextMenuRequested.connect(
+            lambda pos: self._on_wardrobe_list_context_menu(self.locked_nifs_list, pos)
+        )
         self.locked_nifs_list.itemClicked.connect(self._on_added_nif_clicked)
         locked_group_layout.addWidget(self.locked_nifs_list, stretch=1)
+        self._refresh_locked_preset_selector()
         added_layout.addWidget(locked_group)
 
         added_group = QGroupBox(self._t("wardrobe", count=0))
@@ -1089,6 +1567,10 @@ class DibellasWardrobeWindow(QMainWindow):
         self.added_nifs_list = QListWidget()
         self.added_nifs_list.setMinimumHeight(72)
         self.added_nifs_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.added_nifs_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.added_nifs_list.customContextMenuRequested.connect(
+            lambda pos: self._on_wardrobe_list_context_menu(self.added_nifs_list, pos)
+        )
         self.added_nifs_list.itemClicked.connect(self._on_added_nif_clicked)
         added_group_layout.addWidget(self.added_nifs_list, stretch=1)
         self.locked_nifs_group = locked_group
@@ -1519,6 +2001,10 @@ class DibellasWardrobeWindow(QMainWindow):
 
         c.wireframe_overlay = self.chk_wireframe.isChecked()
         c.show_ground_grid = self.chk_grid.isChecked()
+        self.config.locked_presets = {
+            str(page): sorted(paths)
+            for page, paths in sorted(self._locked_presets.items())
+        }
         self.config.locked_nifs = sorted(self._locked_nif_paths)
 
         self.config.save(target_path)
@@ -1722,6 +2208,7 @@ class DibellasWardrobeWindow(QMainWindow):
         self._updating_tree = False
 
         self._search_groups = {}
+        self._search_folder_groups = {}
         self._search_thread = NifSearchThread(
             root_dir=self.current_root_dir,
             query=query,
@@ -1734,17 +2221,39 @@ class DibellasWardrobeWindow(QMainWindow):
         self._search_thread.matchFound.connect(self._on_search_match_found)
         self._search_thread.start()
 
-    def _on_search_match_found(self, group_name: str, file_name: str, full_path: str) -> None:
+    def _on_search_match_found(
+        self,
+        group_name: str,
+        relative_directory: str,
+        file_name: str,
+        full_path: str,
+    ) -> None:
         self._updating_tree = True
         if group_name not in self._search_groups:
             grp_item = QTreeWidgetItem(self.file_tree, [group_name])
             grp_item.setForeground(0, QColor("#f0d59c"))
             self._search_groups[group_name] = grp_item
 
+        parent_item = self._search_groups[group_name]
+        directory_parts = tuple(
+            part for part in relative_directory.replace("\\", "/").split("/") if part
+        )
+        accumulated_parts: tuple[str, ...] = ()
+        for folder_name in directory_parts:
+            accumulated_parts += (folder_name.casefold(),)
+            folder_key = (group_name.casefold(), accumulated_parts)
+            folder_item = self._search_folder_groups.get(folder_key)
+            if folder_item is None:
+                folder_item = QTreeWidgetItem(parent_item, [folder_name])
+                folder_item.setForeground(0, QColor("#d7c7a6"))
+                folder_item.setData(0, ROLE_IS_LOADED, True)
+                self._search_folder_groups[folder_key] = folder_item
+            parent_item = folder_item
+
         if full_path.casefold().endswith(".hkx"):
-            self._create_hkx_tree_item(self._search_groups[group_name], file_name, full_path)
+            self._create_hkx_tree_item(parent_item, file_name, full_path)
         else:
-            self._create_nif_tree_item(self._search_groups[group_name], file_name, full_path)
+            self._create_nif_tree_item(parent_item, file_name, full_path)
         self._updating_tree = False
 
     def populate_file_tree(self) -> None:
@@ -2058,6 +2567,12 @@ class DibellasWardrobeWindow(QMainWindow):
             return False
 
     def _detach_outfit_nif(self, nif_key: str) -> None:
+        if (
+            hasattr(self, "texture_popover")
+            and self.texture_popover.isVisible()
+            and self.texture_popover.current_nif_key == nif_key
+        ):
+            self.texture_popover.close()
         was_locked = nif_key in self._locked_nif_paths
         self._checked_nif_paths.discard(nif_key)
         self._loaded_nif_cache.pop(nif_key, None)
@@ -2102,6 +2617,10 @@ class DibellasWardrobeWindow(QMainWindow):
 
     def _add_nif_to_wardrobe_list(self, nif_key: str) -> None:
         locked = nif_key in self._locked_nif_paths
+        if locked and nif_key not in self._locked_presets.get(
+            self._current_locked_preset, set()
+        ):
+            return
         target_list = self.locked_nifs_list if locked else self.added_nifs_list
         target_items = self._locked_nif_items if locked else self._added_nif_items
         if nif_key in target_items:
@@ -2123,6 +2642,9 @@ class DibellasWardrobeWindow(QMainWindow):
             on_toggle_visibility=lambda _checked=False, k=nif_key: self._toggle_nif_visibility(k),
             on_double_click=lambda k=nif_key: (
                 self._unlock_nif(k) if locked else self._lock_nif(k)
+            ),
+            on_right_click=lambda widget, k=nif_key: self._open_nif_texture_popover(
+                k, widget
             ),
             visible=self._nif_visibility.get(nif_key, True),
             remove_tooltip=self._t("unlock_nif") if locked else self._t("remove_nif"),
@@ -2156,7 +2678,11 @@ class DibellasWardrobeWindow(QMainWindow):
             self._t("wardrobe", count=len(self._added_nif_items))
         )
         self.locked_nifs_group.setTitle(
-            self._t("locked_wardrobe", count=len(self._locked_nif_items))
+            self._t(
+                "locked_wardrobe",
+                count=len(self._locked_nif_items),
+                page=self._current_locked_preset,
+            )
         )
         locked_row_height = sum(
             max(
@@ -2169,10 +2695,191 @@ class DibellasWardrobeWindow(QMainWindow):
         self.locked_nifs_list.setFixedHeight(locked_list_height)
         self.locked_nifs_list.setVisible(bool(self._locked_nif_items))
 
+    def _refresh_locked_preset_selector(self) -> None:
+        pages = sorted(self._locked_presets)
+        if not pages:
+            pages = [1]
+            self._locked_presets[1] = set()
+        if self._current_locked_preset not in self._locked_presets:
+            self._current_locked_preset = pages[0]
+
+        with QSignalBlocker(self.locked_preset_combo):
+            self.locked_preset_combo.clear()
+            for page in pages:
+                self.locked_preset_combo.addItem(
+                    self._t("locked_preset_page", page=page),
+                    page,
+                )
+            index = self.locked_preset_combo.findData(self._current_locked_preset)
+            self.locked_preset_combo.setCurrentIndex(max(0, index))
+
+    def _on_locked_preset_changed(self, index: int) -> None:
+        if index < 0:
+            return
+        page = self.locked_preset_combo.itemData(index)
+        if not isinstance(page, int) or page == self._current_locked_preset:
+            return
+        self._current_locked_preset = page
+        self._refresh_added_nifs()
+
+    def _add_locked_preset(self) -> None:
+        page = 1
+        while page in self._locked_presets:
+            page += 1
+        self._locked_presets[page] = set()
+        self._current_locked_preset = page
+        self._refresh_locked_preset_selector()
+        self._refresh_added_nifs()
+        self.save_config()
+
+    def _remove_empty_locked_preset(self, page: int) -> None:
+        if self._locked_presets.get(page) or len(self._locked_presets) <= 1:
+            return
+        del self._locked_presets[page]
+        if self._current_locked_preset == page:
+            self._current_locked_preset = min(self._locked_presets)
+        self._refresh_locked_preset_selector()
+
     def _on_added_nif_clicked(self, item: QListWidgetItem) -> None:
         nif_key = item.data(ROLE_ADDED_NIF_PATH)
         if nif_key:
             self._select_nif_in_tree(nif_key)
+
+    def _on_wardrobe_list_context_menu(
+        self, list_widget: QListWidget, pos: QPoint
+    ) -> None:
+        item = list_widget.itemAt(pos)
+        if item is None:
+            return
+        nif_key = item.data(ROLE_ADDED_NIF_PATH)
+        if not nif_key:
+            return
+        anchor_widget = list_widget.itemWidget(item) or list_widget
+        self._open_nif_texture_popover(str(nif_key), anchor_widget)
+
+    def _open_nif_texture_popover(
+        self, nif_key: str, anchor_widget: QWidget
+    ) -> None:
+        nif_data = self._loaded_nif_cache.get(nif_key)
+        if nif_data is None:
+            try:
+                nif_data = self.loader.load_nif(nif_key)
+                self._loaded_nif_cache[nif_key] = nif_data
+            except Exception as exc:
+                log.error("Could not inspect NIF %s for textures: %s", nif_key, exc)
+                return
+
+        mod_textures = self._discover_mod_textures_for_nif(nif_key)
+        self.texture_popover.show_for_nif(
+            nif_key=nif_key,
+            nif_data=nif_data,
+            mod_textures=mod_textures,
+            anchor_widget=anchor_widget,
+        )
+
+    def _discover_mod_textures_for_nif(
+        self, nif_key: str
+    ) -> List[tuple[str, Path]]:
+        owner = self.mod_scanner.owner_for_nif(nif_key) if self.mod_scanner else None
+        if owner is not None:
+            mod_root = owner
+        elif (
+            self.mod_scanner
+            and self.mod_scanner.fallback_target_for_nif(nif_key) is not None
+            and self.mod_scanner.overwrite_root is not None
+        ):
+            mod_root = self.mod_scanner.overwrite_root
+        elif self.current_root_dir is not None:
+            mod_root = self.current_root_dir
+            is_mod_directory = any(
+                (self.current_root_dir / folder).is_dir()
+                for folder in ("meshes", "textures", "Data/meshes", "Data/textures")
+            )
+            if not is_mod_directory:
+                try:
+                    relative = Path(nif_key).resolve().relative_to(
+                        self.current_root_dir
+                    )
+                except ValueError:
+                    return []
+                if len(relative.parts) > 1:
+                    mod_root = self.current_root_dir / relative.parts[0]
+        else:
+            mod_root = Path(nif_key).resolve().parent
+
+        texture_roots = [
+            mod_root / "textures",
+            mod_root / "Data" / "textures",
+        ]
+        results_by_label: Dict[str, tuple[str, Path]] = {}
+
+        for texture_root in texture_roots:
+            if not texture_root.is_dir():
+                continue
+            for root, dirs, files in os.walk(texture_root):
+                dirs.sort(key=str.casefold)
+                root_path = Path(root)
+                for file_name in sorted(files, key=str.casefold):
+                    if not file_name.casefold().endswith(".dds"):
+                        continue
+                    full_path = (root_path / file_name).resolve()
+                    try:
+                        rel_label = full_path.relative_to(texture_root).as_posix()
+                    except ValueError:
+                        rel_label = full_path.name
+                    label_parts = Path(rel_label).parts
+                    if label_parts and label_parts[0].casefold() == mod_root.name.casefold():
+                        rel_label = (
+                            Path(*label_parts[1:]).as_posix()
+                            if len(label_parts) > 1
+                            else full_path.name
+                        )
+                    label_key = rel_label.casefold()
+                    if label_key not in results_by_label:
+                        results_by_label[label_key] = (rel_label, full_path)
+
+        return list(results_by_label.values())
+
+    def _on_apply_nif_texture(
+        self,
+        nif_key: str,
+        shape_indices: List[int],
+        slot: str,
+        dds_path: Path,
+    ) -> None:
+        nif_data = self._loaded_nif_cache.get(nif_key)
+        if nif_data is None or not shape_indices:
+            return
+
+        multi_shape = len(shape_indices) > 1
+        target_dir = dds_path.resolve().parent
+
+        for sh_idx in shape_indices:
+            if not (0 <= sh_idx < len(nif_data.shapes)):
+                continue
+            chosen_path = dds_path
+            if multi_shape:
+                sh = nif_data.shapes[sh_idx]
+                cur_res = sh.shader.resolved_textures.get(slot)
+                cur_name = ""
+                if cur_res is not None and cur_res.resolved_path is not None:
+                    cur_name = cur_res.resolved_path.name
+                elif cur_res is not None and cur_res.raw_nif_path:
+                    cur_name = Path(cur_res.raw_nif_path.replace("\\", "/")).name
+                if cur_name:
+                    sibling = target_dir / cur_name
+                    if sibling.is_file():
+                        chosen_path = sibling
+            try:
+                res_tex = self.resolver.load_from_file(slot, chosen_path)
+            except Exception as exc:
+                log.warning("Could not decode texture %s: %s", chosen_path, exc)
+                continue
+            self.viewport.update_nif_shape_texture(nif_key, sh_idx, slot, res_tex)
+
+    def _on_reset_nif_textures(self, nif_key: str) -> None:
+        nif_data = self._loaded_nif_cache.get(nif_key)
+        self.viewport.reset_nif_textures(nif_key, nif_data)
 
     def _autoload_locked_nifs(self) -> None:
         """Load NIFs saved in the locked wardrobe without showing startup dialogs."""

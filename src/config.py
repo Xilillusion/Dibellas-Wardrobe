@@ -86,6 +86,7 @@ class AppConfig:
     effects: ViewportEffectsConfig = field(default_factory=ViewportEffectsConfig)
     checkboxes: CheckboxConfig = field(default_factory=CheckboxConfig)
     locked_nifs: list[str] = field(default_factory=list)
+    locked_presets: Dict[str, list[str]] = field(default_factory=dict)
 
     @classmethod
     def load(
@@ -119,6 +120,18 @@ class AppConfig:
         locked_nifs = data.get("locked_nifs", [])
         if isinstance(locked_nifs, list):
             cfg.locked_nifs = [path for path in locked_nifs if isinstance(path, str)]
+
+        locked_presets = data.get("locked_presets")
+        if isinstance(locked_presets, dict):
+            cfg.locked_presets = {
+                page: [path for path in paths if isinstance(path, str)]
+                for page, paths in locked_presets.items()
+                if isinstance(page, str)
+                and page.isdigit()
+                and isinstance(paths, list)
+            }
+        elif cfg.locked_nifs:
+            cfg.locked_presets = {"1": list(cfg.locked_nifs)}
 
         # lighting (supports both nested {"lighting": {...}} and flat keys)
         l_data = data.get("lighting", {})

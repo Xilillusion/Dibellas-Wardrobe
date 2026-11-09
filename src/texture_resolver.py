@@ -452,6 +452,27 @@ class TextureResolver:
             rgba_data=fallback_rgba,
         )
 
+    def load_from_file(
+        self,
+        slot: str,
+        dds_path: Path | str,
+        raw_nif_path: str = "",
+    ) -> ResolvedTexture:
+        """
+        Decode an explicit `.dds` file on disk for `slot` and return a `ResolvedTexture`.
+        """
+        resolved = Path(dds_path).resolve()
+        rgba = self.decode_dds_file(resolved)
+        return ResolvedTexture(
+            slot=slot,
+            raw_nif_path=raw_nif_path or resolved.name,
+            resolved_path=resolved,
+            is_fallback=False,
+            width=int(rgba.shape[1]),
+            height=int(rgba.shape[0]),
+            rgba_data=rgba,
+        )
+
     @staticmethod
     def generate_studio_cubemap(face_size: int = 64) -> List[np.ndarray]:
         """

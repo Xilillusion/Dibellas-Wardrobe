@@ -103,6 +103,8 @@ class ShaderMaterialData:
 
     raw_textures: Dict[str, str] = field(default_factory=dict)
     resolved_textures: Dict[str, ResolvedTexture] = field(default_factory=dict)
+    default_resolved_textures: Dict[str, ResolvedTexture] = field(default_factory=dict)
+    default_flags: Dict[str, bool] = field(default_factory=dict)
 
 
 @dataclass
@@ -308,6 +310,13 @@ def _extract_shader_data(
         log.warning("Shape '%s' has no readable shader (%s); using defaults.", shape.name, exc)
         mat.resolved_textures["Diffuse"] = resolver.load_or_fallback("Diffuse", "", nif_path)
         mat.resolved_textures["Normal"] = resolver.load_or_fallback("Normal", "", nif_path)
+        mat.default_resolved_textures = dict(mat.resolved_textures)
+        mat.default_flags = {
+            "b_env_mask": mat.b_env_mask,
+            "b_glowmap": mat.b_glowmap,
+            "b_emissive": mat.b_emissive,
+            "b_cubemap": mat.b_cubemap,
+        }
         return mat
 
     # Raw texture dictionary from pynifly
@@ -439,6 +448,13 @@ def _extract_shader_data(
     if soft_raw:
         mat.resolved_textures["Lightmask"] = resolver.load_or_fallback("Lightmask", soft_raw, nif_path)
 
+    mat.default_resolved_textures = dict(mat.resolved_textures)
+    mat.default_flags = {
+        "b_env_mask": mat.b_env_mask,
+        "b_glowmap": mat.b_glowmap,
+        "b_emissive": mat.b_emissive,
+        "b_cubemap": mat.b_cubemap,
+    }
     return mat
 
 
