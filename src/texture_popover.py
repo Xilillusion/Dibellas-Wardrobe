@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
 )
 
 from .nif_loader import LoadedNifData, ShapeMeshData
-from .ui_widgets import ElidedLabel
+from .ui_widgets import ElidedLabel, TEXTURE_PATH_STYLE
 
 log = logging.getLogger("dibellas_wardrobe.texture_popover")
 
@@ -187,7 +187,7 @@ class NifTexturePopover(QFrame):
         layout.addLayout(selectors_row)
 
         self.lbl_current_tex = ElidedLabel("")
-        self.lbl_current_tex.setStyleSheet("color: #9da6be; font-size: 11px;")
+        self.lbl_current_tex.setStyleSheet(TEXTURE_PATH_STYLE)
         layout.addWidget(self.lbl_current_tex)
 
         self.filter_edit = QLineEdit()

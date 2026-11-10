@@ -1422,6 +1422,7 @@ class DibellasWardrobeWindow(QMainWindow):
             self._active_hkx_path = resolved_key
             meta_label = self._format_animation_metadata(loaded.filepath)
             self.anim_toolbar.set_metadata(meta_label, loaded.duration)
+            self.anim_toolbar.lbl_metadata.setToolTip(resolved_key)
             self.anim_toolbar.update_state(self.viewport.is_animation_playing)
             self.anim_toolbar.setVisible(True)
             return True

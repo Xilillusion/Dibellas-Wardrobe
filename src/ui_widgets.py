@@ -10,6 +10,7 @@ from typing import Callable, Optional
 from PySide6.QtCore import (
     QModelIndex,
     QMimeData,
+    QEvent,
     QPoint,
     QRect,
     Qt,
@@ -35,6 +36,7 @@ from PySide6.QtWidgets import (
     QStyle,
     QStyleOptionGroupBox,
     QTreeWidget,
+    QToolTip,
     QWidget,
 )
 
@@ -50,6 +52,7 @@ ROLE_OVERWRITE_FALLBACK = Qt.ItemDataRole.UserRole + 6
 ROLE_OVERWRITE_RELATIVE_PATH = Qt.ItemDataRole.UserRole + 7
 ROLE_HKX_PATH = Qt.ItemDataRole.UserRole + 8
 NIF_DRAG_MIME_TYPE = "application/x-dibellas-wardrobe-nif"
+TEXTURE_PATH_STYLE = "color: #9da6be; font-size: 11px;"
 
 HEADER_ACTIONS_STYLE = """
 QFrame#headerActions {
@@ -585,6 +588,10 @@ class AnimationPlaybackToolbar(QFrame):
         self.lbl_metadata = ElidedLabel("")
         self.lbl_metadata.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
         self.lbl_metadata.setStyleSheet("color: #f0d59c; font-weight: 600; font-size: 12px;")
+        self._tooltip_style_context = QLabel(self)
+        self._tooltip_style_context.setStyleSheet(TEXTURE_PATH_STYLE)
+        self._tooltip_style_context.hide()
+        self.lbl_metadata.installEventFilter(self)
         layout.addWidget(self.lbl_metadata, stretch=0)
 
         self.slider = QSlider(Qt.Orientation.Horizontal)
@@ -598,6 +605,12 @@ class AnimationPlaybackToolbar(QFrame):
         self.lbl_time.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.lbl_time.setStyleSheet("color: #aeb8cc; font-family: monospace; font-size: 11px;")
         layout.addWidget(self.lbl_time)
+
+    def eventFilter(self, watched, event) -> bool:
+        if watched is self.lbl_metadata and event.type() == QEvent.Type.ToolTip:
+            QToolTip.showText(event.globalPos(), self.lbl_metadata.toolTip(), self._tooltip_style_context)
+            return True
+        return super().eventFilter(watched, event)
 
     @staticmethod
     def format_timestamp(seconds: float) -> str:

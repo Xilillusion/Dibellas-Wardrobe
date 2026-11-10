@@ -10,9 +10,9 @@ import numpy as np
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QMimeData, QPoint, QPointF, Qt
-from PySide6.QtGui import QDragEnterEvent, QDragMoveEvent, QDropEvent
+from PySide6.QtGui import QDragEnterEvent, QDragMoveEvent, QDropEvent, QHelpEvent
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QToolTip
 
 from src.main_window import DibellasWardrobeWindow
 from src.ui_widgets import NIF_DRAG_MIME_TYPE
@@ -67,6 +67,36 @@ class OutfitInteractionTests(unittest.TestCase):
                           Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
         self.app.sendEvent(viewport, drop)
         self.assertTrue(drop.isAccepted())
+
+    def test_animation_tooltip_shows_full_path_for_each_clip(self):
+        root = Path(self.temp.name)
+        paths = (root / "mod one" / "animations" / "idle.hkx",
+                 root / "mod two" / "animations" / "idle.hkx")
+        for path in paths:
+            loaded = SimpleNamespace(filepath=path, duration=2.0)
+            with patch.object(self.window.viewport, "load_animation", return_value=loaded):
+                self.assertTrue(self.window._load_and_play_animation(str(path)))
+            label = self.window.anim_toolbar.lbl_metadata
+            self.assertEqual(label.toolTip(), str(path.resolve()))
+            self.assertEqual(label.text(), self.window._format_animation_metadata(path))
+
+        def tooltip_style(widget):
+            QToolTip.hideText()
+            QTest.qWait(350)
+            self.app.sendEvent(widget, QHelpEvent(
+                QHelpEvent.Type.ToolTip, widget.rect().center(), widget.mapToGlobal(widget.rect().center())
+            ))
+            self.app.processEvents()
+            tip = next(w for w in self.app.topLevelWidgets()
+                       if w.isVisible() and w.windowType() == Qt.WindowType.ToolTip)
+            self.assertEqual(tip.text(), widget.toolTip())
+            return (tip.font(), tip.palette().color(tip.foregroundRole()),
+                    tip.palette().color(tip.backgroundRole()))
+
+        texture_label = self.window.texture_popover.lbl_current_tex
+        texture_label.setToolTip(str(paths[0]))
+        self.assertEqual(tooltip_style(label), tooltip_style(texture_label))
+        QToolTip.hideText()
 
     def test_cbpc_softness_sliders_persist_and_restore(self):
         viewport = self.window.viewport

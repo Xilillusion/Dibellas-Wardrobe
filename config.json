@@ -32,7 +32,7 @@
     "hide_gnd_folder": true,
     "show_mod_dir_filter": true,
     "wireframe_overlay": false,
-    "show_ground_grid": true
+    "show_ground_grid": false
   },
   "cbpc": {
     "enabled": true,
@@ -69,7 +69,6 @@
     "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[Melodic] Echidna\\meshes\\Melodic\\Echida\\Hands_1.nif",
     "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[Melodic] Echidna\\meshes\\Melodic\\Echida\\Heels_1.nif",
     "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[Melodic] Echidna\\meshes\\Melodic\\Echida\\Necklace_1.nif",
-    "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[Melodic] Echidna\\meshes\\Melodic\\Echida\\Panty_1.nif",
     "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[Melodic] Echidna\\meshes\\Melodic\\Echida\\Top_1.nif"
   ],
   "locked_presets": {
@@ -80,7 +79,6 @@
       "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[Melodic] Echidna\\meshes\\Melodic\\Echida\\Hands_1.nif",
       "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[Melodic] Echidna\\meshes\\Melodic\\Echida\\Heels_1.nif",
       "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[Melodic] Echidna\\meshes\\Melodic\\Echida\\Necklace_1.nif",
-      "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[Melodic] Echidna\\meshes\\Melodic\\Echida\\Panty_1.nif",
       "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[Melodic] Echidna\\meshes\\Melodic\\Echida\\Top_1.nif"
     ],
     "2": [
