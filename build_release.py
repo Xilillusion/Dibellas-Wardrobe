@@ -95,8 +95,9 @@ def validate_inputs() -> None:
         ROOT / "main.py",
         ROOT / "io_scene_nifly" / "NiflyDLL.dll",
         ROOT / "locales.json",
-        ROOT / "config.json",
         ROOT / "assets" / "skeleton_female.nif",
+        ROOT / "assets" / "CBPConfig.json",
+        ROOT / "assets" / "CITATION.md",
     )
     missing = [path for path in required_files if not path.is_file()]
     if not (ROOT / "shaders").is_dir():
@@ -218,6 +219,18 @@ def validate_output() -> Path:
     executable = distribution / f"{APP_NAME}.exe"
     if not executable.is_file():
         raise BuildError(f"Expected executable was not created: {executable}")
+
+    runtime = distribution / "_internal"
+    required_assets = (
+        runtime / "assets" / "skeleton_female.nif",
+        runtime / "assets" / "CBPConfig.json",
+        runtime / "assets" / "CITATION.md",
+        runtime / "locales.json",
+    )
+    missing_assets = [path for path in required_assets if not path.is_file()]
+    if missing_assets:
+        formatted = "\n".join(f"  - {path}" for path in missing_assets)
+        raise BuildError(f"Required runtime assets are missing:\n{formatted}")
 
     expected_shaders = {
         "default.vert",

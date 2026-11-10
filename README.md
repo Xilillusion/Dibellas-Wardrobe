@@ -85,6 +85,8 @@ python build_release.py
 
 The script cleans `build/` and `dist/`, builds with `package.spec`, validates the executable and bundled runtime assets, and writes a portable ZIP under `dist/`. Version is read from `VERSION`, `version.txt`, or the optional `version` field in `config.json`, in that order; if none is present, it defaults to `0.1.0`.
 
+The release starts with default settings rather than including the builder's `config.json`. Settings are saved in the portable distribution when the app closes.
+
 Options:
 
 ```text

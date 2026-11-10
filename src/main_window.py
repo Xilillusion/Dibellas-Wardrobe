@@ -268,6 +268,8 @@ class DibellasWardrobeWindow(QMainWindow):
             )
         if hasattr(self, "texture_popover"):
             self.texture_popover.retranslate_ui()
+        if hasattr(self, "viewport"):
+            self.viewport.cbpc_overlay.reposition()
         self._retranslate_tree_helpers()
         self._refresh_added_nifs()
         self._update_added_nif_count()
@@ -588,6 +590,14 @@ class DibellasWardrobeWindow(QMainWindow):
         center_layout.setSpacing(4)
 
         self.viewport = OutfitViewportWidget(self)
+        overlay = self.viewport.cbpc_overlay
+        self._bind_text(overlay.checkbox, "cbpc_enable")
+        for key in ("gravity", "breasts", "butt", "belly"):
+            locale_key = f"cbpc_{key}"
+            self._bind_text(overlay.captions[key], locale_key)
+            slider = overlay.slider if key == "gravity" else overlay.softness_sliders[key]
+            self._bind_text(slider, locale_key, "setAccessibleName")
+        overlay.reposition()
         self._init_viewport_settings()
         center_layout.addWidget(self.viewport, stretch=1)
 

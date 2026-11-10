@@ -85,6 +85,32 @@ class OutfitInteractionTests(unittest.TestCase):
         sliders = self.window.viewport.cbpc_overlay.softness_sliders
         self.assertEqual([sliders[g].value() for g in ("breasts", "butt", "belly")], [40, 10, 70])
 
+    def test_cbpc_controls_follow_language_on_startup_and_change(self):
+        self.window.language_combo.setCurrentIndex(self.window.language_combo.findData("zh"))
+        config_path = self.window.config_path
+        root = self.window.current_root_dir
+        self.window.close()
+        self.window = DibellasWardrobeWindow(initial_root_dir=root, config_path=config_path)
+        overlay = self.window.viewport.cbpc_overlay
+        expected = {
+            "zh": ("启用 CBPC 物理", ("重力", "胸部柔软度", "臀部柔软度", "腹部柔软度")),
+            "en": ("Enable CBPC Physics", ("Gravity", "Breasts softness", "Butt softness", "Belly softness")),
+        }
+        keys = ("gravity", "breasts", "butt", "belly")
+        changes = []
+        overlay.gravityChanged.connect(lambda value: changes.append(value))
+        overlay.softnessChanged.connect(lambda group, value: changes.append((group, value)))
+        for language in ("zh", "en", "zh"):
+            self.window.language_combo.setCurrentIndex(self.window.language_combo.findData(language))
+            self.assertEqual(self.window.language, language)
+            self.assertEqual(overlay.checkbox.text(), expected[language][0])
+            self.assertEqual(tuple(overlay.captions[key].text() for key in keys), expected[language][1])
+            sliders = (overlay.slider, *(overlay.softness_sliders[key] for key in keys[1:]))
+            self.assertEqual(tuple(slider.accessibleName() for slider in sliders), expected[language][1])
+            self.assertEqual(overlay.x() + overlay.width(), self.window.viewport.width() - overlay.MARGIN)
+            self.assertEqual(overlay.y() + overlay.height(), self.window.viewport.height() - overlay.MARGIN)
+        self.assertEqual(changes, [])
+
     def test_breast_gravity_slider_refreshes_static_and_paused_poses(self):
         viewport = self.window.viewport
         viewport.cbpc.set_mesh_bones("body", ["L Breast01", "NPC L Butt"])

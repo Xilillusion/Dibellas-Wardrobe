@@ -35,7 +35,7 @@ class CbpcOverlay(QFrame):
             "#cbpcOverlay QCheckBox, #cbpcOverlay QLabel { color: #e6e6e6; }"
             "#cbpcOverlay QCheckBox:disabled, #cbpcOverlay QLabel:disabled { color: #8a8a8a; }"
         )
-        self._captions: list[QLabel] = []
+        self.captions: dict[str, QLabel] = {}
 
         self.checkbox = QCheckBox("Enable CBPC Physics", self)
         self.slider = QSlider(Qt.Orientation.Horizontal, self)
@@ -51,7 +51,7 @@ class CbpcOverlay(QFrame):
         layout.setContentsMargins(10, 8, 10, 8)
         layout.setSpacing(6)
         layout.addWidget(self.checkbox)
-        layout.addLayout(self._row("Gravity", self.slider, self.label))
+        layout.addLayout(self._row("gravity", "Gravity", self.slider, self.label))
         for group, caption in (("breasts", "Breasts"), ("butt", "Butt"), ("belly", "Belly")):
             slider = QSlider(Qt.Orientation.Horizontal, self)
             slider.setRange(round(softness_range[0] * SOFTNESS_STEPS), round(softness_range[1] * SOFTNESS_STEPS))
@@ -60,7 +60,7 @@ class CbpcOverlay(QFrame):
             label = QLabel(self)
             self.softness_sliders[group] = slider
             self.softness_labels[group] = label
-            layout.addLayout(self._row(f"{caption} softness", slider, label))
+            layout.addLayout(self._row(group, f"{caption} softness", slider, label))
             slider.valueChanged.connect(lambda value, group=group: self._on_softness(group, value))
 
         self.checkbox.toggled.connect(self.enabledChanged)
@@ -70,7 +70,7 @@ class CbpcOverlay(QFrame):
             self._update_softness_label(group)
         self.adjustSize()
 
-    def _row(self, caption: str, slider: QSlider, value: QLabel) -> QHBoxLayout:
+    def _row(self, key: str, caption: str, slider: QSlider, value: QLabel) -> QHBoxLayout:
         row = QHBoxLayout()
         row.setSpacing(6)
         name = QLabel(caption, self)
@@ -79,7 +79,7 @@ class CbpcOverlay(QFrame):
         value.setMinimumWidth(38)
         value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         row.addWidget(value)
-        self._captions.append(name)
+        self.captions[key] = name
         return row
 
     def _update_label(self) -> None:
@@ -110,7 +110,7 @@ class CbpcOverlay(QFrame):
             slider.setEnabled(available and enabled)
             self.softness_labels[group].setEnabled(available and enabled)
             slider.setValue(round((softness[group] if softness is not None else 1.0) * SOFTNESS_STEPS))
-        for c in self._captions:
+        for c in self.captions.values():
             c.setEnabled(available and enabled)
         self.checkbox.setChecked(bool(enabled and available))
         self.slider.setValue(round(gravity * STEPS_PER_UNIT))
