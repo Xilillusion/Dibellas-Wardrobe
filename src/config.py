@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
@@ -78,6 +79,16 @@ class CheckboxConfig:
     show_ground_grid: bool = True
 
 
+SOFTNESS_GROUPS = ("breasts", "butt", "belly", "other")
+
+
+@dataclass
+class CbpcConfig:
+    enabled: bool = True
+    gravity: float = 1.0 / 3.0  # breast gravity factor (0 = Armor, 1 = More Gravity)
+    softness: Dict[str, float] = field(default_factory=lambda: dict.fromkeys(SOFTNESS_GROUPS, 1.0))
+
+
 @dataclass
 class AppConfig:
     default_folder: str = ""
@@ -85,6 +96,7 @@ class AppConfig:
     lighting: LightingConfig = field(default_factory=LightingConfig)
     effects: ViewportEffectsConfig = field(default_factory=ViewportEffectsConfig)
     checkboxes: CheckboxConfig = field(default_factory=CheckboxConfig)
+    cbpc: CbpcConfig = field(default_factory=CbpcConfig)
     locked_nifs: list[str] = field(default_factory=list)
     locked_presets: Dict[str, list[str]] = field(default_factory=dict)
     locked_preset_names: Dict[str, str] = field(default_factory=dict)
@@ -209,6 +221,36 @@ class AppConfig:
             val = c_data.get(key, data.get(key))
             if val is not None:
                 setattr(cfg.checkboxes, key, bool(val))
+
+        cb_data = data.get("cbpc", {})
+        if isinstance(cb_data, dict):
+            if isinstance(cb_data.get("enabled"), bool):
+                cfg.cbpc.enabled = cb_data["enabled"]
+            gravity = cb_data.get("gravity")
+            if isinstance(gravity, (int, float)) and not isinstance(gravity, bool) and math.isfinite(gravity):
+                cfg.cbpc.gravity = max(0.0, min(5.0, float(gravity)))
+            softness = cb_data.get("softness")
+            if isinstance(softness, dict):
+                for group in SOFTNESS_GROUPS:
+                    if group not in softness:
+                        continue
+                    value = softness[group]
+                    if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+                        cfg.cbpc.softness[group] = max(0.0, min(5.0, float(value)))
+                    else:
+                        log.warning("Ignoring invalid CBPC softness for %s", group)
+            elif isinstance(softness, (int, float)) and not isinstance(softness, bool) and math.isfinite(softness):
+                cfg.cbpc.softness = dict.fromkeys(SOFTNESS_GROUPS, max(0.0, min(5.0, float(softness))))
+            elif "softness" in cb_data:
+                log.warning("Ignoring invalid CBPC softness setting")
+            if "softness" not in cb_data and "bounce" in cb_data:
+                bounce = cb_data["bounce"]
+                if isinstance(bounce, (int, float)) and not isinstance(bounce, bool) and math.isfinite(bounce):
+                    # Keep the existing inverse mapping for legacy bounce settings.
+                    value = min(5.0, 1.0 / min(bounce, 5.0)) if bounce > 0 else 0.0
+                    cfg.cbpc.softness = dict.fromkeys(SOFTNESS_GROUPS, value)
+                else:
+                    log.warning("Ignoring invalid legacy CBPC bounce setting")
 
         return cfg
 

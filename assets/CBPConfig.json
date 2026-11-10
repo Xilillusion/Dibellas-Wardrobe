@@ -1,0 +1,1009 @@
+{
+  "bones": {
+    "NPC L Breast01": {
+      "stiffness": 0.019667,
+      "stiffness2": 0.020333,
+      "damping": 0.027933,
+      "maxoffset": 2.3,
+      "collisionMaxoffset": 3.45,
+      "gravityInvertedCorrection": -7.5,
+      "gravity": 0.015
+    },
+    "NPC L Breast02": {
+      "stiffness": 0.019667,
+      "stiffness2": 0.015,
+      "damping": 0.020267,
+      "maxoffset": 2.76,
+      "collisionMaxoffset": 4.14,
+      "gravityInvertedCorrection": -1.6,
+      "gravity": 0.0032
+    },
+    "NPC L Breast03": {
+      "stiffness": 0.026933,
+      "stiffness2": 0.002267,
+      "damping": 0.049667,
+      "maxoffset": 2.53,
+      "collisionMaxoffset": 3.795,
+      "gravityInvertedCorrection": -0.6,
+      "gravity": 0.0012
+    },
+    "NPC R Breast01": {
+      "stiffness": 0.019667,
+      "stiffness2": 0.020333,
+      "damping": 0.027933,
+      "maxoffset": 2.3,
+      "collisionMaxoffset": 3.45,
+      "gravityInvertedCorrection": -7.5,
+      "gravity": 0.015
+    },
+    "NPC R Breast02": {
+      "stiffness": 0.019667,
+      "stiffness2": 0.015,
+      "damping": 0.020267,
+      "maxoffset": 2.76,
+      "collisionMaxoffset": 4.14,
+      "gravityInvertedCorrection": -1.6,
+      "gravity": 0.0032
+    },
+    "NPC R Breast03": {
+      "stiffness": 0.026933,
+      "stiffness2": 0.002267,
+      "damping": 0.049667,
+      "maxoffset": 2.53,
+      "collisionMaxoffset": 3.795,
+      "gravityInvertedCorrection": -0.6,
+      "gravity": 0.0012
+    },
+    "NPC L Butt": {
+      "stiffness": 0.015,
+      "stiffness2": 0.0041,
+      "damping": 0.0175,
+      "maxoffset": 2.5,
+      "collisionMaxoffset": 2.5,
+      "gravity": 0.008
+    },
+    "NPC R Butt": {
+      "stiffness": 0.015,
+      "stiffness2": 0.0041,
+      "damping": 0.0175,
+      "maxoffset": 2.5,
+      "collisionMaxoffset": 2.5,
+      "gravity": 0.008
+    },
+    "NPC Belly": {
+      "stiffness": 0.02,
+      "stiffness2": 0.0055,
+      "damping": 0.02,
+      "maxoffset": 2.333333,
+      "collisionMaxoffset": 33.833333,
+      "gravity": 0.01
+    },
+    "NPC L FrontThigh": {
+      "stiffness": 0.015,
+      "stiffness2": 0.0041,
+      "damping": 0.0215,
+      "maxoffset": 3.0
+    },
+    "NPC L RearThigh": {
+      "stiffness": 0.015,
+      "stiffness2": 0.0041,
+      "damping": 0.0175,
+      "maxoffset": 3.0,
+      "collisionMaxoffset": 3.0
+    },
+    "NPC L RearCalf": {
+      "stiffness": 0.015,
+      "stiffness2": 0.0041,
+      "damping": 0.0215,
+      "maxoffset": 3.0
+    },
+    "NPC R FrontThigh": {
+      "stiffness": 0.015,
+      "stiffness2": 0.0041,
+      "damping": 0.0215,
+      "maxoffset": 3.0
+    },
+    "NPC R RearThigh": {
+      "stiffness": 0.015,
+      "stiffness2": 0.0041,
+      "damping": 0.0175,
+      "maxoffset": 3.0,
+      "collisionMaxoffset": 3.0
+    },
+    "NPC R RearCalf": {
+      "stiffness": 0.015,
+      "stiffness2": 0.0041,
+      "damping": 0.0215,
+      "maxoffset": 3.0
+    },
+    "VaginaB1": {
+      "stiffness": 0.0,
+      "stiffness2": 0.0,
+      "damping": 0.0,
+      "maxoffset": 1.0,
+      "collisionMaxoffset": 0.233333
+    },
+    "Clitoral1": {
+      "stiffness": 0.0,
+      "stiffness2": 0.0,
+      "damping": 0.0,
+      "maxoffset": 1.0,
+      "collisionMaxoffset": 1.033333
+    },
+    "NPC L Pussy02": {
+      "stiffness": 0.0,
+      "stiffness2": 0.0,
+      "damping": 0.0,
+      "maxoffset": 1.0,
+      "collisionMaxoffset": 0.366667
+    },
+    "NPC R Pussy02": {
+      "stiffness": 0.0,
+      "stiffness2": 0.0,
+      "damping": 0.0,
+      "maxoffset": 1.0,
+      "collisionMaxoffset": 33.666667
+    }
+  },
+  "collision": {
+    "affected": {
+      "l breast": [
+        "l breast01",
+        "l breast02",
+        "l breast03",
+        "r breast01",
+        "r breast02",
+        "r breast03"
+      ],
+      "r breast": [
+        "l breast01",
+        "l breast02",
+        "l breast03",
+        "r breast01",
+        "r breast02",
+        "r breast03"
+      ],
+      "l butt": [
+        "genitals01",
+        "l breast01",
+        "l breast02",
+        "l breast03",
+        "l butt",
+        "l thigh",
+        "r breast01",
+        "r breast02",
+        "r breast03",
+        "r butt",
+        "r thigh"
+      ],
+      "r butt": [
+        "genitals01",
+        "l breast01",
+        "l breast02",
+        "l breast03",
+        "l butt",
+        "l thigh",
+        "r breast01",
+        "r breast02",
+        "r breast03",
+        "r butt",
+        "r thigh"
+      ],
+      "pelvis": [
+        "l breast01",
+        "l breast02",
+        "l breast03",
+        "l butt",
+        "l thigh",
+        "r breast01",
+        "r breast02",
+        "r breast03",
+        "r butt",
+        "r thigh"
+      ],
+      "spine1": [
+        "l breast01",
+        "l breast02",
+        "l breast03",
+        "l butt",
+        "l thigh",
+        "r breast01",
+        "r breast02",
+        "r breast03",
+        "r butt",
+        "r thigh"
+      ],
+      "anal": [
+        "l breast01",
+        "l breast02",
+        "l breast03",
+        "l butt",
+        "l thigh",
+        "r breast01",
+        "r breast02",
+        "r breast03",
+        "r butt",
+        "r thigh"
+      ],
+      "l breast01": [
+        "l breast01",
+        "l breast02",
+        "l breast03",
+        "r breast01",
+        "r breast02",
+        "r breast03"
+      ],
+      "r breast01": [
+        "l breast01",
+        "l breast02",
+        "l breast03",
+        "r breast01",
+        "r breast02",
+        "r breast03"
+      ],
+      "l breast02": [
+        "l breast01",
+        "l breast02",
+        "l breast03",
+        "r breast01",
+        "r breast02",
+        "r breast03"
+      ],
+      "r breast02": [
+        "l breast01",
+        "l breast02",
+        "l breast03",
+        "r breast01",
+        "r breast02",
+        "r breast03"
+      ],
+      "l breast03": [
+        "l breast01",
+        "l breast02",
+        "l breast03",
+        "r breast01",
+        "r breast02",
+        "r breast03"
+      ],
+      "r breast03": [
+        "l breast01",
+        "l breast02",
+        "l breast03",
+        "r breast01",
+        "r breast02",
+        "r breast03"
+      ],
+      "l rearthigh": [
+        "genitals01",
+        "l butt",
+        "l calf",
+        "l thigh",
+        "r butt",
+        "r calf",
+        "r thigh"
+      ],
+      "r rearthigh": [
+        "genitals01",
+        "l butt",
+        "l calf",
+        "l thigh",
+        "r butt",
+        "r calf",
+        "r thigh"
+      ],
+      "l pussy02": [
+        "genitals01",
+        "l butt",
+        "l thigh",
+        "r butt",
+        "r thigh"
+      ],
+      "r pussy02": [
+        "genitals01",
+        "l butt",
+        "l thigh",
+        "r butt",
+        "r thigh"
+      ],
+      "clitoral1": [
+        "genitals01",
+        "l butt",
+        "r butt"
+      ],
+      "vaginab1": [
+        "genitals01",
+        "l butt",
+        "r butt"
+      ]
+    },
+    "collider_nodes": [
+      "root", "head",
+      "l breast01", "r breast01", "l breast02", "r breast02", "l breast03", "r breast03",
+      "l upperarm", "r upperarm", "l forearm", "r forearm", "l hand", "r hand",
+      "l finger12", "r finger12", "l finger42", "r finger42", "genitals06",
+      "l butt", "r butt", "l thigh", "r thigh", "l calf", "r calf", "l foot", "r foot"
+    ],
+    "colliders": {
+      "l breast": {
+        "name": "NPC L Breast",
+        "shapes": [
+          {
+            "p1": [
+              -0.5,
+              6.0,
+              -6.0
+            ],
+            "r1": 5.75,
+            "p2": null,
+            "r2": 0.0
+          }
+        ]
+      },
+      "r breast": {
+        "name": "NPC R Breast",
+        "shapes": [
+          {
+            "p1": [
+              0.5,
+              6.0,
+              -6.0
+            ],
+            "r1": 5.75,
+            "p2": null,
+            "r2": 0.0
+          }
+        ]
+      },
+      "l butt": {
+        "name": "NPC L Butt",
+        "shapes": [
+          {
+            "p1": [
+              -2.5,
+              3.5,
+              -0.5
+            ],
+            "r1": 4.5,
+            "p2": null,
+            "r2": 0.0
+          }
+        ]
+      },
+      "r butt": {
+        "name": "NPC R Butt",
+        "shapes": [
+          {
+            "p1": [
+              2.5,
+              3.5,
+              -0.5
+            ],
+            "r1": 4.5,
+            "p2": null,
+            "r2": 0.0
+          }
+        ]
+      },
+      "belly": {
+        "name": "NPC Belly",
+        "shapes": [
+          {
+            "p1": [
+              0.0,
+              3.0,
+              -2.5
+            ],
+            "r1": 6.0,
+            "p2": null,
+            "r2": 0.0
+          }
+        ]
+      },
+      "pelvis": {
+        "name": "NPC Pelvis [Pelv]",
+        "shapes": [
+          {
+            "p1": [
+              0.0,
+              -1.0,
+              -3.5
+            ],
+            "r1": 2.5,
+            "p2": null,
+            "r2": 0.0
+          }
+        ]
+      },
+      "anal": {
+        "name": "Anal",
+        "shapes": [
+          {
+            "p1": [
+              0.0,
+              -5.5,
+              -1.8
+            ],
+            "r1": 1.75,
+            "p2": null,
+            "r2": 0.0
+          }
+        ]
+      },
+      "spine1": {
+        "name": "NPC Spine1 [Spn1]",
+        "shapes": [
+          {
+            "p1": [
+              0.0,
+              3.0,
+              -5.0
+            ],
+            "r1": 7.0,
+            "p2": null,
+            "r2": 0.0
+          }
+        ]
+      },
+      "l breast01": {
+        "name": "L Breast01",
+        "shapes": [
+          {
+            "p1": [
+              -1.0,
+              2.25,
+              -2.0
+            ],
+            "r1": 5.75,
+            "p2": null,
+            "r2": 0.0
+          }
+        ]
+      },
+      "r breast01": {
+        "name": "R Breast01",
+        "shapes": [
+          {
+            "p1": [
+              1.0,
+              2.25,
+              -2.0
+            ],
+            "r1": 5.75,
+            "p2": null,
+            "r2": 0.0
+          }
+        ]
+      },
+      "l breast02": {
+        "name": "L Breast02",
+        "shapes": [
+          {
+            "p1": [
+              0.25,
+              0.25,
+              -2.5
+            ],
+            "r1": 5.5,
+            "p2": null,
+            "r2": 0.0
+          }
+        ]
+      },
+      "r breast02": {
+        "name": "R Breast02",
+        "shapes": [
+          {
+            "p1": [
+              -0.25,
+              0.25,
+              -2.5
+            ],
+            "r1": 5.5,
+            "p2": null,
+            "r2": 0.0
+          }
+        ]
+      },
+      "l breast03": {
+        "name": "L Breast03",
+        "shapes": [
+          {
+            "p1": [
+              1.0,
+              -2.0,
+              -4.0
+            ],
+            "r1": 5.25,
+            "p2": null,
+            "r2": 0.0
+          }
+        ]
+      },
+      "r breast03": {
+        "name": "R Breast03",
+        "shapes": [
+          {
+            "p1": [
+              -1.0,
+              -2.0,
+              -4.0
+            ],
+            "r1": 5.25,
+            "p2": null,
+            "r2": 0.0
+          }
+        ]
+      },
+      "l pussy02": {
+        "name": "NPC L Pussy02",
+        "shapes": [
+          {
+            "p1": [
+              1.0,
+              -3.25,
+              1.0
+            ],
+            "r1": 2.0,
+            "p2": [
+              1.0,
+              1.5,
+              1.5
+            ],
+            "r2": 2.0
+          }
+        ]
+      },
+      "r pussy02": {
+        "name": "NPC R Pussy02",
+        "shapes": [
+          {
+            "p1": [
+              -1.0,
+              -3.25,
+              1.0
+            ],
+            "r1": 2.0,
+            "p2": [
+              -1.0,
+              1.5,
+              1.5
+            ],
+            "r2": 2.0
+          }
+        ]
+      },
+      "vaginab1": {
+        "name": "VaginaB1",
+        "shapes": [
+          {
+            "p1": [
+              0.0,
+              1.5,
+              0.5
+            ],
+            "r1": 2.0,
+            "p2": null,
+            "r2": 0.0
+          }
+        ]
+      },
+      "clitoral1": {
+        "name": "Clitoral1",
+        "shapes": [
+          {
+            "p1": [
+              0.0,
+              1.0,
+              1.5
+            ],
+            "r1": 2.0,
+            "p2": null,
+            "r2": 0.0
+          }
+        ]
+      },
+      "l rearthigh": {
+        "name": "NPC L RearThigh",
+        "shapes": [
+          {
+            "p1": [
+              0.0,
+              0.0,
+              -14.0
+            ],
+            "r1": 4.75,
+            "p2": [
+              -0.25,
+              3.5,
+              6.0
+            ],
+            "r2": 3.5
+          }
+        ]
+      },
+      "r rearthigh": {
+        "name": "NPC R RearThigh",
+        "shapes": [
+          {
+            "p1": [
+              0.0,
+              0.0,
+              -14.0
+            ],
+            "r1": 4.75,
+            "p2": [
+              -0.25,
+              3.5,
+              6.0
+            ],
+            "r2": 3.5
+          }
+        ]
+      },
+      "leftwandnode": {
+        "name": "LeftWandNode",
+        "shapes": [
+          {
+            "p1": [
+              0.0,
+              -6.0,
+              -2.0
+            ],
+            "r1": 3.0,
+            "p2": null,
+            "r2": 0.0
+          }
+        ]
+      },
+      "rightwandnode": {
+        "name": "RightWandNode",
+        "shapes": [
+          {
+            "p1": [
+              0.0,
+              -6.0,
+              -2.0
+            ],
+            "r1": 3.0,
+            "p2": null,
+            "r2": 0.0
+          }
+        ]
+      },
+      "head": {
+        "name": "NPC Head [Head]",
+        "shapes": [
+          {
+            "p1": [
+              0.0,
+              3.0,
+              2.0
+            ],
+            "r1": 7.0,
+            "p2": null,
+            "r2": 0.0
+          }
+        ]
+      },
+      "l upperarm": {
+        "name": "NPC L UpperArm [LUar]",
+        "shapes": [
+          {
+            "p1": [
+              -1.75,
+              1.0,
+              1.0
+            ],
+            "r1": 3.5,
+            "p2": [
+              -0.5,
+              0.5,
+              16.0
+            ],
+            "r2": 2.8
+          }
+        ]
+      },
+      "r upperarm": {
+        "name": "NPC R UpperArm [RUar]",
+        "shapes": [
+          {
+            "p1": [
+              1.75,
+              1.0,
+              1.0
+            ],
+            "r1": 3.5,
+            "p2": [
+              0.5,
+              0.5,
+              16.0
+            ],
+            "r2": 2.8
+          }
+        ]
+      },
+      "l forearm": {
+        "name": "NPC L Forearm [LLar]",
+        "shapes": [
+          {
+            "p1": [
+              0.0,
+              1.5,
+              -1.0
+            ],
+            "r1": 2.8,
+            "p2": [
+              0.0,
+              0.75,
+              11.5
+            ],
+            "r2": 2.25
+          }
+        ]
+      },
+      "r forearm": {
+        "name": "NPC R Forearm [RLar]",
+        "shapes": [
+          {
+            "p1": [
+              0.0,
+              1.5,
+              -1.0
+            ],
+            "r1": 2.8,
+            "p2": [
+              0.0,
+              0.75,
+              11.5
+            ],
+            "r2": 2.25
+          }
+        ]
+      },
+      "l hand": {
+        "name": "NPC L Hand [LHnd]",
+        "shapes": [
+          {
+            "p1": [
+              -0.75,
+              -0.5,
+              -0.5
+            ],
+            "r1": 2.0,
+            "p2": null,
+            "r2": 0.0
+          },
+          {
+            "p1": [
+              -0.75,
+              -1.0,
+              5.0
+            ],
+            "r1": 2.0,
+            "p2": null,
+            "r2": 0.0
+          }
+        ]
+      },
+      "r hand": {
+        "name": "NPC R Hand [RHnd]",
+        "shapes": [
+          {
+            "p1": [
+              0.75,
+              -0.5,
+              -0.5
+            ],
+            "r1": 2.0,
+            "p2": null,
+            "r2": 0.0
+          },
+          {
+            "p1": [
+              0.75,
+              -1.0,
+              5.0
+            ],
+            "r1": 2.0,
+            "p2": null,
+            "r2": 0.0
+          }
+        ]
+      },
+      "l finger12": {
+        "name": "NPC L Finger12 [LF12]",
+        "shapes": [
+          {
+            "p1": [
+              -0.2,
+              0.25,
+              2.0
+            ],
+            "r1": 1.5,
+            "p2": null,
+            "r2": 0.0
+          }
+        ]
+      },
+      "r finger12": {
+        "name": "NPC R Finger12 [RF12]",
+        "shapes": [
+          {
+            "p1": [
+              0.2,
+              0.25,
+              2.0
+            ],
+            "r1": 1.5,
+            "p2": null,
+            "r2": 0.0
+          }
+        ]
+      },
+      "l finger42": {
+        "name": "NPC L Finger42 [LF42]",
+        "shapes": [
+          {
+            "p1": [
+              -0.2,
+              0.25,
+              2.0
+            ],
+            "r1": 1.5,
+            "p2": null,
+            "r2": 0.0
+          }
+        ]
+      },
+      "r finger42": {
+        "name": "NPC R Finger42 [RF42]",
+        "shapes": [
+          {
+            "p1": [
+              0.2,
+              0.25,
+              2.0
+            ],
+            "r1": 1.5,
+            "p2": null,
+            "r2": 0.0
+          }
+        ]
+      },
+      "genitals06": {
+        "name": "NPC Genitals06 [Gen06]",
+        "shapes": [
+          {
+            "p1": [
+              0.0,
+              0.5,
+              0.1
+            ],
+            "r1": 1.5,
+            "p2": [
+              0.0,
+              -9.0,
+              0.1
+            ],
+            "r2": 1.75
+          }
+        ]
+      },
+      "l thigh": {
+        "name": "NPC L Thigh [LThg]",
+        "shapes": [
+          {
+            "p1": [
+              0.5,
+              -1.5,
+              9.0
+            ],
+            "r1": 6.5,
+            "p2": [
+              -0.75,
+              -1.0,
+              29.0
+            ],
+            "r2": 3.75
+          }
+        ]
+      },
+      "r thigh": {
+        "name": "NPC R Thigh [RThg]",
+        "shapes": [
+          {
+            "p1": [
+              -0.5,
+              -1.5,
+              9.0
+            ],
+            "r1": 6.5,
+            "p2": [
+              0.75,
+              -1.0,
+              29.0
+            ],
+            "r2": 3.75
+          }
+        ]
+      },
+      "l calf": {
+        "name": "NPC L Calf [LClf]",
+        "shapes": [
+          {
+            "p1": [
+              -0.25,
+              -2.25,
+              1.0
+            ],
+            "r1": 3.5,
+            "p2": [
+              0.0,
+              -0.25,
+              25.0
+            ],
+            "r2": 2.75
+          }
+        ]
+      },
+      "r calf": {
+        "name": "NPC R Calf [RClf]",
+        "shapes": [
+          {
+            "p1": [
+              0.25,
+              -2.25,
+              1.0
+            ],
+            "r1": 3.5,
+            "p2": [
+              0.0,
+              -0.25,
+              25.0
+            ],
+            "r2": 2.75
+          }
+        ]
+      },
+      "l foot": {
+        "name": "NPC L Foot [Lft ]",
+        "shapes": [
+          {
+            "p1": [
+              -0.5,
+              -3.0,
+              1.0
+            ],
+            "r1": 2.5,
+            "p2": [
+              0.0,
+              2.0,
+              11.0
+            ],
+            "r2": 2.5
+          }
+        ]
+      },
+      "r foot": {
+        "name": "NPC R Foot [Rft ]",
+        "shapes": [
+          {
+            "p1": [
+              0.5,
+              -3.0,
+              1.0
+            ],
+            "r1": 2.5,
+            "p2": [
+              0.0,
+              2.0,
+              11.0
+            ],
+            "r2": 2.5
+          }
+        ]
+      }
+    }
+  }
+}

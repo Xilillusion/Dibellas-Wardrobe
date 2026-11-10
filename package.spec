@@ -23,6 +23,7 @@ analysis = Analysis(
             str(ROOT / "assets" / "skeleton_female.nif"),
             "assets",
         ),
+        (str(ROOT / "assets" / "CBPConfig.json"), "assets"),
         (str(ROOT / "locales.json"), "."),
         (str(ROOT / "config.json"), "."),
     ],

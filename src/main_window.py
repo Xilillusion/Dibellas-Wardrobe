@@ -697,6 +697,12 @@ class DibellasWardrobeWindow(QMainWindow):
         s.ssss_radius = cfg_effects.ssss_radius
         s.ssss_falloff_color = cfg_effects.ssss_falloff_color
 
+        cb = self.config.cbpc
+        self.viewport.set_cbpc_gravity(cb.gravity)
+        for group, factor in cb.softness.items():
+            self.viewport.set_cbpc_softness(group, factor)
+        self.viewport.set_cbpc_enabled(cb.enabled)
+
         s.wireframe_overlay = cfg_chk.wireframe_overlay
         s.show_ground_grid = cfg_chk.show_ground_grid
 
@@ -2085,6 +2091,11 @@ class DibellasWardrobeWindow(QMainWindow):
         c.show_mod_dir_filter = self.dir_group.isVisible()
         c.wireframe_overlay = self.chk_wireframe.isChecked()
         c.show_ground_grid = self.chk_grid.isChecked()
+
+        cb = self.config.cbpc
+        cb.enabled = self.viewport.cbpc.enabled
+        cb.gravity = self.viewport.cbpc.gravity
+        cb.softness = self.viewport.cbpc.softness.copy()
 
         self.config.locked_presets = {
             str(page): sorted(paths)

@@ -583,6 +583,7 @@ class AnimationPlaybackToolbar(QFrame):
         layout.addWidget(self.btn_close)
 
         self.lbl_metadata = ElidedLabel("")
+        self.lbl_metadata.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
         self.lbl_metadata.setStyleSheet("color: #f0d59c; font-weight: 600; font-size: 12px;")
         layout.addWidget(self.lbl_metadata, stretch=0)
 
@@ -625,6 +626,7 @@ class AnimationPlaybackToolbar(QFrame):
     def set_metadata(self, label_text: str, duration: float) -> None:
         self._duration = max(0.0, float(duration))
         self.lbl_metadata.setText(label_text)
+        self.lbl_metadata.setMinimumWidth(min(self.lbl_metadata.fontMetrics().horizontalAdvance(label_text), 250))
         self.lbl_metadata.setToolTip(label_text)
         self.update_time(0.0, self._duration)
 

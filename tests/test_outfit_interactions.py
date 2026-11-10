@@ -3,8 +3,10 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
+import numpy as np
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QMimeData, QPoint, QPointF, Qt
@@ -65,6 +67,40 @@ class OutfitInteractionTests(unittest.TestCase):
                           Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
         self.app.sendEvent(viewport, drop)
         self.assertTrue(drop.isAccepted())
+
+    def test_cbpc_softness_sliders_persist_and_restore(self):
+        viewport = self.window.viewport
+        viewport.cbpc.set_mesh_bones("body", ["L Breast01", "NPC L Butt", "NPC Belly"])
+        viewport._sync_cbpc_overlay()
+        for group, value in (("breasts", 40), ("butt", 10), ("belly", 70)):
+            viewport.cbpc_overlay.softness_sliders[group].setValue(value)
+        expected = {"breasts": 2.0, "butt": 0.5, "belly": 3.5, "other": 1.0}
+        self.assertEqual(viewport.cbpc.softness, expected)
+        config_path = self.window.config_path
+        root = self.window.current_root_dir
+        self.window.close()
+        self.assertEqual(json.loads(Path(config_path).read_text(encoding="utf-8"))["cbpc"]["softness"], expected)
+        self.window = DibellasWardrobeWindow(initial_root_dir=root, config_path=config_path)
+        self.assertEqual(self.window.viewport.cbpc.softness, expected)
+        sliders = self.window.viewport.cbpc_overlay.softness_sliders
+        self.assertEqual([sliders[g].value() for g in ("breasts", "butt", "belly")], [40, 10, 70])
+
+    def test_breast_gravity_slider_refreshes_static_and_paused_poses(self):
+        viewport = self.window.viewport
+        viewport.cbpc.set_mesh_bones("body", ["L Breast01", "NPC L Butt"])
+        viewport.set_cbpc_softness("breasts", 0.0)
+        viewport._sync_cbpc_overlay()
+        for paused in (False, True):
+            viewport.anim_engine.active_animation = SimpleNamespace() if paused else None
+            pose = viewport.anim_engine.get_bind_pose()
+            with patch.object(viewport.anim_engine, "evaluate_pose", return_value=pose):
+                viewport.cbpc_overlay.slider.setValue(0)
+                baseline = viewport._current_pose_matrices["L Breast01"].copy()
+                viewport.cbpc_overlay.slider.setValue(90)
+                heavy = viewport._current_pose_matrices["L Breast01"]
+            self.assertLess(float(heavy[2, 3]), float(baseline[2, 3]) - 0.1)
+            self.assertTrue(np.allclose(heavy[:2, 3], baseline[:2, 3]))
+        viewport.anim_engine.active_animation = None
 
     def test_only_first_preset_is_loaded_and_switching_preserves_wardrobe(self):
         self.assertEqual(self.window._checked_nif_paths, {self.keys[0]})

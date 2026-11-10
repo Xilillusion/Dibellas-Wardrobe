@@ -23,6 +23,14 @@ from PySide6.QtGui import QMouseEvent, QSurfaceFormat, QWheelEvent
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 
 from .anim_engine import AnimEngine, LoadedAnimation
+from .cbpc_manager import (
+    SOFTNESS_MAX,
+    SOFTNESS_MIN,
+    GRAVITY_MAX,
+    GRAVITY_MIN,
+    CbpcManager,
+)
+from .cbpc_overlay import CbpcOverlay
 from .nif_loader import MAX_SHADER_BONES, LoadedNifData, ShapeMeshData
 from .texture_resolver import ResolvedTexture, TextureResolver
 
@@ -152,6 +160,17 @@ class OutfitViewportWidget(QOpenGLWidget):
         self._anim_last_tick: float = 0.0
         self._current_pose_matrices: Optional[Dict[str, np.ndarray]] = None
 
+        # CBPC body physics (pure NumPy) and its bottom-right control overlay
+        self.cbpc = CbpcManager(self.anim_engine)
+        self._nif_bone_names: Dict[str, Tuple[str, ...]] = {}
+        self.cbpc_overlay = CbpcOverlay(
+            self, GRAVITY_MIN, GRAVITY_MAX, (SOFTNESS_MIN, SOFTNESS_MAX)
+        )
+        self.cbpc_overlay.enabledChanged.connect(self.set_cbpc_enabled)
+        self.cbpc_overlay.gravityChanged.connect(self.set_cbpc_gravity)
+        self.cbpc_overlay.softnessChanged.connect(self.set_cbpc_softness)
+        self._sync_cbpc_overlay()
+
         self._anim_timer = QTimer(self)
         self._anim_timer.setInterval(16)  # ~60 FPS render/tick loop
         self._anim_timer.timeout.connect(self._on_animation_tick)
@@ -181,6 +200,7 @@ class OutfitViewportWidget(QOpenGLWidget):
     def set_base_body_visible(self, visible: bool) -> None:
         """Toggle visibility of the base mannequin without unloading it."""
         self._base_body_visible = bool(visible)
+        self._refresh_cbpc_sources()
         self._emit_stats()
         self.update()
 
@@ -194,6 +214,10 @@ class OutfitViewportWidget(QOpenGLWidget):
         Upload all shapes of `nif_data` to GPU VRAM under `key` (or queue if GL is not yet initialized).
         """
         self._nif_visibility.setdefault(key, True)
+        self._nif_bone_names[key] = tuple(
+            dict.fromkeys(b for sh in nif_data.shapes if sh.is_skinned for b in sh.bone_names)
+        )
+        self._refresh_cbpc_sources()
         if self.ctx is None:
             self._pending_nifs[key] = nif_data
             return
@@ -214,6 +238,8 @@ class OutfitViewportWidget(QOpenGLWidget):
         """Remove a `.nif` and release its GPU buffers/textures from VRAM."""
         self._pending_nifs.pop(key, None)
         self._nif_visibility.pop(key, None)
+        self._nif_bone_names.pop(key, None)
+        self._refresh_cbpc_sources()
         if self.ctx is not None and key in self._gpu_nifs:
             self.makeCurrent()
             try:
@@ -226,6 +252,7 @@ class OutfitViewportWidget(QOpenGLWidget):
     def set_nif_visible(self, key: str, visible: bool) -> None:
         """Toggle a loaded NIF's visibility without releasing its scene resources."""
         self._nif_visibility[key] = bool(visible)
+        self._refresh_cbpc_sources()
         self._emit_stats()
         self.update()
 
@@ -372,7 +399,7 @@ class OutfitViewportWidget(QOpenGLWidget):
         loaded = self.anim_engine.load_animation(hkx_path)
         self._anim_current_time = 0.0
         self._anim_last_tick = time.perf_counter()
-        self._current_pose_matrices = self.anim_engine.evaluate_pose(0.0)
+        self._update_pose(0.0, 0.0, reset=True)
         if auto_play:
             self._anim_playing = True
             self._anim_timer.start()
@@ -424,7 +451,7 @@ class OutfitViewportWidget(QOpenGLWidget):
             return
         self._anim_current_time = max(0.0, min(float(time_sec), anim.duration))
         self._anim_last_tick = time.perf_counter()
-        self._current_pose_matrices = self.anim_engine.evaluate_pose(self._anim_current_time)
+        self._update_pose(self._anim_current_time, 0.0, reset=True)
         self.animationTimeChanged.emit(self._anim_current_time, anim.duration)
         self.update()
 
@@ -438,6 +465,7 @@ class OutfitViewportWidget(QOpenGLWidget):
         self._anim_current_time = 0.0
         self.anim_engine.clear_animation()
         self._current_pose_matrices = None
+        self._update_static_pose()
         self.animationStateChanged.emit(False)
         self.animationTimeChanged.emit(0.0, 0.0)
         self.animationStopped.emit()
@@ -453,17 +481,96 @@ class OutfitViewportWidget(QOpenGLWidget):
         delta_time = max(0.0, min(0.1, now - self._anim_last_tick))
         self._anim_last_tick = now
 
+        looped = False
         if anim.duration > 0.0:
             next_time = self._anim_current_time + delta_time
             if next_time >= anim.duration:
                 next_time = math.fmod(next_time, anim.duration)
+                looped = True
             self._anim_current_time = next_time
         else:
             self._anim_current_time = 0.0
 
-        self._current_pose_matrices = self.anim_engine.evaluate_pose(self._anim_current_time)
+        self._update_pose(self._anim_current_time, delta_time, reset=looped)
         self.animationTimeChanged.emit(self._anim_current_time, anim.duration)
         self.update()
+
+    def _update_static_pose(self) -> None:
+        """Without an animation, run CBPC on the bind pose and let it settle (gravity sag)."""
+        if self.anim_engine.active_animation is not None:
+            return
+        if not self.cbpc.is_active:
+            self._current_pose_matrices = None
+            return
+        pose = self.anim_engine.evaluate_pose(0.0)
+        self.cbpc.reset(pose)
+        palette = pose
+        for _ in range(60):
+            palette = self.cbpc.update(pose, 1.0 / 30.0)
+        self._current_pose_matrices = palette
+
+    def _update_pose(self, time_sec: float, dt: float, reset: bool = False) -> None:
+        """Evaluate the animated pose and blend CBPC physics deltas into it."""
+        pose = self.anim_engine.evaluate_pose(time_sec)
+        if reset:
+            self.cbpc.reset(pose)
+        self._current_pose_matrices = self.cbpc.update(pose, dt)
+
+    # ------------------------------------------------------------------
+    # CBPC physics control
+    # ------------------------------------------------------------------
+
+    def set_cbpc_enabled(self, enabled: bool) -> None:
+        self.cbpc.set_enabled(enabled)
+        if enabled:
+            self._update_pose(self._anim_current_time, 0.0, reset=True)
+        self._refresh_pose()
+
+    def set_cbpc_gravity(self, factor: float) -> None:
+        """Adjust breast rest position without rebuilding or restarting animation."""
+        self.cbpc.set_gravity(factor)
+        self._refresh_pose()
+
+    def set_cbpc_softness(self, group: str, factor: float) -> None:
+        self.cbpc.set_softness(group, factor)
+        self._refresh_pose()
+
+    def _refresh_pose(self) -> None:
+        if self.anim_engine.active_animation is not None:
+            self._update_pose(self._anim_current_time, 0.0)
+        else:
+            self._update_static_pose()
+        self._sync_cbpc_overlay()
+        self.update()
+
+    def _refresh_cbpc_sources(self) -> None:
+        """Recompute CBPC bones from the visible meshes (Mesh Bones ∩ CBPC config)."""
+        sources = {
+            key: names
+            for key, names in self._nif_bone_names.items()
+            if self._nif_visibility.get(key, True)
+            and (key != self.BASE_BODY_KEY or self._base_body_visible)
+        }
+        before = self.cbpc.active_bones
+        self.cbpc.set_mesh_bones_bulk(sources)
+        if self.cbpc.active_bones != before:
+            self._refresh_pose()
+        else:
+            self._sync_cbpc_overlay()
+
+    def _sync_cbpc_overlay(self) -> None:
+        self.cbpc_overlay.sync(
+            self.cbpc.enabled,
+            self.cbpc.has_physics,
+            self.cbpc.gravity,
+            len(self.cbpc.active_bones),
+            self.cbpc.softness,
+        )
+        self.cbpc_overlay.reposition()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self.cbpc_overlay.reposition()
 
     def grab_viewport_image(self) -> np.ndarray:
         """Capture the current viewport framebuffer as an RGBA8 numpy array (for verification/export)."""
@@ -575,8 +682,11 @@ class OutfitViewportWidget(QOpenGLWidget):
 
         self._setup_global_shader_uniforms(proj, view, model, mv_inv, normal_mat)
 
-        if self.anim_engine.active_animation is not None and self._current_pose_matrices is None:
-            self._current_pose_matrices = self.anim_engine.evaluate_pose(self._anim_current_time)
+        if self._current_pose_matrices is None:
+            if self.anim_engine.active_animation is not None:
+                self._update_pose(self._anim_current_time, 0.0, reset=True)
+            else:
+                self._update_static_pose()
 
         # Pass 1: Opaque & Alpha-Cutout meshes
         self.ctx.enable(moderngl.DEPTH_TEST)
@@ -1060,8 +1170,7 @@ class OutfitViewportWidget(QOpenGLWidget):
         self._set_uniform("bWireframe", bool(wireframe))
 
         use_skinning = (
-            self.anim_engine.active_animation is not None
-            and self._current_pose_matrices is not None
+            self._current_pose_matrices is not None
             and item.shape_data.is_skinned
             and len(item.mapped_bone_names) > 0
             and self.bone_ubo is not None

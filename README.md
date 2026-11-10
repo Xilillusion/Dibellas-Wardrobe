@@ -13,6 +13,7 @@ Dibella's Wardrobe is a desktop previewer for Skyrim Special Edition and Anniver
 - Keep selected outfits in the wardrobe, lock outfits to reload them at startup, and hide or show individual outfits.
 - Adjust lighting, shader display options, and language in Settings. Translation choices are loaded from `locales.json`.
 - Tune screen-space reflections (SSR), ambient occlusion (GTAO), and screen-space subsurface scattering (SSSS) in Settings.
+- Adjust CBPC body physics using the viewport's breast-gravity and per-area softness controls.
 
 ## Advanced viewport effects
 
@@ -106,6 +107,21 @@ Options:
    - `Ctrl+F`: toggle the mod-directory filter
 
 Presets are saved in the configuration. The first preset is loaded at startup, and selecting another preset switches its outfits while retaining other wardrobe outfits. Unavailable preset mesh paths are removed from the configuration.
+
+The CBPC overlay controls breast gravity and separate softness values for breasts, butt and belly.
+Each softness slider ranges from 0× (motion off for that area) to 5× (softer, slower response);
+1× is the baseline. Breast gravity lowers the breast rest position without changing spring
+stiffness, damping, or the motion response; it remains effective at 0× breast softness.
+Breast chains use progressively larger rest drops toward the tip and follow the base during
+motion. Torso collision does not directly push the tip; external collider contacts take
+precedence over chain following.
+Higher softness reduces stiffness and damping and expands displacement limits, producing
+a slower, less damped response. For non-breast bones, softness also changes gravity.
+At 1× the non-breast gravity and displacement-limit multipliers are 1.2. Other physics bones retain their saved
+softness independently of these sliders (1× by default). CBPC settings are saved in the
+configuration; an existing single softness value is applied to all areas and other bones.
+Legacy bounce settings are mapped to softness, but the new scaling does not reproduce their
+previous dynamics exactly.
 
 ## Configuration and languages
 

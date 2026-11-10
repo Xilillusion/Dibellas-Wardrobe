@@ -4,3 +4,4 @@ build/
 dist/
 sample/
 ref/
+.pytest_cache/
