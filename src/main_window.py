@@ -81,6 +81,8 @@ from .viewport import OutfitViewportWidget
 
 log = logging.getLogger("dibellas_wardrobe.ui")
 
+_ROLE_SEARCH_FOLDER = Qt.ItemDataRole.UserRole + 9
+
 __all__ = [
     "DibellasWardrobeWindow",
     "AddedNifRowWidget",
@@ -1097,11 +1099,9 @@ class DibellasWardrobeWindow(QMainWindow):
 
         directory_contains_nif_or_hkx.cache_clear()
         self._updating_tree = True
-        self.file_tree.clear()
+        self._clear_file_tree()
         self._updating_tree = False
 
-        self._search_groups = {}
-        self._search_folder_groups = {}
         self._search_thread = NifSearchThread(
             root_dir=self.current_root_dir,
             query=query,
@@ -1126,6 +1126,7 @@ class DibellasWardrobeWindow(QMainWindow):
         if group_name not in self._search_groups:
             grp_item = QTreeWidgetItem(self.file_tree, [group_name])
             grp_item.setForeground(0, QColor("#f0d59c"))
+            grp_item.setData(0, _ROLE_SEARCH_FOLDER, True)
             self._search_groups[group_name] = grp_item
 
         parent_item = self._search_groups[group_name]
@@ -1141,6 +1142,7 @@ class DibellasWardrobeWindow(QMainWindow):
                 folder_item = QTreeWidgetItem(parent_item, [folder_name])
                 folder_item.setForeground(0, QColor("#d7c7a6"))
                 folder_item.setData(0, ROLE_IS_LOADED, True)
+                folder_item.setData(0, _ROLE_SEARCH_FOLDER, True)
                 self._search_folder_groups[folder_key] = folder_item
             parent_item = folder_item
 
@@ -1156,15 +1158,13 @@ class DibellasWardrobeWindow(QMainWindow):
             self._auto_expand_search_item(group_item)
 
     def _auto_expand_search_item(self, item: QTreeWidgetItem) -> None:
-        if item.childCount() != 1:
-            return
-
-        child = item.child(0)
-        if not child.data(0, ROLE_IS_LOADED):
-            return
-
-        child.setExpanded(True)
-        self._auto_expand_search_item(child)
+        with QSignalBlocker(self.file_tree):
+            while item.childCount() == 1:
+                child = item.child(0)
+                if not child.data(0, _ROLE_SEARCH_FOLDER):
+                    break
+                child.setExpanded(True)
+                item = child
 
     def populate_file_tree(self) -> None:
         if self._search_thread and self._search_thread.isRunning():
@@ -1172,7 +1172,7 @@ class DibellasWardrobeWindow(QMainWindow):
             self._search_thread.wait(300)
 
         self._updating_tree = True
-        self.file_tree.clear()
+        self._clear_file_tree()
 
         if self.current_root_dir is None:
             self._updating_tree = False
@@ -1210,7 +1210,7 @@ class DibellasWardrobeWindow(QMainWindow):
                         mod_root=Path(entry.path) if is_mo2_root else None,
                     )
                 elif entry.is_file():
-                    if not is_filtered_nif_filename(entry.name, hide_0):
+                    if not is_filtered_nif_filename(entry.name, hide_0, hide_gnd_folder):
                         self._create_nif_tree_item(self.file_tree, entry.name, entry.path)
                     elif is_animation_hkx(entry.name):
                         self._create_hkx_tree_item(self.file_tree, entry.name, entry.path)
@@ -1221,7 +1221,17 @@ class DibellasWardrobeWindow(QMainWindow):
             self._ensure_overwrite_fallback_item()
         self._updating_tree = False
 
+    def _clear_file_tree(self) -> None:
+        self._highlighted_tree_items.clear()
+        self._search_groups.clear()
+        self._search_folder_groups.clear()
+        self.file_tree.clear()
+
     def _on_tree_item_expanded(self, item: QTreeWidgetItem) -> None:
+        if item.data(0, _ROLE_SEARCH_FOLDER):
+            self._auto_expand_search_item(item)
+            return
+
         if item.data(0, ROLE_IS_LOADED):
             return
 
@@ -1298,7 +1308,9 @@ class DibellasWardrobeWindow(QMainWindow):
                         ),
                     )
                     added_any = True
-                elif name.casefold().endswith(".nif") and not is_filtered_nif_filename(name, hide_0):
+                elif name.casefold().endswith(".nif") and not is_filtered_nif_filename(
+                    name, hide_0, hide_gnd_folder
+                ):
                     display_name = f"[{name}]" if is_overwritten else name
                     self._create_nif_tree_item(item, display_name, str(entry_path))
                     added_any = True
@@ -1365,13 +1377,13 @@ class DibellasWardrobeWindow(QMainWindow):
             return
 
         nif_key = item.data(0, ROLE_NIF_PATH)
-        if not nif_key or nif_key in self._locked_nif_paths:
+        if not nif_key or nif_key in self._locked_presets.get(self._current_locked_preset, set()):
             return
 
         if nif_key not in self._checked_nif_paths:
             self._load_and_attach_outfit_nif(nif_key)
         else:
-            self._detach_outfit_nif(nif_key)
+            self._detach_outfit_nif(nif_key, remove_from_presets=False)
 
     def _on_tree_item_double_clicked(self, item: QTreeWidgetItem, _column: int) -> None:
         if self._updating_tree:
@@ -1447,14 +1459,15 @@ class DibellasWardrobeWindow(QMainWindow):
                 )
             return False
 
-    def _detach_outfit_nif(self, nif_key: str) -> None:
+    def _detach_outfit_nif(self, nif_key: str, remove_from_presets: bool = True) -> None:
         if (
             hasattr(self, "texture_popover")
             and self.texture_popover.isVisible()
             and self.texture_popover.current_nif_key == nif_key
         ):
             self.texture_popover.close()
-        was_locked = nif_key in self._locked_nif_paths
+        was_locked = remove_from_presets and nif_key in self._locked_nif_paths
+        previous_page = self._current_locked_preset
         self._checked_nif_paths.discard(nif_key)
         self._loaded_nif_cache.pop(nif_key, None)
         self._nif_visibility.pop(nif_key, None)
@@ -1465,27 +1478,30 @@ class DibellasWardrobeWindow(QMainWindow):
         locked_item = self._locked_nif_items.pop(nif_key, None)
         if locked_item is not None:
             self.locked_nifs_list.takeItem(self.locked_nifs_list.row(locked_item))
-        for page in tuple(self._locked_presets):
-            self._locked_presets[page].discard(nif_key)
-            self._remove_empty_locked_preset(page)
-        self._locked_nif_paths = set().union(*self._locked_presets.values())
+        if remove_from_presets:
+            for page in tuple(self._locked_presets):
+                self._locked_presets[page].discard(nif_key)
+                self._remove_empty_locked_preset(page)
+            self._locked_nif_paths = set().union(*self._locked_presets.values())
         if was_locked:
             self.save_config()
+        if self._current_locked_preset != previous_page:
+            self._load_current_preset()
+            self._refresh_added_nifs()
         self._update_added_nif_count()
 
     def uncheck_all_nifs(self) -> None:
         """Remove unlocked outfit meshes while preserving the locked wardrobe."""
-        for nif_key in tuple(self._checked_nif_paths - self._locked_nif_paths):
-            self._detach_outfit_nif(nif_key)
+        current_preset = self._locked_presets.get(self._current_locked_preset, set())
+        for nif_key in tuple(self._checked_nif_paths - current_preset):
+            self._detach_outfit_nif(nif_key, remove_from_presets=False)
         self._refresh_added_nifs()
 
     def _mod_name_for_nif(self, nif_key: str) -> str:
         return get_mod_name_for_nif(nif_key, self.mod_scanner, self.current_root_dir)
 
     def _add_nif_to_wardrobe_list(self, nif_key: str) -> None:
-        locked = nif_key in self._locked_nif_paths
-        if locked and nif_key not in self._locked_presets.get(self._current_locked_preset, set()):
-            return
+        locked = nif_key in self._locked_presets.get(self._current_locked_preset, set())
         target_list = self.locked_nifs_list if locked else self.added_nifs_list
         target_items = self._locked_nif_items if locked else self._added_nif_items
         if nif_key in target_items:
@@ -1506,16 +1522,18 @@ class DibellasWardrobeWindow(QMainWindow):
             on_select=lambda k=nif_key: self._select_nif_in_tree(k),
             on_toggle_visibility=lambda _checked=False, k=nif_key: self._toggle_nif_visibility(k),
             on_double_click=lambda k=nif_key: (
-                self._unlock_nif(k) if locked else self._lock_nif(k)
+                self._unlock_nif(k) if locked
+                else self._detach_outfit_nif(k, remove_from_presets=False)
             ),
             on_texture_select=lambda anchor, k=nif_key: self._open_nif_texture_popover(k, anchor),
+            on_right_click=None if locked else lambda k=nif_key: self._lock_nif(k),
             texture_tooltip=self._t("tex_change_tip"),
             visible=self._nif_visibility.get(nif_key, True),
             hide_tooltip=self._t("hide_nif"),
             show_tooltip=self._t("show_nif"),
         )
         row_widget.setToolTip(
-            self._t("double_click_unlock") if locked else self._t("double_click_lock")
+            self._t("double_click_unlock") if locked else self._t("wardrobe_actions")
         )
         vp_width = max(100, target_list.viewport().width())
         item.setSizeHint(QSize(vp_width, 26))
@@ -1549,9 +1567,9 @@ class DibellasWardrobeWindow(QMainWindow):
             )
             for index in range(self.locked_nifs_list.count())
         )
-        locked_list_height = locked_row_height + 2 * self.locked_nifs_list.frameWidth() + 2
+        locked_list_height = max(36, locked_row_height + 2 * self.locked_nifs_list.frameWidth() + 2)
         self.locked_nifs_list.setFixedHeight(locked_list_height)
-        self.locked_nifs_list.setVisible(bool(self._locked_nif_items))
+        self.locked_nifs_list.setVisible(True)
 
     # ------------------------------------------------------------------
     # Presets
@@ -1588,11 +1606,25 @@ class DibellasWardrobeWindow(QMainWindow):
         page = self.locked_preset_combo.itemData(index)
         if not isinstance(page, int) or page == self._current_locked_preset:
             return
+        self._activate_locked_preset(page)
+
+    def _activate_locked_preset(self, page: int) -> None:
         previous_page = self._current_locked_preset
+        previous_paths = self._locked_presets.get(previous_page, set()).copy()
+        next_paths = self._locked_presets[page]
         self._current_locked_preset = page
+        for nif_key in sorted(previous_paths - next_paths):
+            if nif_key in self._checked_nif_paths:
+                self._detach_outfit_nif(nif_key, remove_from_presets=False)
+        self._load_current_preset()
         self._remove_empty_locked_preset(previous_page)
         self._refresh_added_nifs()
         self.save_config()
+
+    def _load_current_preset(self) -> None:
+        paths = self._locked_presets.get(self._current_locked_preset, set())
+        for nif_key in sorted(paths - self._checked_nif_paths):
+            self._load_and_attach_outfit_nif(nif_key)
 
     def _rename_locked_preset(self) -> None:
         page = self._current_locked_preset
@@ -1618,10 +1650,8 @@ class DibellasWardrobeWindow(QMainWindow):
         while page in self._locked_presets:
             page += 1
         self._locked_presets[page] = set()
-        self._current_locked_preset = page
+        self._activate_locked_preset(page)
         self._refresh_locked_preset_selector()
-        self._refresh_added_nifs()
-        self.save_config()
 
     def _remove_empty_locked_preset(self, page: int) -> None:
         if self._locked_presets.get(page) or len(self._locked_presets) <= 1:
@@ -1714,12 +1744,15 @@ class DibellasWardrobeWindow(QMainWindow):
             self._locked_nif_paths = set().union(*self._locked_presets.values())
             self.save_config()
 
-        for nif_key in sorted(self._locked_nif_paths):
+        for nif_key in sorted(self._locked_presets.get(self._current_locked_preset, set())):
             self._load_and_attach_outfit_nif(nif_key, show_error=False)
         self._startup_locked_nif_refresh_pending = bool(self._locked_nif_items)
 
     def _lock_nif(self, nif_key: str) -> None:
-        if nif_key not in self._checked_nif_paths or nif_key in self._locked_nif_paths:
+        if (
+            nif_key not in self._checked_nif_paths
+            or nif_key in self._locked_presets.get(self._current_locked_preset, set())
+        ):
             return
         self._locked_presets.setdefault(self._current_locked_preset, set()).add(nif_key)
         self._locked_nif_paths.add(nif_key)
@@ -1737,19 +1770,24 @@ class DibellasWardrobeWindow(QMainWindow):
     def _on_nif_dropped_on_wardrobe(self, nif_key: str) -> None:
         if nif_key in self._locked_presets.get(self._current_locked_preset, set()):
             self._unlock_nif(nif_key)
+        elif Path(nif_key).suffix.casefold() == ".nif" and nif_key not in self._checked_nif_paths:
+            self._load_and_attach_outfit_nif(nif_key)
 
     def _on_nif_dropped_on_mods(self, nif_key: str) -> None:
         if nif_key in self._checked_nif_paths:
             self._detach_outfit_nif(nif_key)
 
     def _unlock_nif(self, nif_key: str) -> None:
-        page_paths = self._locked_presets.get(self._current_locked_preset)
+        previous_page = self._current_locked_preset
+        page_paths = self._locked_presets.get(previous_page)
         if page_paths is None or nif_key not in page_paths:
             return
         page_paths.discard(nif_key)
         if not any(nif_key in paths for paths in self._locked_presets.values()):
             self._locked_nif_paths.discard(nif_key)
-        self._remove_empty_locked_preset(self._current_locked_preset)
+        self._remove_empty_locked_preset(previous_page)
+        if self._current_locked_preset != previous_page:
+            self._load_current_preset()
         self.save_config()
         self._refresh_added_nifs()
 

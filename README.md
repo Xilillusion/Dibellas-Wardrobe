@@ -6,7 +6,7 @@ Dibella's Wardrobe is a desktop previewer for Skyrim Special Edition and Anniver
 
 - Preview multiple Skyrim `.nif` meshes together in an interactive OpenGL viewport.
 - Play Skyrim `.hkx` animations (`meshes/actors/character/animations/...`) with real-time GPU Linear Blend Skinning driven by `skeleton_female.nif` and a bottom playback toolbar (Play/Pause, Loop, Timeline Scrubber, and Stop/Reset to bind pose).
-- Browse a mod directory or Mod Organizer 2 (MO2) `mods` folder, with filters for low-weight meshes and `gnd` folders.
+- Browse a mod directory or Mod Organizer 2 (MO2) `mods` folder, with filters for low-weight meshes, `gnd` folders, and `_gnd.nif` files.
 - Resolve material textures from the mesh's mod, nearby folders, registered roots, and MO2 `overwrite`.
 - Merge matching MO2 `overwrite/meshes` NIFs into their owning mod in the tree. Overwritten files are shown in brackets; unmatched overwrite meshes appear under `[Overwrite]`.
 - Show CharGen-exported NIFs from `overwrite/SKSE/Plugins/CharGen` in the fallback list. Other overwrite folders are not included in the NIF tree.
@@ -31,11 +31,14 @@ These are screen-space approximations evaluated from the rendered meshes' color 
 From the project directory, create and activate a virtual environment, then install the dependencies:
 
 ```powershell
-py -3.10 -m venv .venv
+py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
+
+The commands above use Python 3.12; Python 3.10 and newer are supported.
+Package managers select releases compatible with the active Python version.
 
 If PowerShell prevents virtual-environment activation, run the Python executable directly instead:
 
@@ -93,7 +96,7 @@ Options:
 
 1. Select a directory using **Browse Folder** (or start with `--root`).
 2. Expand folders in the Outfit Meshes tree. Click a `.nif` to add it to or remove it from the preview.
-3. Use the Wardrobe list to select an outfit in the tree, toggle its visibility, or clear unlocked outfits. Double-click an outfit to lock or unlock it.
+3. Drag outfits from Mods to Wardrobe or the current preset. In Wardrobe, double-click an outfit to remove it or right-click it to add it to the current preset. Drag preset outfits to Wardrobe to unlock them, or drag outfits to Mods to remove them.
 4. Adjust camera and rendering settings as needed:
    - Left-drag: orbit
    - Right-drag, or Shift + left-drag: pan
@@ -102,7 +105,7 @@ Options:
    - `Ctrl+O`: choose a mod directory
    - `Ctrl+F`: toggle the mod-directory filter
 
-Locked outfits are saved in the configuration and loaded when the application starts. Unavailable locked mesh paths are removed from the configuration.
+Presets are saved in the configuration. The first preset is loaded at startup, and selecting another preset switches its outfits while retaining other wardrobe outfits. Unavailable preset mesh paths are removed from the configuration.
 
 ## Configuration and languages
 

@@ -1,0 +1,144 @@
+import json
+import os
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+from PySide6.QtCore import QMimeData, QPoint, QPointF, Qt
+from PySide6.QtGui import QDragEnterEvent, QDragMoveEvent, QDropEvent
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication
+
+from src.main_window import DibellasWardrobeWindow
+from src.ui_widgets import NIF_DRAG_MIME_TYPE
+
+
+class OutfitInteractionTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        root = Path(self.temp.name)
+        self.files = [root / f"outfit{i}.nif" for i in range(1, 5)]
+        for path in self.files:
+            path.touch()
+        self.keys = [str(path.resolve()) for path in self.files]
+        config = root / "config.json"
+        config.write_text(json.dumps({
+            "locked_presets": {"1": [self.keys[0]], "2": [self.keys[1]], "3": [self.keys[2]]},
+        }), encoding="utf-8")
+        self.load_patch = patch("src.main_window.NifLoader.load_nif", return_value=object())
+        self.add_patch = patch("src.viewport.OutfitViewportWidget.add_nif")
+        self.remove_patch = patch("src.viewport.OutfitViewportWidget.remove_nif")
+        self.load_patch.start()
+        self.add = self.add_patch.start()
+        self.remove = self.remove_patch.start()
+        self.window = DibellasWardrobeWindow(initial_root_dir=root, config_path=config)
+        self.window.show()
+        self.app.processEvents()
+
+    def tearDown(self):
+        self.window.close()
+        self.app.processEvents()
+        self.remove_patch.stop()
+        self.add_patch.stop()
+        self.load_patch.stop()
+        self.temp.cleanup()
+
+    def drop_nif(self, target, key):
+        mime = QMimeData()
+        mime.setData(NIF_DRAG_MIME_TYPE, key.encode("utf-8"))
+        viewport = target.viewport()
+        point = QPoint(5, 5)
+        enter = QDragEnterEvent(point, Qt.DropAction.MoveAction, mime,
+                                Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+        self.app.sendEvent(viewport, enter)
+        move = QDragMoveEvent(point, Qt.DropAction.MoveAction, mime,
+                              Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+        self.app.sendEvent(viewport, move)
+        drop = QDropEvent(QPointF(point), Qt.DropAction.MoveAction, mime,
+                          Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+        self.app.sendEvent(viewport, drop)
+        self.assertTrue(drop.isAccepted())
+
+    def test_only_first_preset_is_loaded_and_switching_preserves_wardrobe(self):
+        self.assertEqual(self.window._checked_nif_paths, {self.keys[0]})
+        self.assertEqual(self.window.locked_preset_combo.count(), 3)
+        self.window._on_nif_dropped_on_wardrobe(self.keys[3])
+        self.window.locked_preset_combo.setCurrentIndex(
+            self.window.locked_preset_combo.findData(2)
+        )
+        self.assertEqual(self.window._checked_nif_paths, {self.keys[1], self.keys[3]})
+        self.assertEqual(self.window._locked_presets[1], {self.keys[0]})
+        self.assertEqual(self.window._locked_presets[2], {self.keys[1]})
+        self.window.locked_preset_combo.setCurrentIndex(
+            self.window.locked_preset_combo.findData(1)
+        )
+        self.assertEqual(self.window._checked_nif_paths, {self.keys[0], self.keys[3]})
+
+    def test_tree_drag_and_empty_preset_drop(self):
+        item = self.window.file_tree.topLevelItem(3)
+        self.window.file_tree.setCurrentItem(item)
+        with patch("src.ui_widgets._start_nif_drag") as drag:
+            self.window.file_tree.startDrag(Qt.DropAction.MoveAction)
+            drag.assert_called_once_with(self.window.file_tree, self.keys[3])
+        self.window._add_locked_preset()
+        self.app.processEvents()
+        self.assertFalse(self.window.locked_nifs_list.isHidden())
+        self.drop_nif(self.window.locked_nifs_list, self.keys[3])
+        self.assertIn(self.keys[3], self.window._locked_presets[4])
+        self.assertIn(self.keys[3], self.window._checked_nif_paths)
+
+    def test_wardrobe_drop_right_click_and_double_click(self):
+        self.drop_nif(self.window.added_nifs_list, self.keys[3])
+        item = self.window._added_nif_items[self.keys[3]]
+        row = self.window.added_nifs_list.itemWidget(item)
+        QTest.mouseClick(row, Qt.MouseButton.RightButton)
+        self.assertIn(self.keys[3], self.window._locked_presets[1])
+        self.window._on_nif_dropped_on_wardrobe(self.keys[3])
+        row = self.window.added_nifs_list.itemWidget(
+            self.window._added_nif_items[self.keys[3]]
+        )
+        QTest.mouseDClick(row, Qt.MouseButton.LeftButton)
+        self.assertNotIn(self.keys[3], self.window._checked_nif_paths)
+
+    def test_removing_wardrobe_item_preserves_inactive_preset(self):
+        self.window._on_nif_dropped_on_wardrobe(self.keys[1])
+        row = self.window.added_nifs_list.itemWidget(
+            self.window._added_nif_items[self.keys[1]]
+        )
+        QTest.mouseDClick(row, Qt.MouseButton.LeftButton)
+        self.assertNotIn(self.keys[1], self.window._checked_nif_paths)
+        self.assertIn(self.keys[1], self.window._locked_presets[2])
+
+    def test_unlock_last_preset_outfit_loads_next_preset(self):
+        self.window._on_nif_dropped_on_wardrobe(self.keys[0])
+        self.assertEqual(self.window._current_locked_preset, 2)
+        self.assertEqual(self.window._checked_nif_paths, {self.keys[0], self.keys[1]})
+        self.assertIn(self.keys[0], self.window._added_nif_items)
+        self.assertIn(self.keys[1], self.window._locked_nif_items)
+
+    def test_remove_last_preset_outfit_loads_next_preset(self):
+        self.window._on_nif_dropped_on_mods(self.keys[0])
+        self.assertEqual(self.window._current_locked_preset, 2)
+        self.assertEqual(self.window._checked_nif_paths, {self.keys[1]})
+        self.assertIn(self.keys[1], self.window._locked_nif_items)
+
+    def test_same_outfit_can_belong_to_multiple_presets(self):
+        self.window._on_nif_dropped_on_preset(self.keys[1])
+        self.assertIn(self.keys[1], self.window._locked_presets[1])
+        self.assertIn(self.keys[1], self.window._locked_presets[2])
+        self.window.locked_preset_combo.setCurrentIndex(
+            self.window.locked_preset_combo.findData(2)
+        )
+        self.assertEqual(self.window._checked_nif_paths, {self.keys[1]})
+        self.assertIn(self.keys[1], self.window._locked_nif_items)
+
+
+if __name__ == "__main__":
+    unittest.main()

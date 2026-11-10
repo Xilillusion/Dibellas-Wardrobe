@@ -18,12 +18,17 @@ from .mod_scanner import ModScanner, is_animation_hkx
 log = logging.getLogger("dibellas_wardrobe.asset_scanner")
 
 
-def is_filtered_nif_filename(filename: str, hide_low_weight: bool = True) -> bool:
+def is_filtered_nif_filename(
+    filename: str, hide_low_weight: bool = True, hide_gnd: bool = False
+) -> bool:
     """Return True if `filename` should be hidden by the active smart NIF filters."""
     lower = filename.lower()
     if not lower.endswith(".nif"):
         return True
-    return hide_low_weight and lower[:-4].endswith("_0")
+    stem = lower[:-4]
+    return (hide_low_weight and stem.endswith("_0")) or (
+        hide_gnd and stem.endswith("_gnd")
+    )
 
 
 def is_filtered_folder_name(folder_name: str, hide_gnd_folders: bool = True) -> bool:
@@ -216,7 +221,7 @@ class NifSearchThread(QThread):
                         return
                     lower_fname = fname.casefold()
                     if lower_fname.endswith(".nif"):
-                        if is_filtered_nif_filename(fname, self.hide_0):
+                        if is_filtered_nif_filename(fname, self.hide_0, self.hide_gnd_folder):
                             continue
                     elif is_animation_hkx(fname, rel_parts if "rel_parts" in locals() else ()):
                         pass

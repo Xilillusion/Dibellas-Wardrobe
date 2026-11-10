@@ -1,0 +1,678 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<system xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="description.xsd">
+	<!-- ground -->
+	<per-triangle-shape name="VirtualGround">
+		<margin>4</margin>
+		<prenetration>4</prenetration>
+		<tag>ground</tag>
+	</per-triangle-shape>
+	
+	<!-- body -->
+	<bone-default>
+		<margin-multiplier>0.1</margin-multiplier>
+	</bone-default>
+		
+
+
+	<bone name="NPC Spine [Spn0]"/>
+	<bone name="NPC Spine2 [Spn2]"/>
+	<bone name="NPC Spine1 [Spn1]"/>
+	<bone name="NPC Pelvis [Pelv]"/>
+	<bone name="NPC Head [Head]"/>
+	<bone name="NPC L Clavicle [LClv]"/>
+	<bone name="NPC R Clavicle [RClv]"/>
+	<bone name="NPC L Breast"/>
+	<bone name="NPC R Breast"/>
+	<bone name="NPC L Breast01"/>
+	<bone name="NPC R Breast01"/>
+	<bone name="NPC L Forearm [LLar]"/>
+	<bone name="NPC R Forearm [RLar]"/>
+	<bone name="NPC L ForearmTwist1 [LLt1]"/>
+	<bone name="NPC R ForearmTwist1 [RLt1]"/>
+	<bone name="NPC L ForearmTwist2 [LLt2]"/>
+	<bone name="NPC R ForearmTwist2 [RLt2]"/>
+	<bone name="NPC L UpperArm [LUar]"/>
+	<bone name="NPC R UpperArm [RUar]"/>
+	<bone name="NPC L UpperarmTwist1 [LUt1]"/>
+	<bone name="NPC R UpperarmTwist1 [RUt1]"/>
+	<bone name="NPC L UpperarmTwist2 [LUt2]"/>
+	<bone name="NPC R UpperarmTwist2 [RUt2]"/>
+	<bone name="NPC L Butt"/>
+	<bone name="NPC R Butt"/>
+	<bone name="NPC Belly"/>
+	<bone name="NPC L Hand [LHnd]"/>
+	<bone name="NPC R Hand [RHnd]"/>
+
+
+	
+	<bone name="ekurwa_00"/>
+	<bone name="ekurwa_10"/>
+	<bone name="ekurwa_20"/>
+	<bone name="ekurwa_30"/>	
+	<bone name="ekurwa_40"/>	
+	<bone name="ekurwa_50"/>
+	<bone name="ekurwa_60"/>
+	<bone name="ekurwa_70"/>
+	<bone name="ekurwa_80"/>
+	
+	<bone-default>
+		<margin-multiplier>0.2</margin-multiplier>
+	</bone-default>		
+	<bone name="NPC L Thigh [LThg]"/>
+	<bone name="NPC R Thigh [RThg]"/>
+	
+	<bone-default>
+		<margin-multiplier>10</margin-multiplier>
+	</bone-default>	
+
+	<bone name="NPC L Calf [LClf]"/>
+	<bone name="NPC R Calf [RClf]"/>
+	
+	
+	<per-triangle-shape name="boxfull">
+		<margin>0.1</margin>
+<!-- 	<priority>100</priority> -->
+		<prenetration>0.01</prenetration>
+		<shared>private</shared>
+		<tag>coll</tag>
+		
+		<no-collide-with-tag>ground</no-collide-with-tag>		
+<!-- 	<no-collide-with-tag>body</no-collide-with-tag>
+		<no-collide-with-tag>leg</no-collide-with-tag>
+		<no-collide-with-tag>coll</no-collide-with-tag>
+		<no-collide-with-tag>loin</no-collide-with-tag> -->
+
+	</per-triangle-shape>
+	
+	
+	<!-- cloth -->
+	<bone-default>
+		<margin-multiplier>0.1</margin-multiplier>
+	</bone-default>
+		
+
+<!-- 	<bone-default>
+		<mass>0.01</mass>
+		<inertia x="3" y="3" z="3" />
+		<centerOfMassTransform>
+			<basis x="0" y="0" z="0" w="1" />
+			<origin x="0" y="0" z="0" />
+		</centerOfMassTransform>
+		<linearDamping>0.9</linearDamping>
+		<angularDamping>0.9</angularDamping>
+		<friction>0.1</friction>
+		<restitution>0.1</restitution>
+	</bone-default>
+ -->
+	<bone-default>
+		<mass>0.15</mass>
+		<inertia x="12" y="12" z="12" />
+		<centerOfMassTransform>
+			<basis x="0" y="0" z="0" w="1" />
+			<origin x="0" y="0" z="0" />
+		</centerOfMassTransform>
+		<linearDamping>0.88</linearDamping>
+		<angularDamping>0.88</angularDamping>
+		<friction>0.1</friction>
+		<gravity-factor>0.88</gravity-factor>
+		<restitution>0.5</restitution>
+	</bone-default>
+	<bone-default>
+		<margin-multiplier>4</margin-multiplier>
+	</bone-default>	
+	
+
+	<bone-default>
+		<margin-multiplier>0.1</margin-multiplier>
+	</bone-default>
+	
+
+	
+	
+	<bone name="ekurwa_11"/>	
+	<bone name="ekurwa_12"/>	
+	<bone name="ekurwa_13"/>	
+	<bone name="ekurwa_14"/>	
+	<bone name="ekurwa_15"/>	
+	<bone name="ekurwa_16"/>	
+	<bone name="ekurwa_17"/>	
+	<bone name="ekurwa_18"/>
+
+
+	<bone name="ekurwa_31"/>	
+	<bone name="ekurwa_32"/>	
+	<bone name="ekurwa_33"/>	
+	<bone name="ekurwa_34"/>	
+	<bone name="ekurwa_35"/>	
+	<bone name="ekurwa_36"/>	
+	<bone name="ekurwa_37"/>	
+	<bone name="ekurwa_38"/>	
+
+	<bone name="ekurwa_41"/>	
+	<bone name="ekurwa_42"/>	
+	<bone name="ekurwa_43"/>	
+
+	
+	<bone name="ekurwa_51"/>	
+	<bone name="ekurwa_52"/>	
+	<bone name="ekurwa_53"/>	
+	
+	
+	<bone name="ekurwa_61"/>	
+	<bone name="ekurwa_62"/>	
+	<bone name="ekurwa_63"/>	
+
+
+	<bone name="ekurwa_71"/>	
+	<bone name="ekurwa_72"/>	
+	<bone name="ekurwa_73"/>	
+	
+	<bone name="ekurwa_81"/>	
+	<bone name="ekurwa_82"/>	
+	<bone name="ekurwa_83"/>
+
+	
+	<bone-default>
+		<margin-multiplier>5</margin-multiplier>
+	</bone-default>
+
+	<bone name="ekurwa_01"/>
+	<bone name="ekurwa_02"/>
+	<bone name="ekurwa_03"/>
+	<bone name="ekurwa_04"/>
+	<bone name="ekurwa_05"/>
+	<bone name="ekurwa_06"/>
+	<bone name="ekurwa_07"/>
+	<bone name="ekurwa_08"/>
+	
+	<bone name="ekurwa_21"/>	
+	<bone name="ekurwa_22"/>	
+	<bone name="ekurwa_23"/>	
+	<bone name="ekurwa_24"/>	
+	<bone name="ekurwa_25"/>	
+	<bone name="ekurwa_26"/>	
+	<bone name="ekurwa_27"/>	
+	<bone name="ekurwa_28"/>
+	
+	
+
+	
+	<bone name="ekurwa_44"/>	
+	<bone name="ekurwa_45"/>	
+	<bone name="ekurwa_46"/>	
+	<bone name="ekurwa_47"/>	
+	<bone name="ekurwa_48"/>		
+	<bone name="ekurwa_54"/>	
+	<bone name="ekurwa_55"/>	
+	<bone name="ekurwa_56"/>	
+	<bone name="ekurwa_57"/>	
+	<bone name="ekurwa_58"/>
+	<bone name="ekurwa_64"/>	
+	<bone name="ekurwa_65"/>	
+	<bone name="ekurwa_66"/>	
+	<bone name="ekurwa_67"/>	
+	<bone name="ekurwa_68"/>	
+	<bone name="ekurwa_74"/>	
+	<bone name="ekurwa_75"/>	
+	<bone name="ekurwa_76"/>	
+	<bone name="ekurwa_77"/>	
+	<bone name="ekurwa_78"/>	
+	<bone name="ekurwa_84"/>	
+	<bone name="ekurwa_85"/>	
+	<bone name="ekurwa_86"/>	
+	<bone name="ekurwa_87"/>	
+	<bone name="ekurwa_88"/>
+	
+	<generic-constraint-default>
+		<frameInB>
+			<basis x="0" y="0" z="0" w="1" />
+			<origin x="0" y="0" z="0" />
+		</frameInB>
+		<useLinearReferenceFrameA>false</useLinearReferenceFrameA>
+		<linearLowerLimit x="0" y="0" z="0" />
+		<linearUpperLimit x="0.0" y="0.0" z="0.0" />
+		<angularLowerLimit x="-0" y="-0.05" z="-0.05" />
+		<angularUpperLimit x="0.5" y="0.05" z="0.05" />
+		<linearStiffness x="0" y="0" z="0" />
+		<angularStiffness x="0" y="0" z="0" />
+		<linearDamping x="0" y="0" z="0" />
+		<angularDamping x="0" y="0" z="0" />
+		<linearEquilibrium x="0" y="0" z="0" />
+		<angularEquilibrium x="0" y="0" z="0" />
+	</generic-constraint-default>
+	
+	<constraint-group>
+		<generic-constraint bodyA="ekurwa_01" bodyB="ekurwa_00"/>
+		<generic-constraint bodyA="ekurwa_02" bodyB="ekurwa_01"/>
+		<generic-constraint bodyA="ekurwa_03" bodyB="ekurwa_02"/>
+		<generic-constraint bodyA="ekurwa_04" bodyB="ekurwa_03"/>
+		<generic-constraint bodyA="ekurwa_05" bodyB="ekurwa_04"/>	
+		<generic-constraint bodyA="ekurwa_06" bodyB="ekurwa_05"/>		
+		<generic-constraint bodyA="ekurwa_07" bodyB="ekurwa_06"/>	
+		<generic-constraint bodyA="ekurwa_08" bodyB="ekurwa_07"/>			
+	</constraint-group>
+	<constraint-group>
+		<generic-constraint bodyA="ekurwa_11" bodyB="ekurwa_10"/>
+		<generic-constraint bodyA="ekurwa_12" bodyB="ekurwa_11"/>
+		<generic-constraint bodyA="ekurwa_13" bodyB="ekurwa_12"/>
+		<generic-constraint bodyA="ekurwa_14" bodyB="ekurwa_13"/>
+		<generic-constraint bodyA="ekurwa_15" bodyB="ekurwa_14"/>	
+		<generic-constraint bodyA="ekurwa_16" bodyB="ekurwa_15"/>		
+		<generic-constraint bodyA="ekurwa_17" bodyB="ekurwa_16"/>	
+		<generic-constraint bodyA="ekurwa_18" bodyB="ekurwa_17"/>			
+	</constraint-group>
+		
+	<constraint-group>
+		<generic-constraint bodyA="ekurwa_21" bodyB="ekurwa_20"/>
+		<generic-constraint bodyA="ekurwa_22" bodyB="ekurwa_21"/>
+		<generic-constraint bodyA="ekurwa_23" bodyB="ekurwa_22"/>
+		<generic-constraint bodyA="ekurwa_24" bodyB="ekurwa_23"/>
+		<generic-constraint bodyA="ekurwa_25" bodyB="ekurwa_24"/>	
+		<generic-constraint bodyA="ekurwa_26" bodyB="ekurwa_25"/>		
+		<generic-constraint bodyA="ekurwa_27" bodyB="ekurwa_26"/>	
+		<generic-constraint bodyA="ekurwa_28" bodyB="ekurwa_27"/>			
+	</constraint-group>
+	
+	<constraint-group>
+		<generic-constraint bodyA="ekurwa_31" bodyB="ekurwa_30"/>
+		<generic-constraint bodyA="ekurwa_32" bodyB="ekurwa_31"/>
+		<generic-constraint bodyA="ekurwa_33" bodyB="ekurwa_32"/>
+		<generic-constraint bodyA="ekurwa_34" bodyB="ekurwa_33"/>
+		<generic-constraint bodyA="ekurwa_35" bodyB="ekurwa_34"/>	
+		<generic-constraint bodyA="ekurwa_36" bodyB="ekurwa_35"/>		
+		<generic-constraint bodyA="ekurwa_37" bodyB="ekurwa_36"/>	
+		<generic-constraint bodyA="ekurwa_38" bodyB="ekurwa_37"/>			
+	</constraint-group>	
+	
+	<generic-constraint-default>
+		<frameInB>
+			<basis x="0" y="0" z="0" w="1" />
+			<origin x="0" y="0" z="0" />
+		</frameInB>
+		<useLinearReferenceFrameA>false</useLinearReferenceFrameA>
+		<linearLowerLimit x="0" y="0" z="0" />
+		<linearUpperLimit x="0.0" y="0.0" z="0.0" />
+		<angularLowerLimit x="-0.05" y="-0.05" z="-0.05" />
+		<angularUpperLimit x="0.5" y="0.05" z="0.05" />
+		<linearStiffness x="0" y="0" z="0" />
+		<angularStiffness x="0" y="0" z="0" />
+		<linearDamping x="0" y="0" z="0" />
+		<angularDamping x="0" y="0" z="0" />
+		<linearEquilibrium x="0" y="0" z="0" />
+		<angularEquilibrium x="0" y="0" z="0" />
+	</generic-constraint-default>	
+	
+	<constraint-group>
+		<generic-constraint bodyA="ekurwa_41" bodyB="ekurwa_40"/>
+		<generic-constraint bodyA="ekurwa_42" bodyB="ekurwa_41"/>
+		<generic-constraint bodyA="ekurwa_43" bodyB="ekurwa_42"/>
+		<generic-constraint bodyA="ekurwa_44" bodyB="ekurwa_43"/>
+		<generic-constraint bodyA="ekurwa_45" bodyB="ekurwa_44"/>	
+		<generic-constraint bodyA="ekurwa_46" bodyB="ekurwa_45"/>		
+		<generic-constraint bodyA="ekurwa_47" bodyB="ekurwa_46"/>	
+		<generic-constraint bodyA="ekurwa_48" bodyB="ekurwa_47"/>			
+	</constraint-group>		
+	
+	<constraint-group>
+		<generic-constraint bodyA="ekurwa_51" bodyB="ekurwa_50"/>
+		<generic-constraint bodyA="ekurwa_52" bodyB="ekurwa_51"/>
+		<generic-constraint bodyA="ekurwa_53" bodyB="ekurwa_52"/>
+		<generic-constraint bodyA="ekurwa_54" bodyB="ekurwa_53"/>
+		<generic-constraint bodyA="ekurwa_55" bodyB="ekurwa_54"/>	
+		<generic-constraint bodyA="ekurwa_56" bodyB="ekurwa_55"/>		
+		<generic-constraint bodyA="ekurwa_57" bodyB="ekurwa_56"/>	
+		<generic-constraint bodyA="ekurwa_58" bodyB="ekurwa_57"/>			
+	</constraint-group>	
+
+	<constraint-group>
+		<generic-constraint bodyA="ekurwa_61" bodyB="ekurwa_60"/>
+		<generic-constraint bodyA="ekurwa_62" bodyB="ekurwa_61"/>
+		<generic-constraint bodyA="ekurwa_63" bodyB="ekurwa_62"/>
+		<generic-constraint bodyA="ekurwa_64" bodyB="ekurwa_63"/>
+		<generic-constraint bodyA="ekurwa_65" bodyB="ekurwa_64"/>	
+		<generic-constraint bodyA="ekurwa_66" bodyB="ekurwa_65"/>		
+		<generic-constraint bodyA="ekurwa_67" bodyB="ekurwa_66"/>	
+		<generic-constraint bodyA="ekurwa_68" bodyB="ekurwa_67"/>			
+	</constraint-group>		
+	
+	<constraint-group>
+		<generic-constraint bodyA="ekurwa_71" bodyB="ekurwa_70"/>
+		<generic-constraint bodyA="ekurwa_72" bodyB="ekurwa_71"/>
+		<generic-constraint bodyA="ekurwa_73" bodyB="ekurwa_72"/>
+		<generic-constraint bodyA="ekurwa_74" bodyB="ekurwa_73"/>
+		<generic-constraint bodyA="ekurwa_75" bodyB="ekurwa_74"/>	
+		<generic-constraint bodyA="ekurwa_76" bodyB="ekurwa_75"/>		
+		<generic-constraint bodyA="ekurwa_77" bodyB="ekurwa_76"/>	
+		<generic-constraint bodyA="ekurwa_78" bodyB="ekurwa_77"/>			
+	</constraint-group>		
+
+	<constraint-group>
+		<generic-constraint bodyA="ekurwa_81" bodyB="ekurwa_80"/>
+		<generic-constraint bodyA="ekurwa_82" bodyB="ekurwa_81"/>
+		<generic-constraint bodyA="ekurwa_83" bodyB="ekurwa_82"/>
+		<generic-constraint bodyA="ekurwa_84" bodyB="ekurwa_83"/>
+		<generic-constraint bodyA="ekurwa_85" bodyB="ekurwa_84"/>	
+		<generic-constraint bodyA="ekurwa_86" bodyB="ekurwa_85"/>		
+		<generic-constraint bodyA="ekurwa_87" bodyB="ekurwa_86"/>	
+		<generic-constraint bodyA="ekurwa_88" bodyB="ekurwa_87"/>			
+	</constraint-group>		
+
+   <generic-constraint-default>
+    <frameInLerp>
+			<translationLerp>0</translationLerp>
+			<rotationLerp>0</rotationLerp>
+    </frameInLerp>
+	<linearLowerLimit x="-0.1" y="-0.1" z="-0.1"/>
+    <linearUpperLimit x="0.1" y="0.1" z="0.1"/>
+    <angularLowerLimit x="-0.3" y="-0.3" z="-0.3"/>
+    <angularUpperLimit x="0.3" y="0.3" z="0.3"/>
+	<linearStiffness x="0" y="0" z="0"/>
+    <angularStiffness x="0" y="0" z="0"/>
+  </generic-constraint-default>
+ 
+	<constraint-group>
+		<generic-constraint bodyA="ekurwa_01" bodyB="ekurwa_11"/>
+		<generic-constraint bodyA="ekurwa_02" bodyB="ekurwa_12"/>	
+		<generic-constraint bodyA="ekurwa_03" bodyB="ekurwa_13"/>	
+		<generic-constraint bodyA="ekurwa_04" bodyB="ekurwa_14"/>		
+		<generic-constraint bodyA="ekurwa_05" bodyB="ekurwa_15"/>
+		<generic-constraint bodyA="ekurwa_06" bodyB="ekurwa_16"/>	
+		<generic-constraint bodyA="ekurwa_07" bodyB="ekurwa_17"/>	
+		<generic-constraint bodyA="ekurwa_08" bodyB="ekurwa_18"/>		
+	</constraint-group> 
+	
+	<constraint-group>
+		<generic-constraint bodyA="ekurwa_31" bodyB="ekurwa_21"/>
+		<generic-constraint bodyA="ekurwa_32" bodyB="ekurwa_22"/>	
+		<generic-constraint bodyA="ekurwa_33" bodyB="ekurwa_23"/>	
+		<generic-constraint bodyA="ekurwa_34" bodyB="ekurwa_24"/>		
+		<generic-constraint bodyA="ekurwa_35" bodyB="ekurwa_25"/>
+		<generic-constraint bodyA="ekurwa_36" bodyB="ekurwa_26"/>	
+		<generic-constraint bodyA="ekurwa_37" bodyB="ekurwa_27"/>	
+		<generic-constraint bodyA="ekurwa_38" bodyB="ekurwa_28"/>		
+	</constraint-group> 
+	
+   <generic-constraint-default>
+    <frameInLerp>
+			<translationLerp>0</translationLerp>
+			<rotationLerp>0</rotationLerp>
+    </frameInLerp>
+	<linearLowerLimit x="-0.1" y="-0.1" z="-0.1"/>
+    <linearUpperLimit x="0.1" y="0.1" z="0.1"/>
+    <angularLowerLimit x="-0.1" y="-0.1" z="-0.1"/>
+    <angularUpperLimit x="0.1" y="0.1" z="0.1"/>
+	<linearStiffness x="0" y="0" z="0"/>
+    <angularStiffness x="0" y="0" z="0"/>
+  </generic-constraint-default>
+  
+	<constraint-group>
+		<generic-constraint bodyA="ekurwa_51" bodyB="ekurwa_41"/>
+		<generic-constraint bodyA="ekurwa_61" bodyB="ekurwa_51"/>	
+		<generic-constraint bodyA="ekurwa_71" bodyB="ekurwa_61"/>	
+		<generic-constraint bodyA="ekurwa_81" bodyB="ekurwa_71"/>		
+	</constraint-group> 
+	
+	<constraint-group>
+		<generic-constraint bodyA="ekurwa_52" bodyB="ekurwa_42"/>
+		<generic-constraint bodyA="ekurwa_62" bodyB="ekurwa_52"/>	
+		<generic-constraint bodyA="ekurwa_72" bodyB="ekurwa_62"/>	
+		<generic-constraint bodyA="ekurwa_82" bodyB="ekurwa_72"/>		
+	</constraint-group>
+	
+	<constraint-group>
+		<generic-constraint bodyA="ekurwa_53" bodyB="ekurwa_43"/>
+		<generic-constraint bodyA="ekurwa_63" bodyB="ekurwa_53"/>	
+		<generic-constraint bodyA="ekurwa_73" bodyB="ekurwa_63"/>	
+		<generic-constraint bodyA="ekurwa_83" bodyB="ekurwa_73"/>		
+	</constraint-group> 	
+	
+	<constraint-group>
+		<generic-constraint bodyA="ekurwa_54" bodyB="ekurwa_44"/>
+		<generic-constraint bodyA="ekurwa_64" bodyB="ekurwa_54"/>	
+		<generic-constraint bodyA="ekurwa_74" bodyB="ekurwa_64"/>	
+		<generic-constraint bodyA="ekurwa_84" bodyB="ekurwa_74"/>		
+	</constraint-group> 	
+	
+	<constraint-group>
+		<generic-constraint bodyA="ekurwa_55" bodyB="ekurwa_45"/>
+		<generic-constraint bodyA="ekurwa_65" bodyB="ekurwa_55"/>	
+		<generic-constraint bodyA="ekurwa_75" bodyB="ekurwa_65"/>	
+		<generic-constraint bodyA="ekurwa_85" bodyB="ekurwa_75"/>		
+	</constraint-group> 	
+
+	<constraint-group>
+		<generic-constraint bodyA="ekurwa_56" bodyB="ekurwa_46"/>
+		<generic-constraint bodyA="ekurwa_66" bodyB="ekurwa_56"/>	
+		<generic-constraint bodyA="ekurwa_76" bodyB="ekurwa_66"/>	
+		<generic-constraint bodyA="ekurwa_86" bodyB="ekurwa_76"/>		
+	</constraint-group> 
+	
+	<constraint-group>
+		<generic-constraint bodyA="ekurwa_57" bodyB="ekurwa_47"/>
+		<generic-constraint bodyA="ekurwa_67" bodyB="ekurwa_57"/>	
+		<generic-constraint bodyA="ekurwa_77" bodyB="ekurwa_67"/>	
+		<generic-constraint bodyA="ekurwa_87" bodyB="ekurwa_77"/>		
+	</constraint-group> 
+	
+	<constraint-group>
+		<generic-constraint bodyA="ekurwa_58" bodyB="ekurwa_48"/>
+		<generic-constraint bodyA="ekurwa_68" bodyB="ekurwa_58"/>	
+		<generic-constraint bodyA="ekurwa_78" bodyB="ekurwa_68"/>	
+		<generic-constraint bodyA="ekurwa_88" bodyB="ekurwa_78"/>		
+		
+	</constraint-group>  
+		<per-triangle-shape name="0_Cloth1">
+		<margin>0.1</margin>
+		
+		<prenetration>-0.1</prenetration>
+		<shared>private</shared>
+		<tag>loin</tag>
+		<!-- <can-collide-with-tag>body</can-collide-with-tag> -->
+		 <can-collide-with-tag>ground</can-collide-with-tag> 
+		<no-collide-with-tag>leg</no-collide-with-tag>
+		 <can-collide-with-tag>coll</can-collide-with-tag>
+		<no-collide-with-tag>loin</no-collide-with-tag>
+		<no-collide-with-bone>NPC L Forearm [LLar]</no-collide-with-bone>
+		<no-collide-with-bone>NPC R Forearm [RLar]</no-collide-with-bone>
+		<no-collide-with-bone>NPC L ForearmTwist1 [LLt1]</no-collide-with-bone>
+		<no-collide-with-bone>NPC R ForearmTwist1 [RLt1]</no-collide-with-bone>
+		<no-collide-with-bone>NPC L ForearmTwist2 [LLt2]</no-collide-with-bone>
+		<no-collide-with-bone>NPC R ForearmTwist2 [RLt2]</no-collide-with-bone>
+		<no-collide-with-bone>NPC L Hand [LHnd]</no-collide-with-bone>
+		<no-collide-with-bone>NPC R Hand [RHnd]</no-collide-with-bone>
+		
+		<weight-threshold bone="NPC L Clavicle [LClv]">1</weight-threshold>
+		<weight-threshold bone="NPC R Clavicle [RClv]">1</weight-threshold>
+		<weight-threshold bone="NPC L Forearm [LLar]">1</weight-threshold>
+		<weight-threshold bone="NPC R Forearm [RLar]">1</weight-threshold>
+		<weight-threshold bone="NPC L ForearmTwist1 [LLt1]">1</weight-threshold>
+		<weight-threshold bone="NPC R ForearmTwist1 [RLt1]">1</weight-threshold>
+		<weight-threshold bone="NPC L ForearmTwist2 [LLt2]">1</weight-threshold>
+		<weight-threshold bone="NPC R ForearmTwist2 [RLt2]">1</weight-threshold>
+		<weight-threshold bone="NPC L UpperArm [LUar]">1</weight-threshold>
+		<weight-threshold bone="NPC R UpperArm [RUar]">1</weight-threshold>
+		<weight-threshold bone="NPC L UpperarmTwist1 [LUt1]">1</weight-threshold>
+		<weight-threshold bone="NPC R UpperarmTwist1 [RUt1]">1</weight-threshold>
+		<weight-threshold bone="NPC L UpperarmTwist2 [LUt2]">1</weight-threshold>
+		<weight-threshold bone="NPC R UpperarmTwist2 [RUt2]">1</weight-threshold>
+		<weight-threshold bone="NPC L Breast">1</weight-threshold>
+		<weight-threshold bone="NPC R Breast">1</weight-threshold>
+		<weight-threshold bone="NPC L Breast01">1</weight-threshold>
+		<weight-threshold bone="NPC R Breast01">1</weight-threshold>
+		<weight-threshold bone="NPC Spine [Spn0]">1</weight-threshold>
+		<weight-threshold bone="NPC Spine1 [Spn1]">1</weight-threshold>
+		<weight-threshold bone="NPC Spine2 [Spn2]">1</weight-threshold>
+		<weight-threshold bone="NPC Belly">1</weight-threshold>
+		<weight-threshold bone="NPC Pelvis [Pelv]">1</weight-threshold>
+		<weight-threshold bone="NPC L Butt">1</weight-threshold>
+		<weight-threshold bone="NPC R Butt">1</weight-threshold>
+<!-- 		<weight-threshold bone="NPC L Thigh [LThg]">1</weight-threshold>
+		<weight-threshold bone="NPC R Thigh [RThg]">1</weight-threshold>
+		<weight-threshold bone="NPC R Calf [RClf]">1</weight-threshold>
+		<weight-threshold bone="NPC L Calf [LClf]">1</weight-threshold>
+ -->
+		
+		</per-triangle-shape>	
+	
+	
+		<per-triangle-shape name="0_Cloth2">
+		<margin>0.1</margin>
+		
+		<prenetration>-0.1</prenetration>
+		<shared>private</shared>
+		<tag>loin</tag>
+		<!-- <can-collide-with-tag>body</can-collide-with-tag> -->
+		 <can-collide-with-tag>ground</can-collide-with-tag> 
+		<no-collide-with-tag>leg</no-collide-with-tag>
+		 <can-collide-with-tag>coll</can-collide-with-tag>
+		<no-collide-with-tag>loin</no-collide-with-tag>
+		<no-collide-with-bone>NPC L Forearm [LLar]</no-collide-with-bone>
+		<no-collide-with-bone>NPC R Forearm [RLar]</no-collide-with-bone>
+		<no-collide-with-bone>NPC L ForearmTwist1 [LLt1]</no-collide-with-bone>
+		<no-collide-with-bone>NPC R ForearmTwist1 [RLt1]</no-collide-with-bone>
+		<no-collide-with-bone>NPC L ForearmTwist2 [LLt2]</no-collide-with-bone>
+		<no-collide-with-bone>NPC R ForearmTwist2 [RLt2]</no-collide-with-bone>
+		<no-collide-with-bone>NPC L Hand [LHnd]</no-collide-with-bone>
+		<no-collide-with-bone>NPC R Hand [RHnd]</no-collide-with-bone>
+		
+		<weight-threshold bone="NPC L Clavicle [LClv]">1</weight-threshold>
+		<weight-threshold bone="NPC R Clavicle [RClv]">1</weight-threshold>
+		<weight-threshold bone="NPC L Forearm [LLar]">1</weight-threshold>
+		<weight-threshold bone="NPC R Forearm [RLar]">1</weight-threshold>
+		<weight-threshold bone="NPC L ForearmTwist1 [LLt1]">1</weight-threshold>
+		<weight-threshold bone="NPC R ForearmTwist1 [RLt1]">1</weight-threshold>
+		<weight-threshold bone="NPC L ForearmTwist2 [LLt2]">1</weight-threshold>
+		<weight-threshold bone="NPC R ForearmTwist2 [RLt2]">1</weight-threshold>
+		<weight-threshold bone="NPC L UpperArm [LUar]">1</weight-threshold>
+		<weight-threshold bone="NPC R UpperArm [RUar]">1</weight-threshold>
+		<weight-threshold bone="NPC L UpperarmTwist1 [LUt1]">1</weight-threshold>
+		<weight-threshold bone="NPC R UpperarmTwist1 [RUt1]">1</weight-threshold>
+		<weight-threshold bone="NPC L UpperarmTwist2 [LUt2]">1</weight-threshold>
+		<weight-threshold bone="NPC R UpperarmTwist2 [RUt2]">1</weight-threshold>
+		<weight-threshold bone="NPC L Breast">1</weight-threshold>
+		<weight-threshold bone="NPC R Breast">1</weight-threshold>
+		<weight-threshold bone="NPC L Breast01">1</weight-threshold>
+		<weight-threshold bone="NPC R Breast01">1</weight-threshold>
+		<weight-threshold bone="NPC Spine [Spn0]">1</weight-threshold>
+		<weight-threshold bone="NPC Spine1 [Spn1]">1</weight-threshold>
+		<weight-threshold bone="NPC Spine2 [Spn2]">1</weight-threshold>
+		<weight-threshold bone="NPC Belly">1</weight-threshold>
+		<weight-threshold bone="NPC Pelvis [Pelv]">1</weight-threshold>
+		<weight-threshold bone="NPC L Butt">1</weight-threshold>
+		<weight-threshold bone="NPC R Butt">1</weight-threshold>
+<!-- 		<weight-threshold bone="NPC L Thigh [LThg]">1</weight-threshold>
+		<weight-threshold bone="NPC R Thigh [RThg]">1</weight-threshold>
+		<weight-threshold bone="NPC R Calf [RClf]">1</weight-threshold>
+		<weight-threshold bone="NPC L Calf [LClf]">1</weight-threshold> -->
+
+		
+		</per-triangle-shape>
+		
+		<per-triangle-shape name="0_Cloth3">
+		<margin>0.1</margin>
+		
+		<prenetration>-0.1</prenetration>
+		<shared>private</shared>
+		<tag>loin</tag>
+		<!-- <can-collide-with-tag>body</can-collide-with-tag> -->
+		 <can-collide-with-tag>ground</can-collide-with-tag> 
+		<no-collide-with-tag>leg</no-collide-with-tag>
+		 <can-collide-with-tag>coll</can-collide-with-tag>
+		<no-collide-with-tag>loin</no-collide-with-tag>
+		<no-collide-with-bone>NPC L Forearm [LLar]</no-collide-with-bone>
+		<no-collide-with-bone>NPC R Forearm [RLar]</no-collide-with-bone>
+		<no-collide-with-bone>NPC L ForearmTwist1 [LLt1]</no-collide-with-bone>
+		<no-collide-with-bone>NPC R ForearmTwist1 [RLt1]</no-collide-with-bone>
+		<no-collide-with-bone>NPC L ForearmTwist2 [LLt2]</no-collide-with-bone>
+		<no-collide-with-bone>NPC R ForearmTwist2 [RLt2]</no-collide-with-bone>
+		<no-collide-with-bone>NPC L Hand [LHnd]</no-collide-with-bone>
+		<no-collide-with-bone>NPC R Hand [RHnd]</no-collide-with-bone>
+		
+		<weight-threshold bone="NPC L Clavicle [LClv]">1</weight-threshold>
+		<weight-threshold bone="NPC R Clavicle [RClv]">1</weight-threshold>
+		<weight-threshold bone="NPC L Forearm [LLar]">1</weight-threshold>
+		<weight-threshold bone="NPC R Forearm [RLar]">1</weight-threshold>
+		<weight-threshold bone="NPC L ForearmTwist1 [LLt1]">1</weight-threshold>
+		<weight-threshold bone="NPC R ForearmTwist1 [RLt1]">1</weight-threshold>
+		<weight-threshold bone="NPC L ForearmTwist2 [LLt2]">1</weight-threshold>
+		<weight-threshold bone="NPC R ForearmTwist2 [RLt2]">1</weight-threshold>
+		<weight-threshold bone="NPC L UpperArm [LUar]">1</weight-threshold>
+		<weight-threshold bone="NPC R UpperArm [RUar]">1</weight-threshold>
+		<weight-threshold bone="NPC L UpperarmTwist1 [LUt1]">1</weight-threshold>
+		<weight-threshold bone="NPC R UpperarmTwist1 [RUt1]">1</weight-threshold>
+		<weight-threshold bone="NPC L UpperarmTwist2 [LUt2]">1</weight-threshold>
+		<weight-threshold bone="NPC R UpperarmTwist2 [RUt2]">1</weight-threshold>
+		<weight-threshold bone="NPC L Breast">1</weight-threshold>
+		<weight-threshold bone="NPC R Breast">1</weight-threshold>
+		<weight-threshold bone="NPC L Breast01">1</weight-threshold>
+		<weight-threshold bone="NPC R Breast01">1</weight-threshold>
+		<weight-threshold bone="NPC Spine [Spn0]">1</weight-threshold>
+		<weight-threshold bone="NPC Spine1 [Spn1]">1</weight-threshold>
+		<weight-threshold bone="NPC Spine2 [Spn2]">1</weight-threshold>
+		<weight-threshold bone="NPC Belly">1</weight-threshold>
+		<weight-threshold bone="NPC Pelvis [Pelv]">1</weight-threshold>
+		<weight-threshold bone="NPC L Butt">1</weight-threshold>
+		<weight-threshold bone="NPC R Butt">1</weight-threshold>
+<!-- 		<weight-threshold bone="NPC L Thigh [LThg]">1</weight-threshold>
+		<weight-threshold bone="NPC R Thigh [RThg]">1</weight-threshold>
+		<weight-threshold bone="NPC R Calf [RClf]">1</weight-threshold>
+		<weight-threshold bone="NPC L Calf [LClf]">1</weight-threshold>
+ -->
+		
+		</per-triangle-shape>		
+		
+		<per-triangle-shape name="0_Cloth4">
+		<margin>0.1</margin>
+		
+		<prenetration>-0.1</prenetration>
+		<shared>private</shared>
+		<tag>loin</tag>
+		<!-- <can-collide-with-tag>body</can-collide-with-tag> -->
+		 <can-collide-with-tag>ground</can-collide-with-tag> 
+		<no-collide-with-tag>leg</no-collide-with-tag>
+		 <can-collide-with-tag>coll</can-collide-with-tag>
+		<no-collide-with-tag>loin</no-collide-with-tag>
+		<no-collide-with-bone>NPC L Forearm [LLar]</no-collide-with-bone>
+		<no-collide-with-bone>NPC R Forearm [RLar]</no-collide-with-bone>
+		<no-collide-with-bone>NPC L ForearmTwist1 [LLt1]</no-collide-with-bone>
+		<no-collide-with-bone>NPC R ForearmTwist1 [RLt1]</no-collide-with-bone>
+		<no-collide-with-bone>NPC L ForearmTwist2 [LLt2]</no-collide-with-bone>
+		<no-collide-with-bone>NPC R ForearmTwist2 [RLt2]</no-collide-with-bone>
+		<no-collide-with-bone>NPC L Hand [LHnd]</no-collide-with-bone>
+		<no-collide-with-bone>NPC R Hand [RHnd]</no-collide-with-bone>
+		
+		<weight-threshold bone="NPC L Clavicle [LClv]">1</weight-threshold>
+		<weight-threshold bone="NPC R Clavicle [RClv]">1</weight-threshold>
+		<weight-threshold bone="NPC L Forearm [LLar]">1</weight-threshold>
+		<weight-threshold bone="NPC R Forearm [RLar]">1</weight-threshold>
+		<weight-threshold bone="NPC L ForearmTwist1 [LLt1]">1</weight-threshold>
+		<weight-threshold bone="NPC R ForearmTwist1 [RLt1]">1</weight-threshold>
+		<weight-threshold bone="NPC L ForearmTwist2 [LLt2]">1</weight-threshold>
+		<weight-threshold bone="NPC R ForearmTwist2 [RLt2]">1</weight-threshold>
+		<weight-threshold bone="NPC L UpperArm [LUar]">1</weight-threshold>
+		<weight-threshold bone="NPC R UpperArm [RUar]">1</weight-threshold>
+		<weight-threshold bone="NPC L UpperarmTwist1 [LUt1]">1</weight-threshold>
+		<weight-threshold bone="NPC R UpperarmTwist1 [RUt1]">1</weight-threshold>
+		<weight-threshold bone="NPC L UpperarmTwist2 [LUt2]">1</weight-threshold>
+		<weight-threshold bone="NPC R UpperarmTwist2 [RUt2]">1</weight-threshold>
+		<weight-threshold bone="NPC L Breast">1</weight-threshold>
+		<weight-threshold bone="NPC R Breast">1</weight-threshold>
+		<weight-threshold bone="NPC L Breast01">1</weight-threshold>
+		<weight-threshold bone="NPC R Breast01">1</weight-threshold>
+		<weight-threshold bone="NPC Spine [Spn0]">1</weight-threshold>
+		<weight-threshold bone="NPC Spine1 [Spn1]">1</weight-threshold>
+		<weight-threshold bone="NPC Spine2 [Spn2]">1</weight-threshold>
+		<weight-threshold bone="NPC Belly">1</weight-threshold>
+		<weight-threshold bone="NPC Pelvis [Pelv]">1</weight-threshold>
+		<weight-threshold bone="NPC L Butt">1</weight-threshold>
+		<weight-threshold bone="NPC R Butt">1</weight-threshold>
+	<!-- 	<weight-threshold bone="NPC L Thigh [LThg]">1</weight-threshold>
+		<weight-threshold bone="NPC R Thigh [RThg]">1</weight-threshold>
+		<weight-threshold bone="NPC R Calf [RClf]">1</weight-threshold>
+		<weight-threshold bone="NPC L Calf [LClf]">1</weight-threshold> -->
+
+		
+		</per-triangle-shape>
+
+
+</system>

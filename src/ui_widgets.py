@@ -238,6 +238,7 @@ class AddedNifRowWidget(QWidget):
         on_toggle_visibility,
         on_double_click,
         on_texture_select,
+        on_right_click=None,
         texture_tooltip: str = "Change outfit textures",
         visible: bool = True,
         hide_tooltip: str = "Hide this NIF",
@@ -249,6 +250,7 @@ class AddedNifRowWidget(QWidget):
         self._drag_start_position: Optional[QPoint] = None
         self._on_select = on_select
         self._on_double_click = on_double_click
+        self._on_right_click = on_right_click
         self._hide_tooltip = hide_tooltip
         self._show_tooltip = show_tooltip
         layout = QHBoxLayout(self)
@@ -307,6 +309,10 @@ class AddedNifRowWidget(QWidget):
         layout.addWidget(self.btn_texture_select, stretch=0)
 
     def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.RightButton and self._on_right_click:
+            event.accept()
+            self._on_right_click()
+            return
         super().mousePressEvent(event)
         if event.button() == Qt.MouseButton.LeftButton:
             self._drag_start_position = event.position().toPoint()
@@ -331,8 +337,8 @@ class AddedNifRowWidget(QWidget):
 
     def mouseDoubleClickEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
-            self._on_double_click()
             event.accept()
+            self._on_double_click()
             return
         super().mouseDoubleClickEvent(event)
 
