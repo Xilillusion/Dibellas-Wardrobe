@@ -77,7 +77,7 @@ def resolve_mod_root_for_nif(
         return owner
     if (
         mod_scanner
-        and mod_scanner.fallback_target_for_nif(nif_key) is not None
+        and mod_scanner.is_overwrite_nif(nif_key)
         and mod_scanner.overwrite_root is not None
     ):
         return mod_scanner.overwrite_root
@@ -106,7 +106,7 @@ def get_mod_name_for_nif(
     owner = mod_scanner.owner_for_nif(nif_key) if mod_scanner else None
     if owner is not None:
         return owner.name
-    if mod_scanner and mod_scanner.fallback_target_for_nif(nif_key) is not None:
+    if mod_scanner and mod_scanner.is_overwrite_nif(nif_key):
         return "[Overwrite]"
     mod_root = resolve_mod_root_for_nif(nif_key, mod_scanner, current_root_dir)
     if mod_root is not None:
@@ -205,6 +205,7 @@ class NifSearchThread(QThread):
                         dirs[:] = [
                             d for d in dirs
                             if directory_contains_nif_or_hkx(str(root_path / d))
+                            or (self.mod_scanner and self.mod_scanner.has_mod_overlay(root_path / d))
                         ]
 
                 try:
@@ -254,5 +255,26 @@ class NifSearchThread(QThread):
                             fname,
                             str(root_path / fname),
                         )
+
+            if self.mod_scanner:
+                for group_name, parts, path in self.mod_scanner.search_entries():
+                    if self._cancelled:
+                        return
+                    if self.query not in group_name.lower():
+                        continue
+                    if self.hide_gnd_folder and any(
+                        is_filtered_folder_name(part, True) for part in parts[:-1]
+                    ):
+                        continue
+                    if path.suffix.casefold() == ".nif" and is_filtered_nif_filename(
+                        path.name, self.hide_0, self.hide_gnd_folder
+                    ):
+                        continue
+                    self.matchFound.emit(
+                        group_name,
+                        str(Path(*parts[:-1])) if len(parts) > 1 else "",
+                        f"[{path.name}]",
+                        str(path),
+                    )
         except Exception as exc:
             log.warning("Search thread error on %s: %s", self.root_dir, exc)

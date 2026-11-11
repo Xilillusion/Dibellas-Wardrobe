@@ -69,7 +69,7 @@ class MeshItem:
 
 
 class ModScanner:
-    """Merge whitelisted MO2 overwrite NIFs into uniquely matching mod folders."""
+    """Merge whitelisted MO2 overwrite assets into matching mod folders."""
 
     _CHARGEN_PARTS = ("SKSE", "Plugins", "CharGen")
 
@@ -79,6 +79,7 @@ class ModScanner:
         self._mod_directory_paths: Dict[Path, Dict[tuple[str, ...], Path]] = {}
         self.relpath_to_mod: Dict[str, ModData] = {}
         self.relpath_to_mesh: Dict[str, MeshItem] = {}
+        self._mesh_sources: Dict[str, Dict[Path, MeshItem]] = {}
         self._ambiguous_mod_paths: set[str] = set()
         self._ambiguous_mesh_paths: set[str] = set()
         self._mod_overrides: Dict[
@@ -94,6 +95,7 @@ class ModScanner:
         self._fallback_directories: Dict[
             tuple[str, ...], Dict[str, Path]
         ] = {}
+        self._overwrite_search_entries: list[tuple[str, tuple[str, ...], Path]] = []
         self._build_index()
 
     @property
@@ -121,6 +123,10 @@ class ModScanner:
             self.relpath_to_mod[key] = mod
 
     def _register_mesh(self, key: str, mesh: MeshItem) -> None:
+        sources = self._mesh_sources.setdefault(key, {})
+        existing_source = sources.get(mesh.mod.path)
+        if existing_source is None or len(mesh.mod.tree_prefix) < len(existing_source.mod.tree_prefix):
+            sources[mesh.mod.path] = mesh
         if key in self._ambiguous_mesh_paths:
             return
         existing = self.relpath_to_mesh.get(key)
@@ -166,11 +172,11 @@ class ModScanner:
 
     def _index_mod_directories(self) -> None:
         try:
-            mod_paths = [
+            mod_paths = sorted([
                 Path(entry.path).resolve()
                 for entry in os.scandir(self.mods_root)
                 if entry.is_dir()
-            ]
+            ], key=lambda path: str(path).casefold())
         except OSError as exc:
             log.warning("Could not list MO2 mods directory %s: %s", self.mods_root, exc)
             return
@@ -247,6 +253,7 @@ class ModScanner:
         entry_key = resolved_path.as_posix().lower() if not relative_parts else key
         self._fallback_files.setdefault(parent_parts, {})[entry_key] = resolved_path
         self._fallback_targets[resolved_path] = target_parts
+        self._overwrite_search_entries.append(("[Overwrite]", target_parts, resolved_path))
         assert self.overwrite_root is not None
         for depth in range(1, len(target_parts)):
             directory_parts = target_parts[:depth]
@@ -260,6 +267,16 @@ class ModScanner:
     def _register_overwrite_mesh(self, nif_path: Path, relative_mesh: Path) -> None:
         relative_parts = ("meshes",) + relative_mesh.parts
         rel_key = self._path_key(relative_parts)
+        sources = self._mesh_sources.get(rel_key, {})
+        if len(sources) > 1:
+            for mesh in sources.values():
+                target_parts = mesh.mod.tree_prefix + mesh.relative_parts
+                self._add_mod_override(mesh.mod.path, target_parts, nif_path)
+                self._nif_targets.setdefault(nif_path, (mesh.mod.path, target_parts))
+                self._overwrite_search_entries.append(
+                    (mesh.mod.path.name, target_parts, nif_path)
+                )
+            return
         mesh_item = self.relpath_to_mesh.get(rel_key)
         if mesh_item is not None:
             owner = mesh_item.mod
@@ -280,6 +297,7 @@ class ModScanner:
         self._nif_owners[nif_path] = owner.path
         self._nif_targets[nif_path] = (owner.path, target_parts)
         self._add_mod_override(owner.path, target_parts, nif_path)
+        self._overwrite_search_entries.append((owner.path.name, target_parts, nif_path))
 
     def _build_index(self) -> None:
         """Normalize MO2 roots, then build mod and whitelisted overwrite indexes."""
@@ -372,10 +390,14 @@ class ModScanner:
 
     def is_overwrite_nif(self, nif_path: Path | str) -> bool:
         path = Path(nif_path).resolve()
-        return path in self._nif_owners or path in self._fallback_targets
+        return path in self._nif_targets or path in self._fallback_targets
 
     def has_fallback(self) -> bool:
         return bool(self._fallback_files)
+
+    def has_mod_overlay(self, mod_path: Path | str, relative_parts: Iterable[str] = ()) -> bool:
+        key = (Path(mod_path).resolve(), self._normalized_parts(relative_parts))
+        return bool(self._mod_overlay_directories.get(key) or self._mod_overrides.get(key))
 
     def is_overridden_mod_file(
         self, mod_path: Path | str, relative_parts: Iterable[str]
@@ -386,17 +408,9 @@ class ModScanner:
             return False
         return parts[-1] in self._mod_overrides.get((mod, parts[:-1]), {})
 
-    def search_entries(self) -> list[tuple[str, str, Path]]:
-        """Return indexed overwrite NIFs for the existing mod-name search view."""
-        entries = [
-            (mod_path.name, f"[{nif_path.name}]", nif_path)
-            for nif_path, mod_path in self._nif_owners.items()
-        ]
-        entries.extend(
-            ("[Overwrite]", f"[{nif_path.name}]", nif_path)
-            for nif_path in self._fallback_targets
-        )
+    def search_entries(self) -> list[tuple[str, tuple[str, ...], Path]]:
+        """Return indexed overwrite assets and their visible tree paths."""
         return sorted(
-            entries,
-            key=lambda entry: (entry[0].casefold(), entry[1].casefold(), str(entry[2]).casefold()),
+            self._overwrite_search_entries,
+            key=lambda entry: (entry[0].casefold(), self._path_key(entry[1]), str(entry[2]).casefold()),
         )

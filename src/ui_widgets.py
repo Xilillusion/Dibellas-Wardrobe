@@ -100,6 +100,34 @@ def _start_nif_drag(source: QWidget, nif_path: str) -> None:
     drag.exec(Qt.DropAction.MoveAction)
 
 
+class NifDropPanel(QWidget):
+    """Accept wardrobe NIF drops anywhere within the panel."""
+
+    def __init__(self, on_nif_dropped: Callable[[str], None], parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.on_nif_dropped = on_nif_dropped
+
+    def enable_drop_targets(self) -> None:
+        for widget in [self, *self.findChildren(QWidget)]:
+            widget.setAcceptDrops(True)
+            widget.installEventFilter(self)
+
+    def eventFilter(self, watched, event) -> bool:
+        if event.type() not in (QEvent.Type.DragEnter, QEvent.Type.DragMove, QEvent.Type.Drop):
+            return super().eventFilter(watched, event)
+        nif_path = _nif_path_from_mime_data(event.mimeData())
+        if not nif_path:
+            return super().eventFilter(watched, event)
+        source = event.source()
+        if isinstance(source, QWidget) and (source is self or self.isAncestorOf(source)):
+            event.ignore()
+            return True
+        if event.type() == QEvent.Type.Drop:
+            self.on_nif_dropped(nif_path)
+        event.acceptProposedAction()
+        return True
+
+
 class ElidedLabel(QLabel):
     """Label that elides text in the middle with '...' so it never overflows."""
 

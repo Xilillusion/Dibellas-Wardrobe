@@ -697,15 +697,11 @@ class OutfitViewportWidget(QOpenGLWidget):
                 ap = item.shape_data.alpha_prop
                 sh = item.shape_data.shader
                 diffuse = sh.resolved_textures.get("Diffuse")
-                missing_diffuse = (
-                    self.settings.show_textures
-                    and diffuse is not None
-                    and diffuse.is_fallback
-                )
+                if diffuse is None or diffuse.is_fallback:
+                    continue
                 if (
                     (ap.has_alpha_property and ap.alpha_blend)
                     or sh.alpha < 0.999
-                    or missing_diffuse
                 ):
                     transparent_items.append(item)
                 else:

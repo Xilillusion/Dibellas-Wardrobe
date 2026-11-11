@@ -4,12 +4,12 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import PropertyMock, patch
+from unittest.mock import MagicMock, PropertyMock, patch
 
 import numpy as np
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QMimeData, QPoint, QPointF, Qt
+from PySide6.QtCore import QEvent, QMimeData, QPoint, QPointF, Qt
 from PySide6.QtGui import QDragEnterEvent, QDragMoveEvent, QDropEvent, QHelpEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QToolTip
@@ -67,6 +67,73 @@ class OutfitInteractionTests(unittest.TestCase):
                           Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
         self.app.sendEvent(viewport, drop)
         self.assertTrue(drop.isAccepted())
+
+    def drop_on_widget(self, widget, key, point):
+        mime = QMimeData()
+        mime.setData(NIF_DRAG_MIME_TYPE, key.encode("utf-8"))
+        enter = QDragEnterEvent(point, Qt.DropAction.MoveAction, mime,
+                                Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+        self.app.sendEvent(widget, enter)
+        move = QDragMoveEvent(point, Qt.DropAction.MoveAction, mime,
+                              Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+        self.app.sendEvent(widget, move)
+        drop = QDropEvent(QPointF(point), Qt.DropAction.MoveAction, mime,
+                          Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+        self.app.sendEvent(widget, drop)
+        self.assertTrue(enter.isAccepted())
+        self.assertTrue(move.isAccepted())
+        self.assertTrue(drop.isAccepted())
+
+    def test_drop_on_any_mods_panel_surface_removes_outfits_not_files(self):
+        tree = self.window.file_tree
+        leaf = tree.topLevelItem(0)
+        targets = (
+            (tree.viewport(), tree.visualItemRect(leaf).center()),
+            (tree.viewport(), QPoint(5, tree.viewport().height() - 5)),
+            (self.window.search_edit, self.window.search_edit.rect().center()),
+            (self.window.root_path_edit, self.window.root_path_edit.rect().center()),
+            (self.window.chk_hide_low_weight, self.window.chk_hide_low_weight.rect().center()),
+            (self.window.btn_refresh_tree, self.window.btn_refresh_tree.rect().center()),
+            (self.window.mesh_panel, QPoint(1, 1)),
+        )
+        for index, (widget, point) in enumerate(targets):
+            with self.subTest(target=index):
+                self.window._on_nif_dropped_on_preset(self.keys[1])
+                self.assertIn(self.keys[1], self.window._checked_nif_paths)
+                self.drop_on_widget(widget, self.keys[1], point)
+                self.assertNotIn(self.keys[1], self.window._checked_nif_paths)
+                self.assertTrue(all(self.keys[1] not in paths for paths in self.window._locked_presets.values()))
+                self.assertTrue(self.files[1].is_file())
+        self.window._on_nif_dropped_on_wardrobe(self.keys[3])
+        self.drop_on_widget(self.window.search_edit, self.keys[3], QPoint(5, 5))
+        self.assertNotIn(self.keys[3], self.window._checked_nif_paths)
+        self.assertTrue(self.files[3].is_file())
+
+    def test_drop_on_search_result_removes_outfit(self):
+        self.window._on_nif_dropped_on_wardrobe(self.keys[3])
+        self.window.search_edit.setText(self.window.current_root_dir.name)
+        self.window._search_timer.stop()
+        self.window._start_search_worker()
+        self.assertTrue(self.window._search_thread.wait(10000))
+        self.app.processEvents()
+        group = self.window.file_tree.topLevelItem(0)
+        self.assertIsNotNone(group)
+        point = self.window.file_tree.visualItemRect(group).center()
+        self.drop_on_widget(self.window.file_tree.viewport(), self.keys[3], point)
+        self.assertNotIn(self.keys[3], self.window._checked_nif_paths)
+        self.assertTrue(self.files[3].is_file())
+
+    def test_mods_panel_rejects_drags_originating_in_mods(self):
+        mime = QMimeData()
+        mime.setData(NIF_DRAG_MIME_TYPE, self.keys[0].encode("utf-8"))
+        event = MagicMock()
+        event.type.return_value = QEvent.Type.Drop
+        event.mimeData.return_value = mime
+        event.source.return_value = self.window.file_tree
+        self.assertTrue(self.window.mesh_panel.eventFilter(self.window.search_edit, event))
+        event.ignore.assert_called_once()
+        self.assertIn(self.keys[0], self.window._locked_presets[1])
+        self.assertIn(self.keys[0], self.window._checked_nif_paths)
 
     def test_animation_tooltip_shows_full_path_for_each_clip(self):
         root = Path(self.temp.name)
@@ -251,18 +318,46 @@ class OutfitInteractionTests(unittest.TestCase):
         self.assertNotIn(self.keys[1], self.window._checked_nif_paths)
         self.assertIn(self.keys[1], self.window._locked_presets[2])
 
-    def test_unlock_last_preset_outfit_loads_next_preset(self):
+    def test_unlock_last_preset_outfit_preserves_empty_preset(self):
         self.window._on_nif_dropped_on_wardrobe(self.keys[0])
-        self.assertEqual(self.window._current_locked_preset, 2)
-        self.assertEqual(self.window._checked_nif_paths, {self.keys[0], self.keys[1]})
+        self.assertEqual(self.window._current_locked_preset, 1)
+        self.assertEqual(self.window._locked_presets[1], set())
+        self.assertEqual(self.window._checked_nif_paths, {self.keys[0]})
         self.assertIn(self.keys[0], self.window._added_nif_items)
-        self.assertIn(self.keys[1], self.window._locked_nif_items)
+        self.assertEqual(self.window.locked_preset_combo.count(), 3)
 
-    def test_remove_last_preset_outfit_loads_next_preset(self):
+    def test_remove_last_preset_outfit_preserves_empty_preset(self):
         self.window._on_nif_dropped_on_mods(self.keys[0])
-        self.assertEqual(self.window._current_locked_preset, 2)
-        self.assertEqual(self.window._checked_nif_paths, {self.keys[1]})
-        self.assertIn(self.keys[1], self.window._locked_nif_items)
+        self.assertEqual(self.window._current_locked_preset, 1)
+        self.assertEqual(self.window._locked_presets[1], set())
+        self.assertEqual(self.window._checked_nif_paths, set())
+        self.assertEqual(self.window.locked_preset_combo.count(), 3)
+
+    def test_empty_named_presets_survive_switch_save_and_restart(self):
+        self.window._add_locked_preset()
+        self.window._locked_preset_names[4] = "Empty named preset"
+        self.window._refresh_locked_preset_selector()
+        self.window.locked_preset_combo.setCurrentIndex(
+            self.window.locked_preset_combo.findData(1)
+        )
+        self.window._add_locked_preset()
+        self.window.locked_preset_combo.setCurrentIndex(
+            self.window.locked_preset_combo.findData(1)
+        )
+        self.assertEqual(self.window._locked_presets[4], set())
+        self.assertEqual(self.window._locked_presets[5], set())
+        saved = json.loads(Path(self.window.config_path).read_text(encoding="utf-8"))
+        self.assertEqual(saved["locked_presets"]["4"], [])
+        self.assertEqual(saved["locked_presets"]["5"], [])
+        self.assertEqual(saved["locked_preset_names"]["4"], "Empty named preset")
+        root, config_path = self.window.current_root_dir, self.window.config_path
+        self.window.close()
+        self.window = DibellasWardrobeWindow(initial_root_dir=root, config_path=config_path)
+        self.assertEqual(self.window._locked_presets[4], set())
+        self.assertEqual(self.window._locked_presets[5], set())
+        self.assertEqual(self.window._locked_preset_names[4], "Empty named preset")
+        self.assertGreaterEqual(self.window.locked_preset_combo.findData(4), 0)
+        self.assertGreaterEqual(self.window.locked_preset_combo.findData(5), 0)
 
     def test_same_outfit_can_belong_to_multiple_presets(self):
         self.window._on_nif_dropped_on_preset(self.keys[1])
@@ -273,6 +368,58 @@ class OutfitInteractionTests(unittest.TestCase):
         )
         self.assertEqual(self.window._checked_nif_paths, {self.keys[1]})
         self.assertIn(self.keys[1], self.window._locked_nif_items)
+
+    def test_removing_shared_outfit_updates_all_presets_and_saved_config(self):
+        self.window._on_nif_dropped_on_preset(self.keys[1])
+        self.window._on_nif_dropped_on_mods(self.keys[1])
+        self.assertNotIn(self.keys[1], self.window._checked_nif_paths)
+        self.assertTrue(all(self.keys[1] not in paths for paths in self.window._locked_presets.values()))
+        saved = json.loads(Path(self.window.config_path).read_text(encoding="utf-8"))
+        self.assertNotIn("locked_nifs", saved)
+        self.assertTrue(all(self.keys[1] not in paths for paths in saved["locked_presets"].values()))
+
+    def test_missing_paths_removed_from_all_presets_at_startup(self):
+        config_path = self.window.config_path
+        root = self.window.current_root_dir
+        self.window.close()
+        missing = str(root / "missing.nif")
+        Path(config_path).write_text(json.dumps({
+            "locked_presets": {"1": [self.keys[0], missing], "2": [self.keys[1], missing]},
+        }), encoding="utf-8")
+        self.window = DibellasWardrobeWindow(initial_root_dir=root, config_path=config_path)
+        self.assertEqual(self.window._locked_presets, {1: {self.keys[0]}, 2: {self.keys[1]}})
+        saved = json.loads(Path(config_path).read_text(encoding="utf-8"))
+        self.assertNotIn("locked_nifs", saved)
+        self.assertTrue(all(missing not in paths for paths in saved["locked_presets"].values()))
+
+    def test_startup_cleanup_keeps_newly_empty_and_existing_empty_presets(self):
+        config_path = self.window.config_path
+        root = self.window.current_root_dir
+        self.window.close()
+        missing = str(root / "missing.nif")
+        Path(config_path).write_text(json.dumps({
+            "locked_presets": {"1": [self.keys[0]], "2": [missing], "3": []},
+            "locked_preset_names": {"2": "Missing", "3": "Empty"},
+        }), encoding="utf-8")
+        self.window = DibellasWardrobeWindow(initial_root_dir=root, config_path=config_path)
+        self.assertEqual(self.window._locked_presets, {1: {self.keys[0]}, 2: set(), 3: set()})
+        saved = json.loads(Path(config_path).read_text(encoding="utf-8"))
+        self.assertEqual(saved["locked_presets"]["2"], [])
+        self.assertEqual(saved["locked_presets"]["3"], [])
+        self.assertEqual(saved["locked_preset_names"], {"2": "Missing", "3": "Empty"})
+
+    def test_legacy_locked_nifs_load_as_preset_and_save_without_legacy_field(self):
+        config_path = self.window.config_path
+        root = self.window.current_root_dir
+        self.window.close()
+        Path(config_path).write_text(json.dumps({"locked_nifs": [self.keys[0], self.keys[1]]}), encoding="utf-8")
+        self.window = DibellasWardrobeWindow(initial_root_dir=root, config_path=config_path)
+        self.assertEqual(self.window._locked_presets, {1: {self.keys[0], self.keys[1]}})
+        self.assertEqual(self.window._checked_nif_paths, {self.keys[0], self.keys[1]})
+        self.window.save_config()
+        saved = json.loads(Path(config_path).read_text(encoding="utf-8"))
+        self.assertNotIn("locked_nifs", saved)
+        self.assertEqual(set(saved["locked_presets"]["1"]), {self.keys[0], self.keys[1]})
 
 
 if __name__ == "__main__":

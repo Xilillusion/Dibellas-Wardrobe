@@ -8,8 +8,10 @@ Dibella's Wardrobe is a desktop previewer for Skyrim Special Edition and Anniver
 - Play Skyrim `.hkx` animations (`meshes/actors/character/animations/...`) with real-time GPU Linear Blend Skinning driven by `skeleton_female.nif` and a bottom playback toolbar (Play/Pause, Loop, Timeline Scrubber, and Stop/Reset to bind pose).
 - Browse a mod directory or Mod Organizer 2 (MO2) `mods` folder, with filters for low-weight meshes, `gnd` folders, and `_gnd.nif` files.
 - Resolve material textures from the mesh's mod, nearby folders, registered roots, and MO2 `overwrite`.
-- Merge matching MO2 `overwrite/meshes` NIFs into their owning mod in the tree. Overwritten files are shown in brackets; unmatched overwrite meshes appear under `[Overwrite]`.
+- Hide mesh shapes whose diffuse texture is missing or unreadable; assigning a valid diffuse texture makes them visible.
+- Merge matching MO2 `overwrite/meshes` NIFs and animations into the tree and mod-name search. Overwritten files are shown in brackets; unmatched files appear under `[Overwrite]`. If multiple mods contain the same mesh path, the overwrite is shown in each without choosing a single owner.
 - Show CharGen-exported NIFs from `overwrite/SKSE/Plugins/CharGen` in the fallback list. Other overwrite folders are not included in the NIF tree.
+- Use the mesh tree refresh button to re-index mods, overwrite assets, and texture paths after changing files.
 - Keep selected outfits in the wardrobe, lock outfits to reload them at startup, and hide or show individual outfits.
 - Adjust lighting, shader display options, and language in Settings. Translation choices are loaded from `locales.json`.
 - Tune screen-space reflections (SSR), ambient occlusion (GTAO), and screen-space subsurface scattering (SSSS) in Settings.
@@ -68,7 +70,7 @@ For each visible outfit the app reads the XML path stored in the NIF's `HDT Skin
 
 Mass-zero and keyframed bodies follow the animated skeleton; positive-mass dynamic bodies use `<generic-constraint>` springs. Explicit sphere, capsule, and box shapes are used for collisions. Capsule `height` denotes total end-to-end height; alternatively `p0` and `p1` define the centers of its caps. Box shapes require explicit `half-extents`. Shapeless bodies have no collision geometry. CBPC does not supply SMP colliders. Shared bones remain active in SMP; when CBPC is active, its result takes precedence for visual deformation.
 
-`<per-vertex-shape>` and `<per-triangle-shape>` resolve skinned NIF shapes by name. Their vertices and triangle plates follow the animated or simulated bones, and contacts are submitted to Bullet using the XML's margins, penetration, weight thresholds and collision filters. An XML loaded as an additional collision XML can resolve shapes from any visible NIF; an outfit XML resolves shapes from its own NIF. Missing meshes are reported in the SMP diagnostics. `VirtualGround` requires a matching NIF shape; it is not an implicit floor. `stiffspring` and `conetwist` constraints and `<pattern>` macros are not simulated.
+`<per-vertex-shape>` and `<per-triangle-shape>` resolve skinned NIF shapes by name. Their vertices and triangle plates follow the animated or simulated bones, and contacts are submitted to Bullet using the XML's margins, penetration, weight thresholds and collision filters. An XML loaded as an additional collision XML can resolve shapes from any visible NIF; an outfit XML resolves shapes from its own NIF. Missing meshes are reported in the SMP diagnostics, except for `VirtualGround`. `VirtualGround` requires a matching NIF shape; it is not an implicit floor. `stiffspring` and `conetwist` constraints and `<pattern>` macros are not simulated.
 
 ## Run
 
@@ -123,7 +125,7 @@ Options:
 
 1. Select a directory using **Browse Folder** (or start with `--root`).
 2. Expand folders in the Outfit Meshes tree. Click a `.nif` to add it to or remove it from the preview.
-3. Drag outfits from Mods to Wardrobe or the current preset. In Wardrobe, double-click an outfit to remove it or right-click it to add it to the current preset. Drag preset outfits to Wardrobe to unlock them, or drag outfits to Mods to remove them.
+3. Drag outfits from Mods to Wardrobe or the current preset. In Wardrobe, double-click an outfit to remove it or right-click it to add it to the current preset. Drag preset outfits to Wardrobe to unlock them, or drop wardrobe and preset outfits anywhere on the Mods panel to remove them from the preview and presets without deleting files.
 4. Adjust camera and rendering settings as needed:
    - Left-drag: orbit
    - Right-drag, or Shift + left-drag: pan
@@ -132,7 +134,7 @@ Options:
    - `Ctrl+O`: choose a mod directory
    - `Ctrl+F`: toggle the mod-directory filter
 
-Presets are saved in the configuration. The first preset is loaded at startup, and selecting another preset switches its outfits while retaining other wardrobe outfits. Unavailable preset mesh paths are removed from the configuration.
+Presets are saved in the configuration and remain available when empty. The first preset is loaded at startup, and selecting another preset switches its outfits while retaining other wardrobe outfits. Unavailable preset mesh paths are removed from the configuration.
 
 The CBPC overlay controls breast gravity and separate softness values for breasts, butt and belly.
 Each softness slider ranges from 0× (motion off for that area) to 5× (softer, slower response);
@@ -151,7 +153,7 @@ previous dynamics exactly.
 
 ## Configuration and languages
 
-The default configuration file is `config.json` in the project directory. It stores the last-used folder, language, lighting and display settings, CBPC and SMP physics settings, and locked NIF paths. Use `--config` to select another file.
+The default configuration file is `config.json` in the project directory. It stores the last-used folder, language, lighting and display settings, CBPC and SMP physics settings, and locked NIF presets. Older `locked_nifs` lists are migrated to a preset when the preset mapping is absent or invalid. Use `--config` to select another file.
 
 Available languages are read from `locales.json`. Each locale is an object keyed by language code and must include a `language_name` string; translated UI text is defined by the other entries in that object.
 

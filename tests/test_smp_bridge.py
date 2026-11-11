@@ -159,6 +159,47 @@ def test_linear_bounce_xml_is_still_validated(tmp_path, bounce, status):
     assert native.load_xml(xml, names) == status
 
 
+@needs_native
+def test_duplicate_bone_definitions_are_silent_and_keep_original_body(tmp_path):
+    native = get_native()
+    names = ["shared", "other"]
+    bind = np.repeat(np.eye(4, dtype=np.float32)[None, :, :], len(names), axis=0)
+    assert native.set_bind_pose(names, bind) == 0
+    xml = tmp_path / "duplicate.xml"
+    xml.write_text(
+        '<system><bone name="shared"><mass>1</mass></bone>'
+        '<bone name="shared"><mass>2</mass></bone>'
+        '<bone name="other"><mass>1</mass><unknown-setting>1</unknown-setting></bone>'
+        '<generic-constraint bodyA="shared" bodyB="other"/></system>',
+        encoding="utf-8",
+    )
+    assert native.load_xml(xml, names) == 0
+    assert sorted(native.body_names(KIND_DYNAMIC)) == names[::-1]
+    messages = native.drain_log()
+    assert not any("second definition skipped" in line for line in messages)
+    assert any("unknown-setting" in line for line in messages)
+
+
+@needs_native
+@pytest.mark.parametrize("shape_type", ["per-triangle-shape", "per-vertex-shape"])
+def test_missing_virtual_ground_is_silent_but_other_missing_meshes_are_reported(tmp_path, shape_type):
+    native = get_native()
+    names = ["cloth"]
+    bind = np.eye(4, dtype=np.float32)[None, :, :]
+    assert native.set_bind_pose(names, bind) == 0
+    xml = tmp_path / "ground.xml"
+    xml.write_text(
+        f'<system><{shape_type} name="VirtualGround"/><{shape_type} name="virtualground"/>'
+        f'<{shape_type} name="MissingMesh"/><bone name="cloth"><mass>1</mass></bone></system>',
+        encoding="utf-8",
+    )
+    assert native.load_xml(xml, names) == 0
+    assert native.body_names(KIND_DYNAMIC) == names
+    messages = native.drain_log()
+    assert not any("virtualground" in line.lower() for line in messages)
+    assert any("shape MissingMesh: no matching skinned NIF mesh" in line for line in messages)
+
+
 def test_xml_resolution_prefers_extra_data_then_colocated(tmp_path):
     nif, ref = make_outfit(tmp_path)
     expected = (tmp_path / "meshes" / "mod" / "skirt.xml").resolve()

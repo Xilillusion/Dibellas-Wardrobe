@@ -454,7 +454,8 @@ internal sealed class SmpXmlLoader
         var sources = manager.FindMeshes(name).ToArray();
         if (sources.Length == 0)
         {
-            Warn(e, $"shape {name}: no matching skinned NIF mesh; collision shape skipped");
+            if (!name.Equals("VirtualGround", StringComparison.OrdinalIgnoreCase))
+                Warn(e, $"shape {name}: no matching skinned NIF mesh; collision shape skipped");
             return;
         }
         foreach (var source in sources)
@@ -563,8 +564,6 @@ internal sealed class SmpXmlLoader
             ReadBoneTemplate(e, template);
             if (manager.AddShapeToAnchor(existing, template))
                 createdBodies++;
-            else if (!existing.Kinematic || template.Shape != null)
-                Warn(e, $"bone {name} already exists; second definition skipped");
             return;
         }
         CreateBone(name, target, Optional(e, "template"), e, e);

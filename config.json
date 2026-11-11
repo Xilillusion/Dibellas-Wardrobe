@@ -1,6 +1,6 @@
 {
   "default_folder": "E:\\Skyrim\\Dibellas-Wardrobe\\sample",
-  "language": "zh",
+  "language": "en",
   "lighting": {
     "light_azimuth_deg": 35.0,
     "light_elevation_deg": 28.0,
@@ -45,35 +45,12 @@
     }
   },
   "smp": {
-    "enabled": true,
+    "enabled": false,
     "collision_xmls": [],
     "show_collisions": false
   },
-  "locked_nifs": [
-    "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\CBBE 3BA\\meshes\\armor\\Mu3B\\3BBBCollisionArmorP_1.nif",
-    "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\bra_1.nif",
-    "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\crown1.nif",
-    "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\glove_1.nif",
-    "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\hairsmp1.nif",
-    "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\heels_1.nif",
-    "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\necklace_1.nif",
-    "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\pantylace_1.nif",
-    "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\pantysmp_1.nif",
-    "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\topin_1.nif",
-    "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\topoutmet_1.nif",
-    "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\topoutshomet_1.nif",
-    "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\topoutsmpt_1.nif",
-    "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[Melodic] Echidna\\meshes\\Melodic\\Echida\\Cloths_1.nif",
-    "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[Melodic] Echidna\\meshes\\Melodic\\Echida\\Forearms_1.nif",
-    "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[Melodic] Echidna\\meshes\\Melodic\\Echida\\Hair_1.nif",
-    "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[Melodic] Echidna\\meshes\\Melodic\\Echida\\Hands_1.nif",
-    "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[Melodic] Echidna\\meshes\\Melodic\\Echida\\Heels_1.nif",
-    "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[Melodic] Echidna\\meshes\\Melodic\\Echida\\Necklace_1.nif",
-    "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[Melodic] Echidna\\meshes\\Melodic\\Echida\\Top_1.nif"
-  ],
   "locked_presets": {
-    "1": [
-      "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\CBBE 3BA\\meshes\\armor\\Mu3B\\3BBBCollisionArmorP_1.nif",
+    "2": [
       "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[Melodic] Echidna\\meshes\\Melodic\\Echida\\Cloths_1.nif",
       "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[Melodic] Echidna\\meshes\\Melodic\\Echida\\Forearms_1.nif",
       "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[Melodic] Echidna\\meshes\\Melodic\\Echida\\Hair_1.nif",
@@ -82,8 +59,7 @@
       "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[Melodic] Echidna\\meshes\\Melodic\\Echida\\Necklace_1.nif",
       "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[Melodic] Echidna\\meshes\\Melodic\\Echida\\Top_1.nif"
     ],
-    "2": [
-      "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\CBBE 3BA\\meshes\\armor\\Mu3B\\3BBBCollisionArmorP_1.nif",
+    "1": [
       "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\bra_1.nif",
       "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\crown1.nif",
       "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\glove_1.nif",
@@ -99,7 +75,7 @@
     ]
   },
   "locked_preset_names": {
-    "1": "Echidna",
-    "2": "Mage"
+    "2": "Echidna",
+    "1": "Mage"
   }
 }
