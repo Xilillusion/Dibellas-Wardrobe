@@ -19,7 +19,6 @@ from src.smp_bridge import (
     SmpNative,
     find_native_dir,
     get_native,
-    primitive_debug_lines,
     resolve_smp_xml,
 )
 
@@ -824,21 +823,38 @@ def test_cbpc_shapes_are_not_registered(tmp_path):
 
 
 @needs_native
-def test_separate_collision_xml_and_capsule_transform(tmp_path):
+def test_visible_outfits_load_distinct_xmls_into_one_world(tmp_path):
     nif, ref = make_outfit(tmp_path)
-    collision = tmp_path / "Collision.xml"
-    collision.write_text("""<system>
+    other_nif = tmp_path / "other.nif"
+    other_nif.touch()
+    other_nif.with_suffix(".xml").write_text(
+        '<system><rigid-body name="hand collider" bone="NPC L Hand [LHnd]">'
+        '<shape type="sphere" radius="2"/></rigid-body></system>',
+        encoding="utf-8",
+    )
+    solver = SmpBridgeSolver(ENGINE)
+    solver.add_source("skirt", nif, ref, NODES)
+    solver.add_source("other", other_nif, "", {})
+    solver.set_visible_sources(["skirt", "other"])
+    solver.refresh()
+    assert solver.has_physics
+    assert "NPC L Hand [LHnd]" in get_native().body_names(KIND_KINEMATIC)
+    assert "skirt1" in get_native().body_names(KIND_DYNAMIC)
+    solver.set_visible_sources(["skirt"])
+    solver.refresh()
+    assert "NPC L Hand [LHnd]" not in get_native().body_names(KIND_KINEMATIC)
+
+
+@needs_native
+def test_outfit_xml_capsule_transform(tmp_path):
+    collider = """
       <rigid-body name="thigh collider" bone="NPC L Hand [LHnd]">
         <motion-type>keyframed</motion-type>
         <translation x="1" y="2" z="3"/>
         <shape type="capsule" radius="2"><p0 x="0" y="0" z="0"/><p1 x="4" y="0" z="0"/></shape>
       </rigid-body>
-    </system>""", encoding="utf-8")
-    solver = SmpBridgeSolver(ENGINE)
-    solver.add_source("skirt", nif, ref, NODES)
-    solver.set_collision_xmls([collision])
-    solver.set_visible_sources(["skirt"])
-    solver.refresh()
+    """
+    solver = make_solver(tmp_path, xml=SKIRT_XML.replace("</system>", collider + "</system>"))
     assert solver.has_physics
     pose = pose_with_anchor_offset()
     hand = np.eye(4, dtype=np.float32)
@@ -851,9 +867,6 @@ def test_separate_collision_xml_and_capsule_transform(tmp_path):
     matrix = capsule[6:].reshape(4, 4)
     assert np.allclose(matrix[:3, 3], [8, 23, 33], atol=1e-5)
     assert np.allclose(matrix[:3, 2], [0, 1, 0], atol=1e-5)
-    lines = primitive_debug_lines([capsule])
-    assert np.allclose(lines.min(axis=0), [6, 19, 31], atol=1e-5)
-    assert np.allclose(lines.max(axis=0), [10, 27, 35], atol=1e-5)
 
 
 @needs_native
@@ -890,7 +903,6 @@ def test_total_capsule_height_and_explicit_box_dimensions(tmp_path):
     box = next(p for p in primitives if p[0] == 2)
     assert np.allclose(capsule[1:3], [2, 6])
     assert np.allclose(box[3:6], [1, 2, 3])
-    assert len(primitive_debug_lines([box])) == 24
 
 
 @needs_native

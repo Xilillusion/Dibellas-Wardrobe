@@ -79,7 +79,9 @@ class CheckboxConfig:
     show_ground_grid: bool = True
 
 
-SOFTNESS_GROUPS = ("breasts", "butt", "belly", "other")
+SOFTNESS_GROUPS = ("breasts", "butt", "belly", "thigh", "other")
+SOFTNESS_MIN = 0.0
+SOFTNESS_MAX = 10.0
 
 
 @dataclass
@@ -92,8 +94,6 @@ class CbpcConfig:
 @dataclass
 class SmpConfig:
     enabled: bool = True
-    collision_xmls: list[str] = field(default_factory=list)
-    show_collisions: bool = False
 
 
 @dataclass
@@ -106,6 +106,7 @@ class AppConfig:
     cbpc: CbpcConfig = field(default_factory=CbpcConfig)
     smp: SmpConfig = field(default_factory=SmpConfig)
     locked_presets: Dict[str, list[str]] = field(default_factory=dict)
+    locked_preset_diffuse_textures: Dict[str, Dict[str, Dict[str, str]]] = field(default_factory=dict)
     locked_preset_names: Dict[str, str] = field(default_factory=dict)
 
     @classmethod
@@ -153,6 +154,25 @@ class AppConfig:
                 paths = [path for path in legacy_paths if isinstance(path, str)]
                 if paths:
                     cfg.locked_presets = {"1": paths}
+
+        textures = data.get("locked_preset_diffuse_textures")
+        if isinstance(textures, dict):
+            for page, meshes in textures.items():
+                if page not in cfg.locked_presets or not isinstance(meshes, dict):
+                    continue
+                valid_meshes: Dict[str, Dict[str, str]] = {}
+                for mesh, shapes in meshes.items():
+                    if mesh not in cfg.locked_presets[page] or not isinstance(shapes, dict):
+                        continue
+                    valid_shapes = {
+                        index: path for index, path in shapes.items()
+                        if isinstance(index, str) and index.isdecimal()
+                        and isinstance(path, str) and path
+                    }
+                    if valid_shapes:
+                        valid_meshes[mesh] = valid_shapes
+                if valid_meshes:
+                    cfg.locked_preset_diffuse_textures[page] = valid_meshes
 
         preset_names = data.get("locked_preset_names")
         if isinstance(preset_names, dict):
@@ -243,11 +263,15 @@ class AppConfig:
                         continue
                     value = softness[group]
                     if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
-                        cfg.cbpc.softness[group] = max(0.0, min(5.0, float(value)))
+                        cfg.cbpc.softness[group] = max(SOFTNESS_MIN, min(SOFTNESS_MAX, float(value)))
                     else:
                         log.warning("Ignoring invalid CBPC softness for %s", group)
+                if "thigh" not in softness:
+                    cfg.cbpc.softness["thigh"] = cfg.cbpc.softness["other"]
             elif isinstance(softness, (int, float)) and not isinstance(softness, bool) and math.isfinite(softness):
-                cfg.cbpc.softness = dict.fromkeys(SOFTNESS_GROUPS, max(0.0, min(5.0, float(softness))))
+                cfg.cbpc.softness = dict.fromkeys(
+                    SOFTNESS_GROUPS, max(SOFTNESS_MIN, min(SOFTNESS_MAX, float(softness)))
+                )
             elif "softness" in cb_data:
                 log.warning("Ignoring invalid CBPC softness setting")
             if "softness" not in cb_data and "bounce" in cb_data:
@@ -263,13 +287,6 @@ class AppConfig:
         if isinstance(smp_data, dict):
             if isinstance(smp_data.get("enabled"), bool):
                 cfg.smp.enabled = smp_data["enabled"]
-            if isinstance(smp_data.get("show_collisions"), bool):
-                cfg.smp.show_collisions = smp_data["show_collisions"]
-            paths = smp_data.get("collision_xmls", [])
-            if isinstance(paths, list) and all(isinstance(path, str) for path in paths):
-                cfg.smp.collision_xmls = paths
-            else:
-                log.warning("Ignoring invalid SMP collision XML paths")
 
         return cfg
 

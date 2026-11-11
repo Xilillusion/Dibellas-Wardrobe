@@ -20,7 +20,7 @@ import numpy as np
 
 from .anim_engine import AnimEngine
 from .cbpc_solver import CbpcSolver, ColliderShapes, ParticleParams
-from .config import SOFTNESS_GROUPS
+from .config import SOFTNESS_GROUPS, SOFTNESS_MAX, SOFTNESS_MIN
 
 log = logging.getLogger("dibellas_wardrobe.cbpc_manager")
 
@@ -30,10 +30,6 @@ CBPC_CONFIG_PATH = _RESOURCE_ROOT / "assets" / "CBPConfig.json"
 GRAVITY_MIN = 0.0
 GRAVITY_MAX = 3.0
 DEFAULT_GRAVITY = 1.0 / 3.0
-SOFTNESS_MIN = 0.0
-SOFTNESS_MAX = 5.0
-
-
 def is_breast(config_key: str) -> bool:
     return "breast" in normalize_node_key(config_key)
 
@@ -159,7 +155,8 @@ class CbpcManager:
             key = normalize_node_key(cfg_key)
             group = ("breasts" if is_breast(cfg_key) else
                      "butt" if "butt" in key else
-                     "belly" if key == "belly" else "other")
+                     "belly" if key == "belly" else
+                     "thigh" if "thigh" in key else "other")
             out.append(
                 ParticleParams(
                     name=pose_name,

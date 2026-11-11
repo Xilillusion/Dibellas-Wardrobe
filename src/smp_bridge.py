@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import ctypes
 import logging
-import math
 import os
 import sys
 from dataclasses import dataclass
@@ -283,60 +282,6 @@ def resolve_smp_xml(nif_path: Path | str, xml_ref: str = "") -> Optional[Path]:
     return None
 
 
-def primitive_debug_lines(primitives: Sequence[np.ndarray], segments: int = 24) -> np.ndarray:
-    """Return world-space line segments for the exact native primitive dimensions."""
-    lines: List[Tuple[float, float, float]] = []
-    for data in primitives:
-        kind, radius, height, x, y, z = data[:6]
-        points: List[Tuple[float, float, float]] = []
-
-        def line(a, b):
-            points.extend((a, b))
-
-        if int(kind) == 2:
-            corners = [(sx * x, sy * y, sz * z) for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)]
-            for i, a in enumerate(corners):
-                for bit in (1, 2, 4):
-                    j = i ^ bit
-                    if i < j:
-                        line(a, corners[j])
-        else:
-            def circle(axis: int, center_z: float, ring_radius: float) -> None:
-                for i in range(segments):
-                    a, b = 2 * math.pi * i / segments, 2 * math.pi * (i + 1) / segments
-                    def point(t):
-                        c, s = ring_radius * math.cos(t), ring_radius * math.sin(t)
-                        return (c, s, center_z) if axis == 2 else ((c, 0, center_z + s) if axis == 1 else (0, c, center_z + s))
-                    line(point(a), point(b))
-
-            if int(kind) == 0:
-                for axis in range(3):
-                    circle(axis, 0, radius)
-            else:
-                half = height / 2
-                circle(2, -half, radius)
-                circle(2, half, radius)
-                for axis in (0, 1):
-                    for side in (-1, 1):
-                        def point(angle):
-                            radial = radius * math.cos(angle)
-                            zz = side * (half + radius * math.sin(angle))
-                            return (radial, 0, zz) if axis == 0 else (0, radial, zz)
-                        for i in range(segments // 2):
-                            a = math.pi * i / (segments // 2)
-                            b = math.pi * (i + 1) / (segments // 2)
-                            line(point(a), point(b))
-                for angle in (0, math.pi / 2, math.pi, 3 * math.pi / 2):
-                    px, py = radius * math.cos(angle), radius * math.sin(angle)
-                    line((px, py, -half), (px, py, half))
-
-        vertices = np.asarray(points, dtype=np.float32)
-        matrix = data[6:].reshape(4, 4)
-        world = vertices @ matrix[:3, :3].T + matrix[:3, 3]
-        lines.extend(map(tuple, world))
-    return np.asarray(lines, dtype=np.float32).reshape(-1, 3)
-
-
 # ----------------------------------------------------------------------
 # Solver
 # ----------------------------------------------------------------------
@@ -377,7 +322,6 @@ class SmpBridgeSolver:
         self._native_dir = native_dir
         self._sources: Dict[str, _NifSource] = {}
         self._visible: FrozenSet[str] = frozenset()
-        self._collision_xmls: Tuple[Path, ...] = ()
         self._signature: Optional[tuple] = None
         self._failed = False
 
@@ -522,15 +466,12 @@ class SmpBridgeSolver:
     def set_visible_sources(self, keys: Iterable[str]) -> None:
         self._visible = frozenset(k for k in keys if k in self._sources)
 
-    def set_collision_xmls(self, paths: Iterable[Path | str]) -> None:
-        self._collision_xmls = tuple(Path(path) for path in paths)
-
     def refresh(self) -> bool:
-        """Rebuild the native world if the visible outfits, XMLs or enable flag changed.
+        """Rebuild the native world if the visible outfits or enable flag changed.
 
         Returns True when the set of simulated bones changed.
         """
-        signature = (self.enabled, self._visible, self._collision_xmls)
+        signature = (self.enabled, self._visible)
         if signature == self._signature:
             return False
         self._signature = signature
@@ -550,12 +491,6 @@ class SmpBridgeSolver:
             return
 
         xml_files: Dict[Tuple[str, str], Path] = {}
-        for path in self._collision_xmls:
-            if not path.is_file():
-                self._warn(f"collision XML '{path}' was not found")
-                continue
-            xml = path.resolve()
-            xml_files.setdefault((str(xml).casefold(), ""), xml)
         for key in sorted(self._visible):
             source = self._sources[key]
             xml = resolve_smp_xml(source.path, source.xml_ref)
@@ -650,11 +585,6 @@ class SmpBridgeSolver:
         """Snap the cloth back to its reference pose with zero velocity (seek, loop wrap, new clip)."""
         if self.has_physics and _native is not None:
             _native.reset()
-
-    def collision_debug_lines(self) -> np.ndarray:
-        if not self.is_active or _native is None:
-            return np.zeros((0, 3), dtype=np.float32)
-        return primitive_debug_lines(_native.primitives())
 
     def update(
         self, pose: Dict[str, np.ndarray], dt: float, kinematic_pose: Optional[Dict[str, np.ndarray]] = None

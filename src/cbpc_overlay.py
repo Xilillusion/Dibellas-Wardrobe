@@ -1,4 +1,4 @@
-"""Semi-transparent physics control panel anchored to the bottom-right of the 3D viewport."""
+"""Physics controls for the settings sidebar."""
 
 from __future__ import annotations
 
@@ -7,8 +7,10 @@ from typing import Mapping, Optional, Tuple
 from PySide6.QtCore import QSignalBlocker, Qt, Signal
 from PySide6.QtWidgets import QCheckBox, QFrame, QHBoxLayout, QLabel, QSlider, QVBoxLayout, QWidget
 
+from .config import SOFTNESS_MAX, SOFTNESS_MIN
+
 STEPS_PER_UNIT = 30  # slider resolution: 1.0 (More Gravity) == 30
-SOFTNESS_STEPS = 20  # slider resolution: 1.0x == 20
+SOFTNESS_STEPS = 2  # slider resolution: 1.0x == 2
 
 
 class CbpcOverlay(QFrame):
@@ -19,23 +21,15 @@ class CbpcOverlay(QFrame):
     gravityChanged = Signal(float)
     softnessChanged = Signal(str, float)
 
-    MARGIN = 12
-
     def __init__(
         self,
         parent: QWidget,
         minimum: float,
         maximum: float,
-        softness_range: Tuple[float, float] = (0.0, 5.0),
+        softness_range: Tuple[float, float] = (SOFTNESS_MIN, SOFTNESS_MAX),
     ) -> None:
         super().__init__(parent)
         self.setObjectName("cbpcOverlay")
-        self.setStyleSheet(
-            "#cbpcOverlay { background-color: rgba(20, 22, 28, 170);"
-            " border: 1px solid rgba(255, 255, 255, 50); border-radius: 6px; }"
-            "#cbpcOverlay QCheckBox, #cbpcOverlay QLabel { color: #e6e6e6; }"
-            "#cbpcOverlay QCheckBox:disabled, #cbpcOverlay QLabel:disabled { color: #8a8a8a; }"
-        )
         self.captions: dict[str, QLabel] = {}
 
         self.smp_checkbox = QCheckBox("Enable SMP Physics", self)
@@ -52,14 +46,15 @@ class CbpcOverlay(QFrame):
         self.softness_labels: dict[str, QLabel] = {}
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
         layout.addWidget(self.smp_checkbox)
         layout.addWidget(self.checkbox)
         layout.addLayout(self._row("gravity", "Gravity", self.slider, self.label))
-        for group, caption in (("breasts", "Breasts"), ("butt", "Butt"), ("belly", "Belly")):
+        for group, caption in (("breasts", "Breasts"), ("butt", "Butt"), ("belly", "Belly"), ("thigh", "Thigh")):
             slider = QSlider(Qt.Orientation.Horizontal, self)
             slider.setRange(round(softness_range[0] * SOFTNESS_STEPS), round(softness_range[1] * SOFTNESS_STEPS))
+            slider.setPageStep(1)
             slider.setValue(SOFTNESS_STEPS)
             slider.setAccessibleName(f"{caption} softness")
             label = QLabel(self)
@@ -93,7 +88,7 @@ class CbpcOverlay(QFrame):
         self.label.setText(f"{factor:.2f}x")
 
     def _update_softness_label(self, group: str) -> None:
-        self.softness_labels[group].setText(f"{self.softness_sliders[group].value() / SOFTNESS_STEPS:.2f}x")
+        self.softness_labels[group].setText(f"{self.softness_sliders[group].value() / SOFTNESS_STEPS:.1f}x")
 
     def _on_softness(self, group: str, value: int) -> None:
         self._update_softness_label(group)
@@ -139,15 +134,7 @@ class CbpcOverlay(QFrame):
             w.blockSignals(False)
         self._update_label()
         for group in self.softness_sliders:
-            self._update_softness_label(group)
-
-    def reposition(self) -> None:
-        parent = self.parentWidget()
-        if parent is None:
-            return
-        self.adjustSize()
-        self.move(
-            parent.width() - self.width() - self.MARGIN,
-            parent.height() - self.height() - self.MARGIN,
-        )
-        self.raise_()
+            if softness is None:
+                self._update_softness_label(group)
+            else:
+                self.softness_labels[group].setText(f"{softness[group]:.1f}x")

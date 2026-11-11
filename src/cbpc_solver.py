@@ -20,10 +20,9 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 # Tuned for natural 3BA flesh dynamics without artificial rigidification
-STIFFNESS_SCALE = 8_500.0  # k ~ 160-180 (natural 2-3 Hz wobble frequency)
-DAMPING_SCALE = 150.0  # Under-damped (allows 1-2 smooth elastic oscillations)
-GRAVITY_SCALE = 12_000.0  # Natural idle sag (~0.8 to 1.5 Skyrim units)
-BREAST_REST_GRAVITY_SCALE = 1.2  # Match the previous equilibrium at default softness.
+STIFFNESS_SCALE = 13_500.0  # k ~ 160-180 (natural 2-3 Hz wobble frequency)
+DAMPING_SCALE = 45.0  # Under-damped response with sustained, decaying oscillations
+GRAVITY_SCALE = 9_500.0  # Natural idle sag (~0.8 to 1.5 Skyrim units)
 MIN_STIFFNESS = 1e-3
 FIXED_DT = 1.0 / 240.0
 MAX_SUBSTEPS = 8
@@ -174,7 +173,7 @@ class CbpcSolver:
             self._d[i] = max(p.damping, 0.0) * DAMPING_SCALE * d_mult
             if p.gravity_as_offset:
                 base_k = max(p.stiffness, MIN_STIFFNESS) * STIFFNESS_SCALE
-                self._rest_offset[i, 2] = -max(p.gravity, 0.0) * GRAVITY_SCALE * BREAST_REST_GRAVITY_SCALE / base_k
+                self._rest_offset[i, 2] = -max(p.gravity, 0.0) * GRAVITY_SCALE / base_k
             else:
                 self._g[i] = p.gravity * GRAVITY_SCALE * g_mult
             self._m[i] = max(p.mass, _EPS)

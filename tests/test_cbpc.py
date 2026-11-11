@@ -474,7 +474,7 @@ def test_collision_keeps_tangential_velocity():
     assert s.vel[0, 1] == 7.0 and s.vel[0, 0] == -5.0
 
 def test_overlay_states():
-    from PySide6.QtWidgets import QApplication, QWidget
+    from PySide6.QtWidgets import QAbstractSlider, QApplication, QWidget
     from src.cbpc_manager import GRAVITY_MIN
     from src.cbpc_overlay import CbpcOverlay, STEPS_PER_UNIT
 
@@ -488,24 +488,27 @@ def test_overlay_states():
     assert ov.checkbox.isChecked() and ov.slider.isEnabled()
     assert ov.slider.minimum() == 0 and ov.slider.maximum() == round(GRAVITY_MAX * STEPS_PER_UNIT)
     assert ov.slider.value() == 30 and ov.label.text() == "1.00x"
-    ov.reposition()
-    assert ov.x() + ov.width() < 600 and ov.y() + ov.height() < 400 and ov.x() > 100
     seen = []
     ov.gravityChanged.connect(seen.append)
     ov.slider.setValue(0)
     assert seen == [0.0] and ov.label.text() == "0.00x"
-    assert set(ov.softness_sliders) == {"breasts", "butt", "belly"}
-    assert all(s.minimum() == 0 and s.maximum() == 100 for s in ov.softness_sliders.values())
+    assert set(ov.softness_sliders) == {"breasts", "butt", "belly", "thigh"}
+    assert all(s.minimum() == 0 and s.maximum() == 20 for s in ov.softness_sliders.values())
+    assert all(s.singleStep() == 1 and s.pageStep() == 1 for s in ov.softness_sliders.values())
     seen_softness = []
     ov.softnessChanged.connect(lambda group, value: seen_softness.append((group, value)))
-    for group, value in (("breasts", 100), ("butt", 40), ("belly", 0)):
+    for group, value in (("breasts", 20), ("butt", 4), ("belly", 0), ("thigh", 8)):
         ov.softness_sliders[group].setValue(value)
-    assert seen_softness == [("breasts", 5.0), ("butt", 2.0), ("belly", 0.0)]
-    assert ov.softness_labels["breasts"].text() == "5.00x"
-    values = {"breasts": 0.2, "butt": 2.0, "belly": 3.0}
+    assert seen_softness == [("breasts", 10.0), ("butt", 2.0), ("belly", 0.0), ("thigh", 4.0)]
+    assert ov.softness_labels["breasts"].text() == "10.0x"
+    values = {"breasts": 0.2, "butt": 2.0, "belly": 3.0, "thigh": 1.5}
     ov.sync(True, True, 1.0, 4, values)
-    assert [ov.softness_sliders[g].value() for g in values] == [4, 40, 60]
-    assert len(seen_softness) == 3
+    assert [ov.softness_sliders[g].value() for g in values] == [0, 4, 6, 3]
+    assert ov.softness_labels["breasts"].text() == "0.2x"
+    assert len(seen_softness) == 4
+    ov.softness_sliders["breasts"].triggerAction(QAbstractSlider.SliderAction.SliderSingleStepAdd)
+    assert seen_softness[-1] == ("breasts", 0.5)
+    assert ov.softness_labels["breasts"].text() == "0.5x"
     ov.sync(False, True, 1.0, 4, values)
     assert all(not slider.isEnabled() for slider in ov.softness_sliders.values())
     assert app is not None
@@ -518,6 +521,7 @@ def test_overlay_states():
         (1.0, 1.0, 1.0, 1.2, 1.2),
         (2.0, 1 / 1.7, 1 / 1.5, 1.6, 1.8),
         (5.0, 1 / 3.8, 1 / 3.0, 2.8, 3.6),
+        (10.0, 1 / 7.3, 1 / 5.5, 4.8, 6.6),
     ],
 )
 def test_softness_scales_parameters_and_limits(softness, k_mult, d_mult, g_mult, limit_amp):
@@ -552,10 +556,10 @@ def test_softness_updates_manager_and_zero_disables_motion():
     assert np.allclose(s._d[breast], d[breast] / 1.5) and np.array_equal(s.pos, pos)
     assert np.array_equal(s._k[~breast], k[~breast])
     mgr.set_softness("butt", 99.0)
-    assert mgr.softness["butt"] == 5.0
+    assert mgr.softness["butt"] == 10.0
     for name in ("NPC L Butt", "NPC R Butt"):
         i = s.names.index(name)
-        assert s._k[i] == pytest.approx(k[i] / 3.8)
+        assert s._k[i] == pytest.approx(k[i] / 7.3)
     mgr.set_softness("belly", 0.0)
     pose = ENGINE.get_bind_pose()
     mgr.reset(pose)
@@ -589,10 +593,14 @@ def test_softness_changes_sag_and_damping_ratio():
     ("breasts", {"L Breast01", "L Breast02", "R Breast01"}),
     ("butt", {"NPC L Butt", "NPC R Butt"}),
     ("belly", {"NPC Belly"}),
+    ("thigh", {"NPC L FrontThigh", "NPC R FrontThigh", "NPC L RearThigh", "NPC R RearThigh"}),
 ])
 def test_each_softness_group_changes_only_its_own_particles(group, affected):
     mgr = CbpcManager(ENGINE)
-    mgr.set_mesh_bones("body", MESH_BONES + ["R Breast01", "NPC Belly", "NPC L FrontThigh"])
+    mgr.set_mesh_bones("body", MESH_BONES + [
+        "R Breast01", "NPC Belly", "NPC L FrontThigh", "NPC R FrontThigh",
+        "NPC L RearThigh", "NPC R RearThigh", "NPC L Calf",
+    ])
     before = np.column_stack((mgr.solver._k, mgr.solver._d, mgr.solver._g,
                               mgr.solver._maxoff, mgr.solver._colmax))
     mgr.set_softness(group, 2.0)
@@ -634,12 +642,40 @@ def test_softness_changes_response_to_movement():
     assert positions[0] > positions[1] > positions[2]
 
 
+@pytest.mark.parametrize("group,name", [
+    ("breasts", "L Breast01"),
+    ("butt", "NPC L Butt"),
+    ("thigh", "NPC L FrontThigh"),
+])
+@pytest.mark.parametrize("softness", [1.0, 5.0, 10.0])
+def test_softness_retains_bounce_across_successive_peaks(group, name, softness):
+    mgr = CbpcManager(ENGINE)
+    mgr.set_mesh_bones("body", [name])
+    mgr.set_softness(group, softness)
+    pose = ENGINE.get_bind_pose()
+    mgr.reset(pose)
+    mgr.solver.pos[0, 0] += 0.5
+    displacement = []
+    for _ in range(600):
+        mgr.update(pose, 1 / 120)
+        displacement.append(mgr.solver.pos[0, 0] - mgr.solver.anim[0, 0])
+    peaks = [
+        abs(displacement[i])
+        for i in range(1, len(displacement) - 1)
+        if abs(displacement[i]) > abs(displacement[i - 1])
+        and abs(displacement[i]) >= abs(displacement[i + 1])
+    ]
+    assert len(peaks) >= 3
+    assert 0.72 <= peaks[1] / peaks[0] < 1.0
+    assert 0.72 <= peaks[2] / peaks[1] < 1.0
+
+
 def test_softness_extremes_remain_finite():
     mgr = CbpcManager(ENGINE)
     mgr.set_mesh_bones("body", MESH_BONES)
     pose = ENGINE.get_bind_pose()
-    for softness in (0.05, 5.0):
-        for group in ("breasts", "butt", "belly", "other"):
+    for softness in (0.05, 5.0, 10.0):
+        for group in ("breasts", "butt", "belly", "thigh", "other"):
             mgr.set_softness(group, softness)
         mgr.reset(pose)
         moving = {name: matrix.copy() for name, matrix in pose.items()}
@@ -655,7 +691,7 @@ def test_cbpc_settings_roundtrip_in_config(tmp_path):
 
     path = tmp_path / "config.json"
     cfg = AppConfig()
-    values = {"breasts": 3.5, "butt": 0.0, "belly": 1.5, "other": 1.0}
+    values = {"breasts": 10.0, "butt": 0.0, "belly": 7.5, "thigh": 9.5, "other": 8.0}
     cfg.cbpc.enabled, cfg.cbpc.gravity, cfg.cbpc.softness = False, 2.0, values
     cfg.save(path)
     loaded = AppConfig.load(path)
@@ -674,4 +710,48 @@ def test_cbpc_settings_roundtrip_in_config(tmp_path):
     path.write_text('{"cbpc": {"bounce": 2.0, "softness": 3.0}}', encoding="utf-8")
     assert all(v == 3.0 for v in AppConfig.load(path).cbpc.softness.values())
     path.write_text('{"cbpc": {"softness": {"breasts": 2, "butt": -1, "belly": 9}}}', encoding="utf-8")
-    assert AppConfig.load(path).cbpc.softness == {"breasts": 2.0, "butt": 0.0, "belly": 5.0, "other": 1.0}
+    assert AppConfig.load(path).cbpc.softness == {
+        "breasts": 2.0, "butt": 0.0, "belly": 9.0, "thigh": 1.0, "other": 1.0
+    }
+
+
+def test_legacy_other_softness_migrates_to_thigh_without_changing_other(tmp_path):
+    from src.config import AppConfig
+
+    path = tmp_path / "config.json"
+    path.write_text('{"cbpc": {"softness": {"other": 4.0}}}', encoding="utf-8")
+    config = AppConfig.load(path)
+    assert config.cbpc.softness["other"] == config.cbpc.softness["thigh"] == 4.0
+    config.cbpc.softness["thigh"] = 2.0
+    config.save(path)
+    loaded = AppConfig.load(path)
+    assert loaded.cbpc.softness["thigh"] == 2.0
+    assert loaded.cbpc.softness["other"] == 4.0
+
+
+@pytest.mark.parametrize("other,expected", [(8.0, 8.0), (12.0, 10.0), (-1.0, 0.0), ("bad", 1.0)])
+def test_legacy_thigh_inherits_validated_other_softness(tmp_path, other, expected):
+    from src.config import AppConfig
+
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"cbpc": {"softness": {"other": other}}}), encoding="utf-8")
+    softness = AppConfig.load(path).cbpc.softness
+    assert softness["thigh"] == softness["other"] == expected
+
+
+def test_explicit_thigh_softness_takes_precedence_over_other(tmp_path):
+    from src.config import AppConfig
+
+    path = tmp_path / "config.json"
+    path.write_text('{"cbpc": {"softness": {"thigh": 2, "other": 4}}}', encoding="utf-8")
+    softness = AppConfig.load(path).cbpc.softness
+    assert softness["thigh"] == 2.0 and softness["other"] == 4.0
+
+
+@pytest.mark.parametrize("value,expected", [(7.5, 7.5), (10.0, 10.0), (12.0, 10.0)])
+def test_legacy_scalar_softness_uses_new_range(tmp_path, value, expected):
+    from src.config import AppConfig
+
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"cbpc": {"softness": value}}), encoding="utf-8")
+    assert all(v == expected for v in AppConfig.load(path).cbpc.softness.values())

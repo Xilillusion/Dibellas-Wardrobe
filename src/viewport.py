@@ -161,12 +161,13 @@ class OutfitViewportWidget(QOpenGLWidget):
         self._anim_last_tick: float = 0.0
         self._current_pose_matrices: Optional[Dict[str, np.ndarray]] = None
 
-        # CBPC body physics (pure NumPy) and its bottom-right control overlay
+        # CBPC body physics (pure NumPy) and its settings controls
         self.cbpc = CbpcManager(self.anim_engine)
         self._nif_bone_names: Dict[str, Tuple[str, ...]] = {}
         self.cbpc_overlay = CbpcOverlay(
             self, GRAVITY_MIN, GRAVITY_MAX, (SOFTNESS_MIN, SOFTNESS_MAX)
         )
+        self.cbpc_overlay.hide()
         self.cbpc_overlay.enabledChanged.connect(self.set_cbpc_enabled)
         self.cbpc_overlay.smpEnabledChanged.connect(self.set_smp_enabled)
         self.cbpc_overlay.gravityChanged.connect(self.set_cbpc_gravity)
@@ -175,7 +176,6 @@ class OutfitViewportWidget(QOpenGLWidget):
 
         # HDT-SMP cloth physics (Native AOT BulletSharp library driven through ctypes)
         self.smp = SmpBridgeSolver(self.anim_engine, self.cbpc)
-        self.show_smp_collisions = False
 
         self._anim_timer = QTimer(self)
         self._anim_timer.setInterval(16)  # ~60 FPS render/tick loop
@@ -597,12 +597,6 @@ class OutfitViewportWidget(QOpenGLWidget):
             len(self.cbpc.active_bones),
             self.cbpc.softness,
         )
-        self.cbpc_overlay.reposition()
-
-    def resizeEvent(self, event) -> None:
-        super().resizeEvent(event)
-        self.cbpc_overlay.reposition()
-
     def grab_viewport_image(self) -> np.ndarray:
         """Capture the current viewport framebuffer as an RGBA8 numpy array (for verification/export)."""
         qimg = self.grabFramebuffer().convertToFormat(
@@ -742,22 +736,6 @@ class OutfitViewportWidget(QOpenGLWidget):
             self.ctx.disable(moderngl.BLEND)
 
         self._composite_postprocess(output_fbo, proj, vp_w, vp_h)
-
-        if self.show_smp_collisions and self.grid_prog is not None:
-            vertices = self.smp.collision_debug_lines()
-            if len(vertices):
-                colors = np.tile(np.array([1.0, 0.3, 0.05, 1.0], dtype=np.float32), (len(vertices), 1))
-                data = np.ascontiguousarray(np.column_stack((vertices, colors)), dtype=np.float32)
-                buffer = self.ctx.buffer(data.tobytes())
-                vao = self.ctx.vertex_array(self.grid_prog, [(buffer, "3f 4f", "in_pos", "in_col")])
-                output_fbo.use()
-                self.ctx.disable(moderngl.DEPTH_TEST)
-                self.grid_prog["u_mvp"].write(bytes(glm.transpose(proj * view)))
-                self.grid_prog["u_depth_test_scene"].value = False
-                vao.render(moderngl.LINES)
-                vao.release()
-                buffer.release()
-                self.ctx.enable(moderngl.DEPTH_TEST)
 
         if (
             self.settings.show_ground_grid

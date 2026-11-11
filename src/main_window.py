@@ -170,6 +170,13 @@ class DibellasWardrobeWindow(QMainWindow):
         }
         if not self._locked_presets:
             self._locked_presets = {1: set()}
+        self._locked_preset_diffuse_textures: Dict[int, Dict[str, Dict[str, str]]] = {
+            int(page): {
+                str(Path(mesh).resolve()): shapes.copy()
+                for mesh, shapes in meshes.items()
+            }
+            for page, meshes in self.config.locked_preset_diffuse_textures.items()
+        }
         self._current_locked_preset = min(self._locked_presets)
         self._locked_preset_names: Dict[int, str] = {
             int(page): name.strip()
@@ -267,8 +274,6 @@ class DibellasWardrobeWindow(QMainWindow):
             )
             self._apply_smp_texts()
             self.texture_popover.retranslate_ui()
-        if hasattr(self, "viewport"):
-            self.viewport.cbpc_overlay.reposition()
         self._retranslate_tree_helpers()
         self._refresh_added_nifs()
         self._update_added_nif_count()
@@ -592,12 +597,11 @@ class DibellasWardrobeWindow(QMainWindow):
         self.viewport = OutfitViewportWidget(self)
         overlay = self.viewport.cbpc_overlay
         self._bind_text(overlay.checkbox, "cbpc_enable")
-        for key in ("gravity", "breasts", "butt", "belly"):
+        for key in ("gravity", "breasts", "butt", "belly", "thigh"):
             locale_key = f"cbpc_{key}"
             self._bind_text(overlay.captions[key], locale_key)
             slider = overlay.slider if key == "gravity" else overlay.softness_sliders[key]
             self._bind_text(slider, locale_key, "setAccessibleName")
-        overlay.reposition()
         self._init_viewport_settings()
         center_layout.addWidget(self.viewport, stretch=1)
 
@@ -615,8 +619,6 @@ class DibellasWardrobeWindow(QMainWindow):
         )
         self._apply_smp_texts()
         self.viewport.smpStateChanged.connect(self._on_smp_state_changed)
-        self.viewport.smp.set_collision_xmls(self.config.smp.collision_xmls)
-        self.viewport.show_smp_collisions = self.config.smp.show_collisions
         self.viewport.set_smp_enabled(self.config.smp.enabled)
         self.anim_toolbar.setVisible(False)
         self.viewport.animationTimeChanged.connect(self.anim_toolbar.update_time)
@@ -779,6 +781,13 @@ class DibellasWardrobeWindow(QMainWindow):
         cfg_light = self.config.lighting
         cfg_effects = self.config.effects
         cfg_chk = self.config.checkboxes
+
+        physics_group = QGroupBox()
+        self._bind_text(physics_group, "physics_settings", "setTitle")
+        physics_layout = QVBoxLayout(physics_group)
+        physics_layout.addWidget(self.viewport.cbpc_overlay)
+        self.viewport.cbpc_overlay.show()
+        scroll_layout.addWidget(physics_group)
 
         # Lighting Group
         light_group = RefreshableGroupBox(self._t("lighting_hemisphere"), self._reset_lighting_controls)
@@ -1550,8 +1559,9 @@ class DibellasWardrobeWindow(QMainWindow):
         if locked_item is not None:
             self.locked_nifs_list.takeItem(self.locked_nifs_list.row(locked_item))
         if remove_from_presets:
-            for paths in self._locked_presets.values():
+            for page, paths in self._locked_presets.items():
                 paths.discard(nif_key)
+                self._locked_preset_diffuse_textures.get(page, {}).pop(nif_key, None)
         if was_locked:
             self.save_config()
         self._update_added_nif_count()
@@ -1690,6 +1700,8 @@ class DibellasWardrobeWindow(QMainWindow):
         paths = self._locked_presets.get(self._current_locked_preset, set())
         for nif_key in sorted(paths - self._checked_nif_paths):
             self._load_and_attach_outfit_nif(nif_key)
+        for nif_key in sorted(paths & self._checked_nif_paths):
+            self._restore_preset_diffuse_textures(nif_key)
 
     def _rename_locked_preset(self) -> None:
         page = self._current_locked_preset
@@ -1760,6 +1772,7 @@ class DibellasWardrobeWindow(QMainWindow):
 
         multi_shape = len(shape_indices) > 1
         target_dir = dds_path.resolve().parent
+        applied_diffuse: Dict[str, str] = {}
 
         for sh_idx in shape_indices:
             if not (0 <= sh_idx < len(nif_data.shapes)):
@@ -1776,10 +1789,63 @@ class DibellasWardrobeWindow(QMainWindow):
                 log.warning("Could not decode texture %s: %s", chosen_path, exc)
                 continue
             self.viewport.update_nif_shape_texture(nif_key, sh_idx, slot, res_tex)
+            if slot == "Diffuse" and res_tex.resolved_path is not None:
+                applied_diffuse[str(sh_idx)] = str(res_tex.resolved_path.resolve())
+        if applied_diffuse and nif_key in self._locked_presets.get(self._current_locked_preset, set()):
+            meshes = self._locked_preset_diffuse_textures.setdefault(self._current_locked_preset, {})
+            meshes.setdefault(nif_key, {}).update(applied_diffuse)
+            self.save_config()
 
     def _on_reset_nif_textures(self, nif_key: str) -> None:
         nif_data = self._loaded_nif_cache.get(nif_key)
         self.viewport.reset_nif_textures(nif_key, nif_data)
+        if nif_key in self._locked_presets.get(self._current_locked_preset, set()):
+            self._capture_preset_diffuse_textures(nif_key)
+            self.save_config()
+
+    def _capture_preset_diffuse_textures(self, nif_key: str) -> None:
+        nif_data = self._loaded_nif_cache.get(nif_key)
+        if nif_data is None:
+            return
+        shapes = {}
+        for index, shape in enumerate(nif_data.shapes):
+            texture = shape.shader.resolved_textures.get("Diffuse")
+            if texture is not None and not texture.is_fallback and texture.resolved_path is not None:
+                shapes[str(index)] = str(texture.resolved_path.resolve())
+        meshes = self._locked_preset_diffuse_textures.setdefault(self._current_locked_preset, {})
+        if shapes:
+            meshes[nif_key] = shapes
+        else:
+            meshes.pop(nif_key, None)
+
+    def _restore_preset_diffuse_textures(self, nif_key: str) -> None:
+        nif_data = self._loaded_nif_cache.get(nif_key)
+        if nif_data is None:
+            return
+        meshes = self._locked_preset_diffuse_textures.get(self._current_locked_preset, {})
+        if nif_key not in meshes:
+            for index, shape in enumerate(nif_data.shapes):
+                default = shape.shader.default_resolved_textures.get("Diffuse")
+                if default is None:
+                    default = self.resolver.load_or_fallback("Diffuse", "", nif_key)
+                self.viewport.update_nif_shape_texture(nif_key, index, "Diffuse", default)
+            self._capture_preset_diffuse_textures(nif_key)
+            return
+        saved = meshes[nif_key]
+        for index, shape in enumerate(nif_data.shapes):
+            path = saved.get(str(index))
+            texture = shape.shader.default_resolved_textures.get("Diffuse")
+            if path:
+                try:
+                    texture = self.resolver.load_from_file("Diffuse", path)
+                except (OSError, ValueError) as exc:
+                    log.warning("Could not restore preset diffuse texture %s for %s: %s", path, nif_key, exc)
+            if texture is None:
+                texture = self.resolver.load_or_fallback("Diffuse", "", nif_key)
+            self.viewport.update_nif_shape_texture(nif_key, index, "Diffuse", texture)
+        for index in saved:
+            if int(index) >= len(nif_data.shapes):
+                log.warning("Preset diffuse texture shape %s no longer exists in %s", index, nif_key)
 
     # ------------------------------------------------------------------
     # Drag-and-Drop and Lock Management
@@ -1798,10 +1864,14 @@ class DibellasWardrobeWindow(QMainWindow):
                 log.warning("Removing unavailable locked NIF from config: %s", nif_key)
             for paths in self._locked_presets.values():
                 paths.difference_update(missing_nifs)
+            for meshes in self._locked_preset_diffuse_textures.values():
+                for nif_key in missing_nifs:
+                    meshes.pop(nif_key, None)
             self.save_config()
 
         for nif_key in sorted(self._locked_presets.get(self._current_locked_preset, set())):
-            self._load_and_attach_outfit_nif(nif_key, show_error=False)
+            if self._load_and_attach_outfit_nif(nif_key, show_error=False):
+                self._restore_preset_diffuse_textures(nif_key)
         self._startup_locked_nif_refresh_pending = bool(self._locked_nif_items)
 
     def _lock_nif(self, nif_key: str) -> None:
@@ -1811,6 +1881,7 @@ class DibellasWardrobeWindow(QMainWindow):
         ):
             return
         self._locked_presets.setdefault(self._current_locked_preset, set()).add(nif_key)
+        self._capture_preset_diffuse_textures(nif_key)
         self.save_config()
         self._refresh_added_nifs()
 
@@ -1837,6 +1908,7 @@ class DibellasWardrobeWindow(QMainWindow):
         if page_paths is None or nif_key not in page_paths:
             return
         page_paths.discard(nif_key)
+        self._locked_preset_diffuse_textures.get(self._current_locked_preset, {}).pop(nif_key, None)
         self.save_config()
         self._refresh_added_nifs()
 
@@ -2144,6 +2216,15 @@ class DibellasWardrobeWindow(QMainWindow):
         self.config.locked_presets = {
             str(page): sorted(paths)
             for page, paths in self._locked_presets.items()
+        }
+        self.config.locked_preset_diffuse_textures = {
+            str(page): {
+                nif_key: shapes.copy()
+                for nif_key, shapes in meshes.items()
+                if nif_key in self._locked_presets.get(page, set()) and shapes
+            }
+            for page, meshes in self._locked_preset_diffuse_textures.items()
+            if page in self._locked_presets and meshes
         }
         self.config.locked_preset_names = {
             str(page): name.strip()

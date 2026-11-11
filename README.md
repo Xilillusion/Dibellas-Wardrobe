@@ -15,7 +15,7 @@ Dibella's Wardrobe is a desktop previewer for Skyrim Special Edition and Anniver
 - Keep selected outfits in the wardrobe, lock outfits to reload them at startup, and hide or show individual outfits.
 - Adjust lighting, shader display options, and language in Settings. Translation choices are loaded from `locales.json`.
 - Tune screen-space reflections (SSR), ambient occlusion (GTAO), and screen-space subsurface scattering (SSSS) in Settings.
-- Adjust CBPC body physics using the viewport's breast-gravity and per-area softness controls.
+- Adjust physics using the settings sidebar's SMP and CBPC controls.
 - Simulate HDT-SMP cloth, hair and capes for outfits that ship an SMP physics XML, using a native Bullet engine. Toggle it with **Enable SMP Physics** above the CBPC controls in the viewport.
 
 ## Advanced viewport effects
@@ -66,11 +66,11 @@ The output in `smp_bridge/SmpBridge/bin/Release/net8.0/win-x64/publish/` must co
 
 ### How SMP physics is applied
 
-For each visible outfit the app reads the XML path stored in the NIF's `HDT Skinned Mesh Physics Object` string extra data (relative to the mod root), falling back to a `[nif_name].xml` next to the NIF. Additional collision XMLs can be listed under `"smp": { "collision_xmls": ["C:\\path\\to\\Collision.xml"] }` in the configuration; they are loaded into the same world before outfit XMLs. Set `"show_collisions": true` in the same section to draw the loaded XML primitives.
+For each visible outfit the app reads the XML path stored in the NIF's `HDT Skinned Mesh Physics Object` string extra data (relative to the mod root), falling back to a `[nif_name].xml` next to the NIF.
 
 Mass-zero and keyframed bodies follow the animated skeleton; positive-mass dynamic bodies use `<generic-constraint>` springs. Explicit sphere, capsule, and box shapes are used for collisions. Capsule `height` denotes total end-to-end height; alternatively `p0` and `p1` define the centers of its caps. Box shapes require explicit `half-extents`. Shapeless bodies have no collision geometry. CBPC does not supply SMP colliders. Shared bones remain active in SMP; when CBPC is active, its result takes precedence for visual deformation.
 
-`<per-vertex-shape>` and `<per-triangle-shape>` resolve skinned NIF shapes by name. Their vertices and triangle plates follow the animated or simulated bones, and contacts are submitted to Bullet using the XML's margins, penetration, weight thresholds and collision filters. An XML loaded as an additional collision XML can resolve shapes from any visible NIF; an outfit XML resolves shapes from its own NIF. Missing meshes are reported in the SMP diagnostics, except for `VirtualGround`. `VirtualGround` requires a matching NIF shape; it is not an implicit floor. `stiffspring` and `conetwist` constraints and `<pattern>` macros are not simulated.
+`<per-vertex-shape>` and `<per-triangle-shape>` resolve skinned NIF shapes by name. Their vertices and triangle plates follow the animated or simulated bones, and contacts are submitted to Bullet using the XML's margins, penetration, weight thresholds and collision filters. An outfit XML resolves shapes from its own NIF. Missing meshes are reported in the SMP diagnostics, except for `VirtualGround`. `VirtualGround` requires a matching NIF shape; it is not an implicit floor. `stiffspring` and `conetwist` constraints and `<pattern>` macros are not simulated.
 
 ## Run
 
@@ -135,19 +135,25 @@ Options:
    - `Ctrl+F`: toggle the mod-directory filter
 
 Presets are saved in the configuration and remain available when empty. The first preset is loaded at startup, and selecting another preset switches its outfits while retaining other wardrobe outfits. Unavailable preset mesh paths are removed from the configuration.
+Each preset also saves the resolved diffuse texture path for each mesh shape, including selected
+replacements; other texture maps are not stored. Presets sharing a mesh can use different diffuse
+textures. Missing saved textures are logged and the mesh's default diffuse texture is used.
 
-The CBPC overlay controls breast gravity and separate softness values for breasts, butt and belly.
-Each softness slider ranges from 0× (motion off for that area) to 5× (softer, slower response);
+Open the settings sidebar with the gear icon to access SMP and CBPC physics controls. The CBPC
+controls include breast gravity and separate softness values for breasts, butt, belly and thighs.
+Each softness slider ranges from 0× (motion off for that area) to 10× (softer, slower response) in 0.5× steps;
+existing values between steps remain unchanged until the slider is adjusted.
 1× is the baseline. Breast gravity lowers the breast rest position without changing spring
 stiffness, damping, or the motion response; it remains effective at 0× breast softness.
 Breast chains use progressively larger rest drops toward the tip and follow the base during
 motion. Torso collision does not directly push the tip; external collider contacts take
 precedence over chain following.
 Higher softness reduces stiffness and damping and expands displacement limits, producing
-a slower, less damped response. For non-breast bones, softness also changes gravity.
+a slower, less damped response with longer-lasting bounce. For non-breast bones, softness also changes gravity.
 At 1× the non-breast gravity and displacement-limit multipliers are 1.2. Other physics bones retain their saved
 softness independently of these sliders (1× by default). CBPC settings are saved in the
 configuration; an existing single softness value is applied to all areas and other bones.
+Existing configurations without a thigh value inherit their saved `other` softness for thighs.
 Legacy bounce settings are mapped to softness, but the new scaling does not reproduce their
 previous dynamics exactly.
 

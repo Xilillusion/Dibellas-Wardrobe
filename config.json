@@ -1,6 +1,6 @@
 {
   "default_folder": "E:\\Skyrim\\Dibellas-Wardrobe\\sample",
-  "language": "en",
+  "language": "zh",
   "lighting": {
     "light_azimuth_deg": 35.0,
     "light_elevation_deg": 28.0,
@@ -38,16 +38,15 @@
     "enabled": true,
     "gravity": 0.0,
     "softness": {
-      "breasts": 2.0,
-      "butt": 1.0,
-      "belly": 1.0,
+      "breasts": 5.0,
+      "butt": 10.0,
+      "belly": 10.0,
+      "thigh": 10.0,
       "other": 5.0
     }
   },
   "smp": {
-    "enabled": false,
-    "collision_xmls": [],
-    "show_collisions": false
+    "enabled": true
   },
   "locked_presets": {
     "2": [
@@ -64,7 +63,6 @@
       "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\crown1.nif",
       "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\glove_1.nif",
       "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\hairsmp1.nif",
-      "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\heels_1.nif",
       "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\necklace_1.nif",
       "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\pantylace_1.nif",
       "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\pantysmp_1.nif",
@@ -73,6 +71,100 @@
       "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\topoutshomet_1.nif",
       "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\topoutsmpt_1.nif"
     ]
+  },
+  "locked_preset_diffuse_textures": {
+    "1": {
+      "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\topoutsmpt_1.nif": {
+        "2": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\textures\\Coco_Cloths\\Mysterious Mage\\4\\topwai.dds",
+        "3": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\textures\\Coco_Cloths\\Mysterious Mage\\4\\topwai.dds",
+        "4": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\textures\\Coco_Cloths\\Mysterious Mage\\4\\topwai.dds"
+      },
+      "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\topoutshomet_1.nif": {
+        "0": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\textures\\Coco_Cloths\\Mysterious Mage\\1\\metalfull.dds",
+        "1": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\textures\\Coco_Cloths\\Mysterious Mage\\1\\metalfull.dds",
+        "2": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\textures\\Coco_Cloths\\Mysterious Mage\\1\\metalfull.dds",
+        "3": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\textures\\Coco_Cloths\\Mysterious Mage\\1\\topnei.dds"
+      },
+      "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\topoutmet_1.nif": {
+        "0": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\textures\\Coco_Cloths\\Mysterious Mage\\1\\metalfull.dds",
+        "1": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\textures\\Coco_Cloths\\Mysterious Mage\\1\\metalfull.dds"
+      },
+      "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\topin_1.nif": {
+        "0": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\CBBE 3BA\\textures\\actors\\character\\female\\femalebody_1.dds",
+        "1": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\textures\\Coco_Cloths\\Mysterious Mage\\1\\metalfull.dds",
+        "2": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\textures\\Coco_Cloths\\Mysterious Mage\\1\\topnei.dds",
+        "3": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\textures\\Coco_Cloths\\Mysterious Mage\\1\\metalfull.dds",
+        "4": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\CBBE 3BA\\textures\\actors\\character\\female\\femalebody_etc_v2_1.dds",
+        "5": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\CBBE 3BA\\textures\\actors\\character\\female\\femalebody_etc_v2_1.dds"
+      },
+      "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\pantysmp_1.nif": {
+        "1": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\textures\\Coco_Cloths\\Mysterious Mage\\1\\panty.dds",
+        "2": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\textures\\Coco_Cloths\\Mysterious Mage\\1\\panty.dds",
+        "3": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\textures\\Coco_Cloths\\Mysterious Mage\\1\\panty.dds",
+        "4": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\textures\\Coco_Cloths\\Mysterious Mage\\1\\panty.dds",
+        "5": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\textures\\Coco_Cloths\\Mysterious Mage\\4\\panty.dds"
+      },
+      "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\pantylace_1.nif": {
+        "0": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\textures\\Coco_Cloths\\Mysterious Mage\\1\\panty.dds"
+      },
+      "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\necklace_1.nif": {
+        "0": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\textures\\Coco_Cloths\\Mysterious Mage\\1\\topnei.dds",
+        "1": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\textures\\Coco_Cloths\\Mysterious Mage\\1\\metalfull.dds",
+        "2": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\textures\\Coco_Cloths\\Mysterious Mage\\1\\metalfull.dds",
+        "3": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\textures\\Coco_Cloths\\Mysterious Mage\\1\\metalfull.dds",
+        "4": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\textures\\Coco_Cloths\\Mysterious Mage\\1\\metalfull.dds",
+        "5": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\textures\\Coco_Cloths\\Mysterious Mage\\1\\metalfull.dds"
+      },
+      "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\crown1.nif": {
+        "0": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\textures\\Coco_Cloths\\Mysterious Mage\\1\\metalfull.dds",
+        "1": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\textures\\Coco_Cloths\\Mysterious Mage\\1\\metalfull.dds"
+      },
+      "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\bra_1.nif": {
+        "0": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\textures\\Coco_Cloths\\Mysterious Mage\\1\\glovebra.dds"
+      },
+      "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\hairsmp1.nif": {
+        "0": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\textures\\Coco_Cloths\\Mysterious Mage\\1\\hair.dds",
+        "1": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\textures\\Coco_Cloths\\Mysterious Mage\\1\\hair.dds",
+        "2": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\textures\\Coco_Cloths\\Mysterious Mage\\1\\hair.dds",
+        "3": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\textures\\Coco_Cloths\\Mysterious Mage\\1\\hair.dds"
+      },
+      "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\glove_1.nif": {
+        "0": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\CBBE 3BA\\textures\\actors\\character\\female\\femalehands_1.dds",
+        "1": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\textures\\Coco_Cloths\\Mysterious Mage\\1\\glovebra.dds"
+      }
+    },
+    "2": {
+      "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[Melodic] Echidna\\meshes\\Melodic\\Echida\\Cloths_1.nif": {
+        "0": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[Melodic] Echidna\\textures\\Melodic\\Echidna\\DressB_diffA.dds",
+        "1": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[Melodic] Echidna\\textures\\Melodic\\Echidna\\DressB_diffA.dds",
+        "2": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[Melodic] Echidna\\textures\\Melodic\\Echidna\\DressB_diffA.dds",
+        "3": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[Melodic] Echidna\\textures\\Melodic\\Echidna\\DressB_diffA.dds"
+      },
+      "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[Melodic] Echidna\\meshes\\Melodic\\Echida\\Forearms_1.nif": {
+        "0": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[Melodic] Echidna\\textures\\Melodic\\Echidna\\DressA_diffA.dds"
+      },
+      "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[Melodic] Echidna\\meshes\\Melodic\\Echida\\Hair_1.nif": {
+        "0": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[Melodic] Echidna\\textures\\Melodic\\Echidna\\DressA_diffA.dds",
+        "1": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[Melodic] Echidna\\textures\\Melodic\\Echidna\\Hair_diffA.dds"
+      },
+      "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[Melodic] Echidna\\meshes\\Melodic\\Echida\\Hands_1.nif": {
+        "0": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\CBBE 3BA\\textures\\actors\\character\\female\\femalehands_1.dds",
+        "1": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[Melodic] Echidna\\textures\\Melodic\\Echidna\\DressA_diffA.dds"
+      },
+      "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[Melodic] Echidna\\meshes\\Melodic\\Echida\\Heels_1.nif": {
+        "0": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\CBBE 3BA\\textures\\actors\\character\\female\\femalebody_1.dds",
+        "1": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[Melodic] Echidna\\textures\\Melodic\\Echidna\\DressA_diffA.dds"
+      },
+      "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[Melodic] Echidna\\meshes\\Melodic\\Echida\\Necklace_1.nif": {
+        "0": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[Melodic] Echidna\\textures\\Melodic\\Echidna\\Necklace_diffA.dds"
+      },
+      "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[Melodic] Echidna\\meshes\\Melodic\\Echida\\Top_1.nif": {
+        "0": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\CBBE 3BA\\textures\\actors\\character\\female\\femalebody_1.dds",
+        "1": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[Melodic] Echidna\\textures\\Melodic\\Echidna\\DressA_diffA.dds",
+        "2": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\CBBE 3BA\\textures\\actors\\character\\female\\femalebody_etc_v2_1.dds",
+        "3": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\CBBE 3BA\\textures\\actors\\character\\female\\femalebody_etc_v2_1.dds"
+      }
+    }
   },
   "locked_preset_names": {
     "2": "Echidna",

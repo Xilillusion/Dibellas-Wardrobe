@@ -13,8 +13,10 @@ from PySide6.QtCore import QEvent, QMimeData, QPoint, QPointF, Qt
 from PySide6.QtGui import QDragEnterEvent, QDragMoveEvent, QDropEvent, QHelpEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QToolTip
+from PIL import Image
 
 from src.main_window import DibellasWardrobeWindow
+from src.texture_resolver import TextureResolver
 from src.ui_widgets import NIF_DRAG_MIME_TYPE
 
 
@@ -34,7 +36,7 @@ class OutfitInteractionTests(unittest.TestCase):
         config.write_text(json.dumps({
             "locked_presets": {"1": [self.keys[0]], "2": [self.keys[1]], "3": [self.keys[2]]},
         }), encoding="utf-8")
-        self.load_patch = patch("src.main_window.NifLoader.load_nif", return_value=object())
+        self.load_patch = patch("src.main_window.NifLoader.load_nif", side_effect=lambda *args: SimpleNamespace(shapes=[]))
         self.add_patch = patch("src.viewport.OutfitViewportWidget.add_nif")
         self.remove_patch = patch("src.viewport.OutfitViewportWidget.remove_nif")
         self.load_patch.start()
@@ -167,11 +169,11 @@ class OutfitInteractionTests(unittest.TestCase):
 
     def test_cbpc_softness_sliders_persist_and_restore(self):
         viewport = self.window.viewport
-        viewport.cbpc.set_mesh_bones("body", ["L Breast01", "NPC L Butt", "NPC Belly"])
+        viewport.cbpc.set_mesh_bones("body", ["L Breast01", "NPC L Butt", "NPC Belly", "NPC L FrontThigh"])
         viewport._sync_cbpc_overlay()
-        for group, value in (("breasts", 40), ("butt", 10), ("belly", 70)):
+        for group, value in (("breasts", 20), ("butt", 15), ("belly", 7), ("thigh", 18)):
             viewport.cbpc_overlay.softness_sliders[group].setValue(value)
-        expected = {"breasts": 2.0, "butt": 0.5, "belly": 3.5, "other": 1.0}
+        expected = {"breasts": 10.0, "butt": 7.5, "belly": 3.5, "thigh": 9.0, "other": 1.0}
         self.assertEqual(viewport.cbpc.softness, expected)
         config_path = self.window.config_path
         root = self.window.current_root_dir
@@ -180,7 +182,21 @@ class OutfitInteractionTests(unittest.TestCase):
         self.window = DibellasWardrobeWindow(initial_root_dir=root, config_path=config_path)
         self.assertEqual(self.window.viewport.cbpc.softness, expected)
         sliders = self.window.viewport.cbpc_overlay.softness_sliders
-        self.assertEqual([sliders[g].value() for g in ("breasts", "butt", "belly")], [40, 10, 70])
+        self.assertEqual([sliders[g].value() for g in ("breasts", "butt", "belly", "thigh")], [20, 15, 7, 18])
+
+    def test_cbpc_existing_fractional_softness_is_preserved(self):
+        viewport = self.window.viewport
+        viewport.cbpc.set_mesh_bones("body", ["L Breast01", "NPC L Butt"])
+        viewport.set_cbpc_softness("breasts", 5.2)
+        overlay = viewport.cbpc_overlay
+        self.assertEqual(overlay.softness_labels["breasts"].text(), "5.2x")
+        overlay.softness_sliders["butt"].setValue(5)
+        self.assertEqual(viewport.cbpc.softness["breasts"], 5.2)
+        self.assertEqual(overlay.softness_labels["breasts"].text(), "5.2x")
+        self.window.close()
+        saved = json.loads(Path(self.window.config_path).read_text(encoding="utf-8"))
+        self.assertEqual(saved["cbpc"]["softness"]["breasts"], 5.2)
+        self.assertEqual(saved["cbpc"]["softness"]["butt"], 2.5)
 
     def test_cbpc_controls_follow_language_on_startup_and_change(self):
         self.window.language_combo.setCurrentIndex(self.window.language_combo.findData("zh"))
@@ -190,23 +206,44 @@ class OutfitInteractionTests(unittest.TestCase):
         self.window = DibellasWardrobeWindow(initial_root_dir=root, config_path=config_path)
         overlay = self.window.viewport.cbpc_overlay
         expected = {
-            "zh": ("启用 CBPC 物理", ("重力", "胸部柔软度", "臀部柔软度", "腹部柔软度")),
-            "en": ("Enable CBPC Physics", ("Gravity", "Breasts softness", "Butt softness", "Belly softness")),
+            "zh": ("启用 CBPC 物理", ("重力", "胸部柔软度", "臀部柔软度", "腹部柔软度", "大腿柔软度")),
+            "en": ("Enable CBPC Physics", ("Gravity", "Breasts softness", "Butt softness", "Belly softness", "Thigh softness")),
         }
-        keys = ("gravity", "breasts", "butt", "belly")
+        keys = ("gravity", "breasts", "butt", "belly", "thigh")
         changes = []
         overlay.gravityChanged.connect(lambda value: changes.append(value))
         overlay.softnessChanged.connect(lambda group, value: changes.append((group, value)))
         for language in ("zh", "en", "zh"):
             self.window.language_combo.setCurrentIndex(self.window.language_combo.findData(language))
             self.assertEqual(self.window.language, language)
+            self.assertEqual(overlay.parentWidget().title(), {"zh": "物理", "en": "Physics"}[language])
             self.assertEqual(overlay.checkbox.text(), expected[language][0])
             self.assertEqual(tuple(overlay.captions[key].text() for key in keys), expected[language][1])
             sliders = (overlay.slider, *(overlay.softness_sliders[key] for key in keys[1:]))
             self.assertEqual(tuple(slider.accessibleName() for slider in sliders), expected[language][1])
-            self.assertEqual(overlay.x() + overlay.width(), self.window.viewport.width() - overlay.MARGIN)
-            self.assertEqual(overlay.y() + overlay.height(), self.window.viewport.height() - overlay.MARGIN)
         self.assertEqual(changes, [])
+
+    def test_settings_button_controls_physics_panel_visibility(self):
+        overlay = self.window.viewport.cbpc_overlay
+        self.assertTrue(self.window.right_panel.isAncestorOf(overlay))
+        self.assertFalse(self.window.viewport.isAncestorOf(overlay))
+        self.assertFalse(overlay.isVisible())
+        self.window.btn_settings.click()
+        self.app.processEvents()
+        self.assertTrue(self.window.right_panel.isVisible())
+        self.assertTrue(overlay.isVisible())
+        self.window.viewport.cbpc.set_mesh_bones("body", ["L Breast01"])
+        self.window.viewport._sync_cbpc_overlay()
+        overlay.softness_sliders["breasts"].setValue(5)
+        self.assertEqual(self.window.viewport.cbpc.softness["breasts"], 2.5)
+        self.window.btn_settings.click()
+        self.app.processEvents()
+        self.assertFalse(overlay.isVisible())
+        self.assertEqual(self.window.viewport.cbpc.softness["breasts"], 2.5)
+        self.window.btn_settings.click()
+        self.app.processEvents()
+        self.assertTrue(overlay.isVisible())
+        self.assertEqual(overlay.softness_sliders["breasts"].value(), 5)
 
     @patch("src.smp_bridge.SmpBridgeSolver.available", new_callable=PropertyMock, return_value=True)
     def test_smp_toggle_above_cbpc_drives_viewport_and_persists(self, _available):
@@ -217,6 +254,8 @@ class OutfitInteractionTests(unittest.TestCase):
         self.assertEqual(overlay.smp_checkbox.styleSheet(), overlay.checkbox.styleSheet())
         self.assertEqual(overlay.smp_checkbox.text(), "Enable SMP Physics")
         self.assertFalse(self.window.anim_toolbar.isVisible())
+        self.window.btn_settings.click()
+        self.app.processEvents()
         self.assertTrue(overlay.smp_checkbox.isVisible())
         self.assertTrue(overlay.smp_checkbox.isChecked())
         self.assertTrue(viewport.smp.enabled)
@@ -368,6 +407,85 @@ class OutfitInteractionTests(unittest.TestCase):
         )
         self.assertEqual(self.window._checked_nif_paths, {self.keys[1]})
         self.assertIn(self.keys[1], self.window._locked_nif_items)
+
+    def test_preset_diffuse_textures_restore_per_shape_and_shared_mesh(self):
+        config_path = Path(self.window.config_path)
+        root = self.window.current_root_dir
+        self.window.close()
+        config_path.write_text(json.dumps({
+            "locked_presets": {"1": [self.keys[0]], "2": [self.keys[0]]},
+        }), encoding="utf-8")
+        base = root / "base.dds"
+        second = root / "second.dds"
+        replacement = root / "replacement.dds"
+        normal = root / "normal_n.dds"
+        for path in (base, second, replacement, normal):
+            Image.new("RGBA", (4, 4), (255, 0, 0, 255)).save(path)
+        resolver = TextureResolver()
+
+        def load_nif(_key):
+            shapes = []
+            for path in (base, second):
+                defaults = {"Diffuse": resolver.load_from_file("Diffuse", path),
+                            "Normal": resolver.load_from_file("Normal", normal)}
+                shapes.append(SimpleNamespace(shader=SimpleNamespace(
+                    resolved_textures=defaults.copy(), default_resolved_textures=defaults.copy(), default_flags={})))
+            return SimpleNamespace(shapes=shapes)
+
+        def add_nif(viewport, key, nif_data):
+            viewport._pending_nifs[key] = nif_data
+
+        with patch("src.main_window.NifLoader.load_nif", side_effect=load_nif), \
+             patch("src.viewport.OutfitViewportWidget.add_nif", new=add_nif):
+            self.window = DibellasWardrobeWindow(initial_root_dir=root, config_path=config_path)
+            self.window._on_apply_nif_texture(self.keys[0], [0], "Diffuse", replacement)
+            saved = json.loads(config_path.read_text(encoding="utf-8"))
+            self.assertEqual(saved["locked_preset_diffuse_textures"]["1"][self.keys[0]],
+                             {"0": str(replacement), "1": str(second)})
+            self.window._on_apply_nif_texture(self.keys[0], [1], "Normal", replacement)
+            saved = json.loads(config_path.read_text(encoding="utf-8"))
+            self.assertEqual(saved["locked_preset_diffuse_textures"]["1"][self.keys[0]],
+                             {"0": str(replacement), "1": str(second)})
+            self.window._activate_locked_preset(2)
+            shader = self.window._loaded_nif_cache[self.keys[0]].shapes[0].shader
+            self.assertEqual(shader.resolved_textures["Diffuse"].resolved_path, base)
+            self.assertEqual(shader.resolved_textures["Normal"].resolved_path, normal)
+            self.window._activate_locked_preset(1)
+            self.assertEqual(shader.resolved_textures["Diffuse"].resolved_path, replacement)
+            self.window.close()
+            self.window = DibellasWardrobeWindow(initial_root_dir=root, config_path=config_path)
+            shapes = self.window._loaded_nif_cache[self.keys[0]].shapes
+            self.assertEqual([s.shader.resolved_textures["Diffuse"].resolved_path for s in shapes],
+                             [replacement, second])
+            self.assertEqual(shapes[0].shader.resolved_textures["Normal"].resolved_path, normal)
+            self.window._activate_locked_preset(2)
+            self.assertEqual(self.window._loaded_nif_cache[self.keys[0]].shapes[0].shader.resolved_textures["Diffuse"].resolved_path, base)
+            self.window.close()
+            replacement.unlink()
+            with self.assertLogs("dibellas_wardrobe.ui", level="WARNING") as logs:
+                self.window = DibellasWardrobeWindow(initial_root_dir=root, config_path=config_path)
+            self.assertIn(str(replacement), "\n".join(logs.output))
+            self.assertEqual(self.window._loaded_nif_cache[self.keys[0]].shapes[0].shader.resolved_textures["Diffuse"].resolved_path, base)
+            saved = json.loads(config_path.read_text(encoding="utf-8"))
+            self.assertEqual(saved["locked_preset_diffuse_textures"]["1"][self.keys[0]]["0"], str(replacement))
+            self.window._on_apply_nif_texture(self.keys[0], [1], "Diffuse", base)
+            saved = json.loads(config_path.read_text(encoding="utf-8"))
+            self.assertEqual(saved["locked_preset_diffuse_textures"]["1"][self.keys[0]],
+                             {"0": str(replacement), "1": str(base)})
+            self.window._on_reset_nif_textures(self.keys[0])
+            saved = json.loads(config_path.read_text(encoding="utf-8"))
+            self.assertEqual(saved["locked_preset_diffuse_textures"]["1"][self.keys[0]]["0"], str(base))
+            self.window._unlock_nif(self.keys[0])
+            saved = json.loads(config_path.read_text(encoding="utf-8"))
+            self.assertNotIn(self.keys[0], saved["locked_preset_diffuse_textures"].get("1", {}))
+            self.assertIn(self.keys[0], saved["locked_preset_diffuse_textures"]["2"])
+            self.window._on_apply_nif_texture(self.keys[0], [0], "Diffuse", second)
+            self.window._lock_nif(self.keys[0])
+            saved = json.loads(config_path.read_text(encoding="utf-8"))
+            self.assertEqual(saved["locked_preset_diffuse_textures"]["1"][self.keys[0]]["0"], str(second))
+            self.window._on_nif_dropped_on_mods(self.keys[0])
+            saved = json.loads(config_path.read_text(encoding="utf-8"))
+            self.assertTrue(all(self.keys[0] not in meshes for meshes in saved["locked_preset_diffuse_textures"].values()))
 
     def test_removing_shared_outfit_updates_all_presets_and_saved_config(self):
         self.window._on_nif_dropped_on_preset(self.keys[1])
