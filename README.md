@@ -14,7 +14,7 @@ Dibella's Wardrobe is a desktop previewer for Skyrim Special Edition and Anniver
 - Adjust lighting, shader display options, and language in Settings. Translation choices are loaded from `locales.json`.
 - Tune screen-space reflections (SSR), ambient occlusion (GTAO), and screen-space subsurface scattering (SSSS) in Settings.
 - Adjust CBPC body physics using the viewport's breast-gravity and per-area softness controls.
-- Simulate HDT-SMP cloth, hair and capes for outfits that ship an SMP physics XML, using a native Bullet engine. Toggle it with **Cloth Physics (SMP)** on the animation toolbar.
+- Simulate HDT-SMP cloth, hair and capes for outfits that ship an SMP physics XML, using a native Bullet engine. Toggle it with **Enable SMP Physics** above the CBPC controls in the viewport.
 
 ## Advanced viewport effects
 
@@ -160,7 +160,7 @@ Available languages are read from `locales.json`. Each locale is an object keyed
 - `main.py` - application entry point.
 - `src/` - user interface, NIF loader, mod scanner, texture resolver, viewport, and the CBPC and SMP physics layers (`smp_bridge.py` is the `ctypes` binding to the native SMP library).
 - `smp_bridge/` - C# (.NET 8, BulletSharp, Native AOT) source of the HDT-SMP physics engine, built into `SmpBridge.dll`.
-- `io_scene_nifly/` - bundled NIF parsing library and native DLL.
+- `io_scene_nifly/` - bundled headless NIF and HKX parsing modules and native DLL.
 - `shaders/` - mesh and post-processing GLSL shaders used by the viewport.
 - `requirements.txt` - Python dependencies.
 - `CITATION.md` - acknowledgements and third-party dependency information.

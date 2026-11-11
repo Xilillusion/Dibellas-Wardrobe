@@ -168,6 +168,7 @@ class OutfitViewportWidget(QOpenGLWidget):
             self, GRAVITY_MIN, GRAVITY_MAX, (SOFTNESS_MIN, SOFTNESS_MAX)
         )
         self.cbpc_overlay.enabledChanged.connect(self.set_cbpc_enabled)
+        self.cbpc_overlay.smpEnabledChanged.connect(self.set_smp_enabled)
         self.cbpc_overlay.gravityChanged.connect(self.set_cbpc_gravity)
         self.cbpc_overlay.softnessChanged.connect(self.set_cbpc_softness)
         self._sync_cbpc_overlay()

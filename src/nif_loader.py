@@ -17,7 +17,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
-# Ensure bundled io_scene_nifly is importable without importing its top-level Blender __init__.py
+# Make the bundled headless NIF parser importable.
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _NIFLY_DIR = _REPO_ROOT / "io_scene_nifly"
 if str(_NIFLY_DIR) not in sys.path:

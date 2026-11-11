@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import PropertyMock, patch
 
 import numpy as np
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -141,13 +141,19 @@ class OutfitInteractionTests(unittest.TestCase):
             self.assertEqual(overlay.y() + overlay.height(), self.window.viewport.height() - overlay.MARGIN)
         self.assertEqual(changes, [])
 
-    def test_smp_toggle_in_animation_toolbar_drives_viewport_and_persists(self):
-        toolbar = self.window.anim_toolbar
+    @patch("src.smp_bridge.SmpBridgeSolver.available", new_callable=PropertyMock, return_value=True)
+    def test_smp_toggle_above_cbpc_drives_viewport_and_persists(self, _available):
         viewport = self.window.viewport
-        self.assertEqual(toolbar.chk_smp.text(), "Cloth Physics (SMP)")
-        self.assertTrue(toolbar.chk_smp.isChecked())
+        overlay = viewport.cbpc_overlay
+        self.assertIs(overlay.layout().itemAt(0).widget(), overlay.smp_checkbox)
+        self.assertIs(overlay.layout().itemAt(1).widget(), overlay.checkbox)
+        self.assertEqual(overlay.smp_checkbox.styleSheet(), overlay.checkbox.styleSheet())
+        self.assertEqual(overlay.smp_checkbox.text(), "Enable SMP Physics")
+        self.assertFalse(self.window.anim_toolbar.isVisible())
+        self.assertTrue(overlay.smp_checkbox.isVisible())
+        self.assertTrue(overlay.smp_checkbox.isChecked())
         self.assertTrue(viewport.smp.enabled)
-        toolbar.chk_smp.setChecked(False)
+        overlay.smp_checkbox.setChecked(False)
         self.assertFalse(viewport.smp.enabled)
         config_path = self.window.config_path
         root = self.window.current_root_dir
@@ -155,11 +161,28 @@ class OutfitInteractionTests(unittest.TestCase):
         self.assertFalse(json.loads(Path(config_path).read_text(encoding="utf-8"))["smp"]["enabled"])
         self.window = DibellasWardrobeWindow(initial_root_dir=root, config_path=config_path)
         self.assertFalse(self.window.viewport.smp.enabled)
-        self.assertFalse(self.window.anim_toolbar.chk_smp.isChecked())
-        self.window.anim_toolbar.chk_smp.setChecked(True)
+        overlay = self.window.viewport.cbpc_overlay
+        self.assertFalse(overlay.smp_checkbox.isChecked())
+        overlay.smp_checkbox.setChecked(True)
         self.assertTrue(self.window.viewport.smp.enabled)
         self.window.language_combo.setCurrentIndex(self.window.language_combo.findData("zh"))
-        self.assertEqual(self.window.anim_toolbar.chk_smp.text(), "布料物理 (SMP)")
+        self.assertEqual(overlay.smp_checkbox.text(), "启用 SMP 物理")
+        self.assertEqual(overlay.checkbox.text(), "启用 CBPC 物理")
+
+    @patch("src.smp_bridge.SmpBridgeSolver.available", new_callable=PropertyMock, return_value=True)
+    def test_smp_unavailable_state_and_tooltip_follow_language(self, _available):
+        overlay = self.window.viewport.cbpc_overlay
+        changes = []
+        overlay.smpEnabledChanged.connect(changes.append)
+        with patch.object(type(self.window.viewport.smp), "available", new_callable=PropertyMock, return_value=False):
+            self.window._apply_smp_texts()
+            self.assertFalse(overlay.smp_checkbox.isEnabled())
+            self.assertEqual(overlay.smp_checkbox.toolTip(), self.window._t("smp_unavailable"))
+            self.window.language_combo.setCurrentIndex(self.window.language_combo.findData("zh"))
+            self.assertEqual(overlay.smp_checkbox.toolTip(), self.window._t("smp_unavailable"))
+        self.window._apply_smp_texts()
+        self.assertEqual(overlay.smp_checkbox.toolTip(), self.window._t("smp_tip"))
+        self.assertEqual(changes, [])
 
     def test_breast_gravity_slider_refreshes_static_and_paused_poses(self):
         viewport = self.window.viewport

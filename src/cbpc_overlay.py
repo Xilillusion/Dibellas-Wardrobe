@@ -1,10 +1,10 @@
-"""Semi-transparent CBPC control panel anchored to the bottom-right of the 3D viewport."""
+"""Semi-transparent physics control panel anchored to the bottom-right of the 3D viewport."""
 
 from __future__ import annotations
 
 from typing import Mapping, Optional, Tuple
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSignalBlocker, Qt, Signal
 from PySide6.QtWidgets import QCheckBox, QFrame, QHBoxLayout, QLabel, QSlider, QVBoxLayout, QWidget
 
 STEPS_PER_UNIT = 30  # slider resolution: 1.0 (More Gravity) == 30
@@ -12,9 +12,10 @@ SOFTNESS_STEPS = 20  # slider resolution: 1.0x == 20
 
 
 class CbpcOverlay(QFrame):
-    """CBPC enable, breast gravity, and per-area softness controls."""
+    """SMP and CBPC enable, breast gravity, and per-area softness controls."""
 
     enabledChanged = Signal(bool)
+    smpEnabledChanged = Signal(bool)
     gravityChanged = Signal(float)
     softnessChanged = Signal(str, float)
 
@@ -37,6 +38,9 @@ class CbpcOverlay(QFrame):
         )
         self.captions: dict[str, QLabel] = {}
 
+        self.smp_checkbox = QCheckBox("Enable SMP Physics", self)
+        self._smp_tooltip = ""
+        self._smp_unavailable_tip = ""
         self.checkbox = QCheckBox("Enable CBPC Physics", self)
         self.slider = QSlider(Qt.Orientation.Horizontal, self)
         self.slider.setRange(round(minimum * STEPS_PER_UNIT), round(maximum * STEPS_PER_UNIT))
@@ -50,6 +54,7 @@ class CbpcOverlay(QFrame):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 8, 10, 8)
         layout.setSpacing(6)
+        layout.addWidget(self.smp_checkbox)
         layout.addWidget(self.checkbox)
         layout.addLayout(self._row("gravity", "Gravity", self.slider, self.label))
         for group, caption in (("breasts", "Breasts"), ("butt", "Butt"), ("belly", "Belly")):
@@ -63,6 +68,7 @@ class CbpcOverlay(QFrame):
             layout.addLayout(self._row(group, f"{caption} softness", slider, label))
             slider.valueChanged.connect(lambda value, group=group: self._on_softness(group, value))
 
+        self.smp_checkbox.toggled.connect(self.smpEnabledChanged)
         self.checkbox.toggled.connect(self.enabledChanged)
         self.slider.valueChanged.connect(self._on_slider)
         self._update_label()
@@ -96,6 +102,21 @@ class CbpcOverlay(QFrame):
     def _on_slider(self, value: int) -> None:
         self._update_label()
         self.gravityChanged.emit(value / STEPS_PER_UNIT)
+
+    def set_smp_texts(self, label: str, tooltip: str) -> None:
+        self.smp_checkbox.setText(label)
+        self._smp_tooltip = tooltip
+        self._apply_smp_tooltip()
+
+    def set_smp_state(self, enabled: bool, available: bool, unavailable_tip: str = "") -> None:
+        with QSignalBlocker(self.smp_checkbox):
+            self.smp_checkbox.setChecked(bool(enabled))
+        self._smp_unavailable_tip = "" if available else unavailable_tip
+        self.smp_checkbox.setEnabled(bool(available))
+        self._apply_smp_tooltip()
+
+    def _apply_smp_tooltip(self) -> None:
+        self.smp_checkbox.setToolTip(self._smp_unavailable_tip or self._smp_tooltip)
 
     def sync(self, enabled: bool, available: bool, gravity: float, bone_count: int = 0,
              softness: Optional[Mapping[str, float]] = None) -> None:

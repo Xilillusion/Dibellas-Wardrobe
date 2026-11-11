@@ -607,7 +607,6 @@ class DibellasWardrobeWindow(QMainWindow):
             on_seek=self.viewport.seek_animation,
             on_close=self._on_stop_animation,
             parent=center_panel,
-            on_smp_toggled=self.viewport.set_smp_enabled,
         )
         self.anim_toolbar.set_translations(
             self._t("anim_play"),
@@ -1449,15 +1448,13 @@ class DibellasWardrobeWindow(QMainWindow):
         self.anim_toolbar.setVisible(False)
 
     def _apply_smp_texts(self) -> None:
-        self.anim_toolbar.set_smp_texts(self._t("smp_enable"), self._t("smp_tip"))
+        overlay = self.viewport.cbpc_overlay
+        overlay.set_smp_texts(self._t("smp_enable"), self._t("smp_tip"))
         smp = self.viewport.smp
-        self.anim_toolbar.set_smp_state(
-            smp.enabled, smp.is_active, smp.available, self._t("smp_unavailable")
-        )
+        overlay.set_smp_state(smp.enabled, smp.available, self._t("smp_unavailable"))
 
     def _on_smp_state_changed(self, enabled: bool, simulating: bool, available: bool) -> None:
-        if hasattr(self, "anim_toolbar"):
-            self.anim_toolbar.set_smp_state(enabled, simulating, available, self._t("smp_unavailable"))
+        self.viewport.cbpc_overlay.set_smp_state(enabled, available, self._t("smp_unavailable"))
 
     def _on_viewport_animation_stopped(self) -> None:
         self._active_hkx_path = None

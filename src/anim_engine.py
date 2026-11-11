@@ -25,7 +25,7 @@ _NIFLY_DIR = _REPO_ROOT / "io_scene_nifly"
 _HKX_DIR = _NIFLY_DIR / "hkx"
 _RESOURCE_ROOT = Path(getattr(sys, "_MEIPASS", _REPO_ROOT))
 
-# Add io_scene_nifly and io_scene_nifly/hkx directly so we never trigger Blender's top-level __init__.py
+# Import the bundled headless NIF and HKX modules directly.
 if str(_NIFLY_DIR) not in sys.path:
     sys.path.insert(0, str(_NIFLY_DIR))
 if str(_HKX_DIR) not in sys.path:
