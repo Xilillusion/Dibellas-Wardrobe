@@ -5,3 +5,5 @@ dist/
 sample/
 ref/
 .pytest_cache/
+smp_bridge/SmpBridge/bin/
+smp_bridge/SmpBridge/obj/

@@ -20,6 +20,9 @@ from typing import Optional, Sequence
 ROOT = Path(__file__).resolve().parent
 APP_NAME = "DibellaWardrobe"
 SPEC_PATH = ROOT / "package.spec"
+SMP_PROJECT = ROOT / "smp_bridge" / "SmpBridge"
+SMP_PUBLISH_DIR = SMP_PROJECT / "bin" / "Release" / "net8.0" / "win-x64" / "publish"
+SMP_LIBRARIES = ("SmpBridge.dll", "libbulletc.dll")
 DEFAULT_VERSION = "0.1.0"
 SEMVER_PATTERN = re.compile(
     r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
@@ -50,6 +53,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--no-clean",
         action="store_true",
         help="Keep existing build/ and dist/ directories.",
+    )
+    parser.add_argument(
+        "--skip-native-build",
+        action="store_true",
+        help="Reuse the existing SmpBridge.dll instead of running dotnet publish.",
     )
     parser.add_argument(
         "--version",
@@ -172,6 +180,38 @@ def ensure_pyinstaller_available() -> None:
     log(f"Using PyInstaller {result.stdout.strip()}")
 
 
+def build_native_library(skip: bool = False) -> None:
+    """Publish the Native AOT SMP bridge so the spec can bundle SmpBridge.dll and libbulletc.dll."""
+    if not skip:
+        dotnet = shutil.which("dotnet")
+        if dotnet is None:
+            raise BuildError(
+                "The .NET 8 SDK is required to build SmpBridge.dll (dotnet was not found on PATH). "
+                "Install it, or pass --skip-native-build to reuse an existing build."
+            )
+        command = [dotnet, "publish", str(SMP_PROJECT), "-c", "Release", "-r", "win-x64"]
+        log("Publishing the SMP bridge: " + subprocess.list2cmdline(command))
+        result = subprocess.run(
+            command,
+            cwd=ROOT,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if result.returncode != 0:
+            raise BuildError(f"dotnet publish failed with exit code {result.returncode}:\n{result.stdout}")
+    missing = [name for name in SMP_LIBRARIES if not (SMP_PUBLISH_DIR / name).is_file()]
+    if missing:
+        raise BuildError(
+            f"SMP bridge libraries are missing from {SMP_PUBLISH_DIR}: {', '.join(missing)}\n"
+            "Build them with:\n  dotnet publish smp_bridge/SmpBridge -c Release -r win-x64"
+        )
+    log(f"SMP bridge libraries ready in {SMP_PUBLISH_DIR}")
+
+
 def run_pyinstaller() -> None:
     command = [
         sys.executable,
@@ -226,6 +266,7 @@ def validate_output() -> Path:
         runtime / "assets" / "CBPConfig.json",
         runtime / "assets" / "CITATION.md",
         runtime / "locales.json",
+        *[runtime / "smp_bridge" / name for name in SMP_LIBRARIES],
     )
     missing_assets = [path for path in required_assets if not path.is_file()]
     if missing_assets:
@@ -310,6 +351,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         validate_inputs()
         ensure_pyinstaller_available()
+        build_native_library(skip=args.skip_native_build)
         if not args.no_clean:
             clean_build_directories()
         else:

@@ -216,6 +216,7 @@ class DibellasWardrobeWindow(QMainWindow):
             self.save_config()
         except Exception as exc:
             log.warning("Could not save config on close: %s", exc)
+        self.viewport.smp.close()
         super().closeEvent(event)
 
     # ------------------------------------------------------------------
@@ -266,7 +267,7 @@ class DibellasWardrobeWindow(QMainWindow):
                 self._t("anim_stop"),
                 self._t("anim_stop_tip"),
             )
-        if hasattr(self, "texture_popover"):
+            self._apply_smp_texts()
             self.texture_popover.retranslate_ui()
         if hasattr(self, "viewport"):
             self.viewport.cbpc_overlay.reposition()
@@ -606,6 +607,7 @@ class DibellasWardrobeWindow(QMainWindow):
             on_seek=self.viewport.seek_animation,
             on_close=self._on_stop_animation,
             parent=center_panel,
+            on_smp_toggled=self.viewport.set_smp_enabled,
         )
         self.anim_toolbar.set_translations(
             self._t("anim_play"),
@@ -613,6 +615,11 @@ class DibellasWardrobeWindow(QMainWindow):
             self._t("anim_stop"),
             self._t("anim_stop_tip"),
         )
+        self._apply_smp_texts()
+        self.viewport.smpStateChanged.connect(self._on_smp_state_changed)
+        self.viewport.smp.set_collision_xmls(self.config.smp.collision_xmls)
+        self.viewport.show_smp_collisions = self.config.smp.show_collisions
+        self.viewport.set_smp_enabled(self.config.smp.enabled)
         self.anim_toolbar.setVisible(False)
         self.viewport.animationTimeChanged.connect(self.anim_toolbar.update_time)
         self.viewport.animationStateChanged.connect(self.anim_toolbar.update_state)
@@ -1441,6 +1448,17 @@ class DibellasWardrobeWindow(QMainWindow):
         self.viewport.stop_animation()
         self.anim_toolbar.setVisible(False)
 
+    def _apply_smp_texts(self) -> None:
+        self.anim_toolbar.set_smp_texts(self._t("smp_enable"), self._t("smp_tip"))
+        smp = self.viewport.smp
+        self.anim_toolbar.set_smp_state(
+            smp.enabled, smp.is_active, smp.available, self._t("smp_unavailable")
+        )
+
+    def _on_smp_state_changed(self, enabled: bool, simulating: bool, available: bool) -> None:
+        if hasattr(self, "anim_toolbar"):
+            self.anim_toolbar.set_smp_state(enabled, simulating, available, self._t("smp_unavailable"))
+
     def _on_viewport_animation_stopped(self) -> None:
         self._active_hkx_path = None
         if hasattr(self, "anim_toolbar"):
@@ -2107,6 +2125,7 @@ class DibellasWardrobeWindow(QMainWindow):
         cb.enabled = self.viewport.cbpc.enabled
         cb.gravity = self.viewport.cbpc.gravity
         cb.softness = self.viewport.cbpc.softness.copy()
+        self.config.smp.enabled = self.viewport.smp.enabled
 
         self.config.locked_presets = {
             str(page): sorted(paths)

@@ -32,6 +32,7 @@ from .cbpc_manager import (
 )
 from .cbpc_overlay import CbpcOverlay
 from .nif_loader import MAX_SHADER_BONES, LoadedNifData, ShapeMeshData
+from .smp_bridge import SmpBridgeSolver
 from .texture_resolver import ResolvedTexture, TextureResolver
 
 log = logging.getLogger("dibellas_wardrobe.viewport")
@@ -108,7 +109,7 @@ class OutfitViewportWidget(QOpenGLWidget):
     animationTimeChanged = Signal(float, float)  # (current_time, duration)
     animationStateChanged = Signal(bool)  # (is_playing)
     animationStopped = Signal()
-
+    smpStateChanged = Signal(bool, bool, bool)  # (enabled, simulating, native library available)
     BASE_BODY_KEY = "__base_body__"
 
     def __init__(self, parent=None) -> None:
@@ -171,6 +172,10 @@ class OutfitViewportWidget(QOpenGLWidget):
         self.cbpc_overlay.softnessChanged.connect(self.set_cbpc_softness)
         self._sync_cbpc_overlay()
 
+        # HDT-SMP cloth physics (Native AOT BulletSharp library driven through ctypes)
+        self.smp = SmpBridgeSolver(self.anim_engine, self.cbpc)
+        self.show_smp_collisions = False
+
         self._anim_timer = QTimer(self)
         self._anim_timer.setInterval(16)  # ~60 FPS render/tick loop
         self._anim_timer.timeout.connect(self._on_animation_tick)
@@ -217,6 +222,7 @@ class OutfitViewportWidget(QOpenGLWidget):
         self._nif_bone_names[key] = tuple(
             dict.fromkeys(b for sh in nif_data.shapes if sh.is_skinned for b in sh.bone_names)
         )
+        self.smp.add_source(key, nif_data.filepath, nif_data.smp_xml_ref, nif_data.nodes, nif_data.shapes)
         self._refresh_cbpc_sources()
         if self.ctx is None:
             self._pending_nifs[key] = nif_data
@@ -239,6 +245,7 @@ class OutfitViewportWidget(QOpenGLWidget):
         self._pending_nifs.pop(key, None)
         self._nif_visibility.pop(key, None)
         self._nif_bone_names.pop(key, None)
+        self.smp.remove_source(key)
         self._refresh_cbpc_sources()
         if self.ctx is not None and key in self._gpu_nifs:
             self.makeCurrent()
@@ -496,25 +503,27 @@ class OutfitViewportWidget(QOpenGLWidget):
         self.update()
 
     def _update_static_pose(self) -> None:
-        """Without an animation, run CBPC on the bind pose and let it settle (gravity sag)."""
+        """Without an animation, run CBPC and SMP on the bind pose and let them settle (gravity sag)."""
         if self.anim_engine.active_animation is not None:
             return
-        if not self.cbpc.is_active:
+        if not self.cbpc.is_active and not self.smp.is_active:
             self._current_pose_matrices = None
             return
         pose = self.anim_engine.evaluate_pose(0.0)
         self.cbpc.reset(pose)
+        self.smp.reset()
         palette = pose
         for _ in range(60):
-            palette = self.cbpc.update(pose, 1.0 / 30.0)
+            palette = self.smp.update(dict(self.cbpc.update(pose, 1.0 / 30.0)), 1.0 / 60.0, pose)
         self._current_pose_matrices = palette
 
     def _update_pose(self, time_sec: float, dt: float, reset: bool = False) -> None:
-        """Evaluate the animated pose and blend CBPC physics deltas into it."""
+        """Evaluate the animated pose, blend CBPC deltas into it, then merge SMP cloth matrices."""
         pose = self.anim_engine.evaluate_pose(time_sec)
         if reset:
             self.cbpc.reset(pose)
-        self._current_pose_matrices = self.cbpc.update(pose, dt)
+            self.smp.reset()
+        self._current_pose_matrices = self.smp.update(self.cbpc.update(pose, dt), dt, pose)
 
     # ------------------------------------------------------------------
     # CBPC physics control
@@ -535,16 +544,34 @@ class OutfitViewportWidget(QOpenGLWidget):
         self.cbpc.set_softness(group, factor)
         self._refresh_pose()
 
-    def _refresh_pose(self) -> None:
+    # ------------------------------------------------------------------
+    # SMP cloth physics control
+    # ------------------------------------------------------------------
+
+    def set_smp_enabled(self, enabled: bool) -> None:
+        """Switch HDT-SMP cloth simulation on or off; cloth falls back to following its skeleton parent."""
+        enabled = bool(enabled)
+        if enabled == self.smp.enabled:
+            self._emit_smp_state()
+            return
+        self.smp.set_enabled(enabled)
+        self.smp.refresh()
+        self._refresh_pose(reset=True)
+
+    def _emit_smp_state(self) -> None:
+        self.smpStateChanged.emit(self.smp.enabled, self.smp.is_active, self.smp.available)
+
+    def _refresh_pose(self, reset: bool = False) -> None:
         if self.anim_engine.active_animation is not None:
-            self._update_pose(self._anim_current_time, 0.0)
+            self._update_pose(self._anim_current_time, 0.0, reset=reset)
         else:
             self._update_static_pose()
         self._sync_cbpc_overlay()
+        self._emit_smp_state()
         self.update()
 
     def _refresh_cbpc_sources(self) -> None:
-        """Recompute CBPC bones from the visible meshes (Mesh Bones ∩ CBPC config)."""
+        """Recompute CBPC bones from the visible meshes (Mesh Bones ∩ CBPC config), then the SMP world."""
         sources = {
             key: names
             for key, names in self._nif_bone_names.items()
@@ -553,10 +580,13 @@ class OutfitViewportWidget(QOpenGLWidget):
         }
         before = self.cbpc.active_bones
         self.cbpc.set_mesh_bones_bulk(sources)
-        if self.cbpc.active_bones != before:
-            self._refresh_pose()
+        self.smp.set_visible_sources(sources)
+        smp_changed = self.smp.refresh()
+        if self.cbpc.active_bones != before or smp_changed or self._current_pose_matrices is not None:
+            self._refresh_pose(reset=smp_changed)
         else:
             self._sync_cbpc_overlay()
+            self._emit_smp_state()
 
     def _sync_cbpc_overlay(self) -> None:
         self.cbpc_overlay.sync(
@@ -715,6 +745,22 @@ class OutfitViewportWidget(QOpenGLWidget):
             self.ctx.disable(moderngl.BLEND)
 
         self._composite_postprocess(output_fbo, proj, vp_w, vp_h)
+
+        if self.show_smp_collisions and self.grid_prog is not None:
+            vertices = self.smp.collision_debug_lines()
+            if len(vertices):
+                colors = np.tile(np.array([1.0, 0.3, 0.05, 1.0], dtype=np.float32), (len(vertices), 1))
+                data = np.ascontiguousarray(np.column_stack((vertices, colors)), dtype=np.float32)
+                buffer = self.ctx.buffer(data.tobytes())
+                vao = self.ctx.vertex_array(self.grid_prog, [(buffer, "3f 4f", "in_pos", "in_col")])
+                output_fbo.use()
+                self.ctx.disable(moderngl.DEPTH_TEST)
+                self.grid_prog["u_mvp"].write(bytes(glm.transpose(proj * view)))
+                self.grid_prog["u_depth_test_scene"].value = False
+                vao.render(moderngl.LINES)
+                vao.release()
+                buffer.release()
+                self.ctx.enable(moderngl.DEPTH_TEST)
 
         if (
             self.settings.show_ground_grid
@@ -1019,6 +1065,13 @@ class OutfitViewportWidget(QOpenGLWidget):
                     mapped_bone_names.append(resolved)
                     if b_idx < len(sh.bone_skin_matrices):
                         effective_skin_mats[b_idx] = sh.bone_skin_matrices[b_idx]
+                elif b_idx < len(sh.bone_skin_matrices) and self.smp.outfit_bone_matches_skin(
+                    b_name, sh.bone_skin_matrices[b_idx]
+                ):
+                    # Outfit-only bone (cloth/hair chain): skinned through its own matrix, which is its animated
+                    # NIF parent chain or, when SMP simulates it, the Bullet result.
+                    mapped_bone_names.append(b_name)
+                    effective_skin_mats[b_idx] = sh.bone_skin_matrices[b_idx]
                 else:
                     bind_pos: Optional[np.ndarray] = None
                     if b_idx < len(sh.bone_skin_matrices):
@@ -1169,16 +1222,18 @@ class OutfitViewportWidget(QOpenGLWidget):
         self.ctx.wireframe = bool(wireframe)
         self._set_uniform("bWireframe", bool(wireframe))
 
+        pose = self._current_pose_matrices
         use_skinning = (
-            self._current_pose_matrices is not None
+            pose is not None
             and item.shape_data.is_skinned
             and len(item.mapped_bone_names) > 0
             and self.bone_ubo is not None
+            and all(name in pose for name in item.mapped_bone_names)
         )
         self._set_uniform("bSkinned", bool(use_skinning))
-        if use_skinning and self._current_pose_matrices is not None and self.bone_ubo is not None:
+        if use_skinning and pose is not None and self.bone_ubo is not None:
             pose_stack = np.stack(
-                [self._current_pose_matrices[name] for name in item.mapped_bone_names],
+                [pose[name] for name in item.mapped_bone_names],
                 axis=0,
             )
             skin_mats = pose_stack @ item.effective_skin_matrices

@@ -147,6 +147,42 @@ class LoadedNifData:
     shapes: List[ShapeMeshData]
     bbox_min: np.ndarray
     bbox_max: np.ndarray
+    # Path stored in the root's "HDT Skinned Mesh Physics Object" NiStringExtraData ("" when absent).
+    smp_xml_ref: str = ""
+    # Non-shape nodes: name -> (parent name or None, 4x4 local transform).
+    nodes: Dict[str, Tuple[Optional[str], np.ndarray]] = field(default_factory=dict)
+
+
+SMP_EXTRA_DATA_NAME = "HDT Skinned Mesh Physics Object"
+
+
+def _extract_smp_xml_ref(nif) -> str:
+    """Return the physics XML path embedded by an HDT-SMP outfit, or an empty string."""
+    try:
+        for extra in nif.root.extra_data():
+            if getattr(extra, "name", "") == SMP_EXTRA_DATA_NAME:
+                return str(getattr(extra, "string_data", "") or "").strip()
+    except Exception as exc:
+        log.debug("Could not read SMP extra data: %s", exc)
+    return ""
+
+
+def _extract_node_tree(nif, shape_names: set) -> Dict[str, Tuple[Optional[str], np.ndarray]]:
+    """Collect every non-shape node with its parent name and 4x4 local transform."""
+    tree: Dict[str, Tuple[Optional[str], np.ndarray]] = {}
+    try:
+        for name, node in nif.nodes.items():
+            if name in shape_names:
+                continue
+            parent = node.parent
+            xf = node.transform
+            local = np.eye(4, dtype=np.float32)
+            local[:3, :3] = [list(xf.rotation[0]), list(xf.rotation[1]), list(xf.rotation[2])]
+            local[:3, 3] = [float(xf.translation[0]), float(xf.translation[1]), float(xf.translation[2])]
+            tree[name] = (parent.name if parent is not None else None, local)
+    except Exception as exc:
+        log.debug("Could not read node tree: %s", exc)
+    return tree
 
 
 def compute_normals(positions: np.ndarray, triangles: np.ndarray) -> np.ndarray:
@@ -745,6 +781,7 @@ class NifLoader:
                 global_min = np.zeros(3, dtype=np.float32)
                 global_max = np.ones(3, dtype=np.float32)
 
+            shape_names = {s.name for s in shapes_out}
             return LoadedNifData(
                 filepath=path,
                 game=game,
@@ -752,4 +789,6 @@ class NifLoader:
                 shapes=shapes_out,
                 bbox_min=global_min,
                 bbox_max=global_max,
+                smp_xml_ref=_extract_smp_xml_ref(nif),
+                nodes=_extract_node_tree(nif, shape_names),
             )

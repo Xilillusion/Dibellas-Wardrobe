@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <PlatformTarget>x64</PlatformTarget>
+    <AssemblyName>SmpBridge</AssemblyName>
+    <RootNamespace>SmpBridge</RootNamespace>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <PublishAot>true</PublishAot>
+    <NativeLib>Shared</NativeLib>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <StackTraceSupport>false</StackTraceSupport>
+    <IlcOptimizationPreference>Speed</IlcOptimizationPreference>
+    <NoWarn>$(NoWarn);NU1701</NoWarn>
+    <!-- BulletSharp is a .NET Framework assembly: collapse its trim/AOT analysis noise into one warning. -->
+    <TrimmerSingleWarn>true</TrimmerSingleWarn>
+    <SuppressTrimAnalysisWarnings>true</SuppressTrimAnalysisWarnings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="BulletSharp" Version="0.11.1" />
+  </ItemGroup>
+
+  <!--
+    BulletSharp ships its native library as libbulletc-windows-x64.dll and relies on a build target
+    that only copies it next to the build output. Native AOT publishes SmpBridge.dll on its own, so the
+    renamed libbulletc.dll is copied into the publish directory here.
+  -->
+  <Target Name="DeployBulletNative" AfterTargets="Publish">
+    <PropertyGroup>
+      <BulletNativeSource>$(NuGetPackageRoot)bulletsharp/0.11.1/build/net40-client/libbulletc-windows-x64.dll</BulletNativeSource>
+    </PropertyGroup>
+    <Error Condition="!Exists('$(BulletNativeSource)')" Text="BulletSharp native library not found: $(BulletNativeSource)" />
+    <Copy SourceFiles="$(BulletNativeSource)" DestinationFiles="$(PublishDir)libbulletc.dll" SkipUnchangedFiles="true" />
+  </Target>
+
+</Project>

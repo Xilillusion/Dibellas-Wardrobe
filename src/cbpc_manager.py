@@ -175,6 +175,31 @@ class CbpcManager:
             )
         return out
 
+    def collider_specs(self) -> List[Tuple[str, str, List[dict]]]:
+        """Body colliders as ``(config key, skeleton node name, raw shape dicts)``.
+
+        Only entries listed in ``collider_nodes`` whose node exists on the skeleton are returned.
+        Shape dicts hold ``p1``/``r1`` and an optional second end ``p2``/``r2`` in node-local space.
+        """
+        by_norm: Dict[str, List[str]] = {}
+        for node in self.anim_engine.nodes:
+            by_norm.setdefault(normalize_node_key(node.name), []).append(node.name)
+
+        specs: List[Tuple[str, str, List[dict]]] = []
+        for key, collider in self.collision_nodes.items():
+            if key not in self.collider_nodes:
+                continue
+            raw = collider.get("shapes", [])
+            if not raw:
+                continue
+            node_name = self.anim_engine.resolve_bone_name(collider["name"])
+            if node_name is None:
+                candidates = by_norm.get(key, ())
+                node_name = candidates[0] if candidates else None
+            if node_name is not None:
+                specs.append((key, node_name, raw))
+        return specs
+
     def _build_colliders(self) -> None:
         if not self.has_physics:
             self.solver.set_colliders([])
@@ -195,25 +220,11 @@ class CbpcManager:
                 affected_shapes[pose_name] = make_shapes(pose_name, raw)
         self.solver.set_affected_shapes(affected_shapes)
 
-        by_norm: Dict[str, List[str]] = {}
-        for node in self.anim_engine.nodes:
-            by_norm.setdefault(normalize_node_key(node.name), []).append(node.name)
-
         shapes: List[ColliderShapes] = []
         keys: List[str] = []
-        for key, collider in self.collision_nodes.items():
-            if key not in self.collider_nodes:
-                continue
-            raw = collider.get("shapes", [])
-            if not raw:
-                continue
-            node_name = self.anim_engine.resolve_bone_name(collider["name"])
-            if node_name is None:
-                candidates = by_norm.get(key, ())
-                node_name = candidates[0] if candidates else None
-            if node_name is not None:
-                shapes.append(make_shapes(node_name, raw))
-                keys.append(key)
+        for key, node_name, raw in self.collider_specs():
+            shapes.append(make_shapes(node_name, raw))
+            keys.append(key)
         # AffectedNodes entries list self-colliders to ignore, not allowed colliders.
         mask = np.zeros((len(self.solver.names), len(shapes)), dtype=bool)
         for i, pose_name in enumerate(self.solver.names):

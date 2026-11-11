@@ -13,6 +13,7 @@ from PySide6.QtCore import (
     QEvent,
     QPoint,
     QRect,
+    QSignalBlocker,
     Qt,
     QTimer,
 )
@@ -25,6 +26,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QCheckBox,
     QFrame,
     QGroupBox,
     QHBoxLayout,
@@ -499,8 +501,8 @@ class AnimationPlaybackToolbar(QFrame):
     Docked bottom playback toolbar for `.hkx` animations.
 
     Displays metadata (`[Mod Name (Parent Directory)] - [Filename.hkx]`), a formatted
-    timestamp counter (`MM:SS.CC / MM:SS.CC`), an interactive timeline scrubber, and
-    Play/Pause and Close/Reset controls.
+    timestamp counter (`MM:SS.CC / MM:SS.CC`), an interactive timeline scrubber,
+    Play/Pause and Close/Reset controls, and the `Cloth Physics (SMP)` toggle.
     """
 
     SCRUB_STEPS = 1000
@@ -511,6 +513,7 @@ class AnimationPlaybackToolbar(QFrame):
         on_seek,
         on_close,
         parent: Optional[QWidget] = None,
+        on_smp_toggled: Optional[Callable[[bool], None]] = None,
     ) -> None:
         super().__init__(parent)
         self._on_seek = on_seek
@@ -521,8 +524,8 @@ class AnimationPlaybackToolbar(QFrame):
         self._play_tooltip = "Play"
         self._pause_tooltip = "Pause"
         self._updating_slider = False
-
-        self.setObjectName("animPlaybackToolbar")
+        self._smp_tooltip = ""
+        self._smp_unavailable_tip = ""
         self.setFixedHeight(44)
         self.setStyleSheet(
             """
@@ -600,6 +603,13 @@ class AnimationPlaybackToolbar(QFrame):
         self.slider.valueChanged.connect(self._on_slider_value_changed)
         layout.addWidget(self.slider, stretch=1)
 
+        self.chk_smp = QCheckBox("Cloth Physics (SMP)")
+        self.chk_smp.setChecked(True)
+        self.chk_smp.setStyleSheet("QCheckBox { color: #c5cee2; font-size: 12px; spacing: 6px; }")
+        if on_smp_toggled is not None:
+            self.chk_smp.toggled.connect(on_smp_toggled)
+        layout.addWidget(self.chk_smp)
+
         self.lbl_time = QLabel("00:00.00 / 00:00.00")
         self.lbl_time.setFixedWidth(135)
         self.lbl_time.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
@@ -635,6 +645,24 @@ class AnimationPlaybackToolbar(QFrame):
         )
         self.btn_close.setText("×")
         self.btn_close.setToolTip(close_tooltip or close_text)
+
+    def set_smp_texts(self, label: str, tooltip: str) -> None:
+        self.chk_smp.setText(label)
+        self._smp_tooltip = tooltip
+        self._apply_smp_tooltip()
+
+    def set_smp_state(self, enabled: bool, simulating: bool, native_available: bool, unavailable_tip: str = "") -> None:
+        """Mirror the viewport's SMP state without re-triggering the toggle callback."""
+        blocker = QSignalBlocker(self.chk_smp)
+        self.chk_smp.setChecked(bool(enabled))
+        del blocker
+        self._smp_unavailable_tip = "" if native_available else unavailable_tip
+        self.chk_smp.setEnabled(bool(native_available))
+        self._apply_smp_tooltip()
+
+    def _apply_smp_tooltip(self) -> None:
+        tip = self._smp_unavailable_tip or self._smp_tooltip
+        self.chk_smp.setToolTip(tip)
 
     def set_metadata(self, label_text: str, duration: float) -> None:
         self._duration = max(0.0, float(duration))

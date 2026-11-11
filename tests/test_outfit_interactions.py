@@ -141,6 +141,26 @@ class OutfitInteractionTests(unittest.TestCase):
             self.assertEqual(overlay.y() + overlay.height(), self.window.viewport.height() - overlay.MARGIN)
         self.assertEqual(changes, [])
 
+    def test_smp_toggle_in_animation_toolbar_drives_viewport_and_persists(self):
+        toolbar = self.window.anim_toolbar
+        viewport = self.window.viewport
+        self.assertEqual(toolbar.chk_smp.text(), "Cloth Physics (SMP)")
+        self.assertTrue(toolbar.chk_smp.isChecked())
+        self.assertTrue(viewport.smp.enabled)
+        toolbar.chk_smp.setChecked(False)
+        self.assertFalse(viewport.smp.enabled)
+        config_path = self.window.config_path
+        root = self.window.current_root_dir
+        self.window.close()
+        self.assertFalse(json.loads(Path(config_path).read_text(encoding="utf-8"))["smp"]["enabled"])
+        self.window = DibellasWardrobeWindow(initial_root_dir=root, config_path=config_path)
+        self.assertFalse(self.window.viewport.smp.enabled)
+        self.assertFalse(self.window.anim_toolbar.chk_smp.isChecked())
+        self.window.anim_toolbar.chk_smp.setChecked(True)
+        self.assertTrue(self.window.viewport.smp.enabled)
+        self.window.language_combo.setCurrentIndex(self.window.language_combo.findData("zh"))
+        self.assertEqual(self.window.anim_toolbar.chk_smp.text(), "布料物理 (SMP)")
+
     def test_breast_gravity_slider_refreshes_static_and_paused_poses(self):
         viewport = self.window.viewport
         viewport.cbpc.set_mesh_bones("body", ["L Breast01", "NPC L Butt"])

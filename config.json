@@ -44,24 +44,24 @@
       "other": 5.0
     }
   },
+  "smp": {
+    "enabled": true,
+    "collision_xmls": [],
+    "show_collisions": false
+  },
   "locked_nifs": [
-    "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\COCO Ahri Uniforms\\meshes\\Coco_Cloths\\Ahri_uniforms_v2\\bra_1.nif",
-    "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\COCO Ahri Uniforms\\meshes\\Coco_Cloths\\Ahri_uniforms_v2\\briefs_1.nif",
-    "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\COCO Ahri Uniforms\\meshes\\Coco_Cloths\\Ahri_uniforms_v2\\necklacef_1.nif",
-    "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\COCO Ahri Uniforms\\meshes\\Coco_Cloths\\Ahri_uniforms_v2\\shoes_1.nif",
-    "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\COCO Ahri Uniforms\\meshes\\Coco_Cloths\\Ahri_uniforms_v2\\skirt_1.nif",
-    "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\COCO Ahri Uniforms\\meshes\\Coco_Cloths\\Ahri_uniforms_v2\\stock_1.nif",
-    "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\COCO Ahri Uniforms\\meshes\\Coco_Cloths\\Ahri_uniforms_v2\\top_1.nif",
-    "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\Caliente's Beautiful Bodies Enhancer -CBBE-\\femalehands_1.nif",
+    "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\CBBE 3BA\\meshes\\armor\\Mu3B\\3BBBCollisionArmorP_1.nif",
     "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\bra_1.nif",
     "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\crown1.nif",
-    "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\glovet_1.nif",
+    "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\glove_1.nif",
     "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\hairsmp1.nif",
     "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\heels_1.nif",
     "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\necklace_1.nif",
-    "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\pantylacet_1.nif",
-    "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\pantyt3_1.nif",
-    "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\topint_1.nif",
+    "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\pantylace_1.nif",
+    "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\pantysmp_1.nif",
+    "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\topin_1.nif",
+    "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\topoutmet_1.nif",
+    "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\topoutshomet_1.nif",
     "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\topoutsmpt_1.nif",
     "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[Melodic] Echidna\\meshes\\Melodic\\Echida\\Cloths_1.nif",
     "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[Melodic] Echidna\\meshes\\Melodic\\Echida\\Forearms_1.nif",
@@ -73,6 +73,7 @@
   ],
   "locked_presets": {
     "1": [
+      "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\CBBE 3BA\\meshes\\armor\\Mu3B\\3BBBCollisionArmorP_1.nif",
       "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[Melodic] Echidna\\meshes\\Melodic\\Echida\\Cloths_1.nif",
       "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[Melodic] Echidna\\meshes\\Melodic\\Echida\\Forearms_1.nif",
       "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[Melodic] Echidna\\meshes\\Melodic\\Echida\\Hair_1.nif",
@@ -82,31 +83,23 @@
       "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[Melodic] Echidna\\meshes\\Melodic\\Echida\\Top_1.nif"
     ],
     "2": [
+      "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\CBBE 3BA\\meshes\\armor\\Mu3B\\3BBBCollisionArmorP_1.nif",
       "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\bra_1.nif",
       "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\crown1.nif",
-      "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\glovet_1.nif",
+      "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\glove_1.nif",
       "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\hairsmp1.nif",
       "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\heels_1.nif",
       "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\necklace_1.nif",
-      "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\pantylacet_1.nif",
-      "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\pantyt3_1.nif",
-      "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\topint_1.nif",
+      "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\pantylace_1.nif",
+      "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\pantysmp_1.nif",
+      "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\topin_1.nif",
+      "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\topoutmet_1.nif",
+      "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\topoutshomet_1.nif",
       "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\topoutsmpt_1.nif"
-    ],
-    "3": [
-      "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\COCO Ahri Uniforms\\meshes\\Coco_Cloths\\Ahri_uniforms_v2\\bra_1.nif",
-      "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\COCO Ahri Uniforms\\meshes\\Coco_Cloths\\Ahri_uniforms_v2\\briefs_1.nif",
-      "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\COCO Ahri Uniforms\\meshes\\Coco_Cloths\\Ahri_uniforms_v2\\necklacef_1.nif",
-      "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\COCO Ahri Uniforms\\meshes\\Coco_Cloths\\Ahri_uniforms_v2\\shoes_1.nif",
-      "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\COCO Ahri Uniforms\\meshes\\Coco_Cloths\\Ahri_uniforms_v2\\skirt_1.nif",
-      "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\COCO Ahri Uniforms\\meshes\\Coco_Cloths\\Ahri_uniforms_v2\\stock_1.nif",
-      "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\COCO Ahri Uniforms\\meshes\\Coco_Cloths\\Ahri_uniforms_v2\\top_1.nif",
-      "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\Caliente's Beautiful Bodies Enhancer -CBBE-\\femalehands_1.nif"
     ]
   },
   "locked_preset_names": {
     "1": "Echidna",
-    "2": "Mysterious Mage",
-    "3": "Ahri"
+    "2": "Mage"
   }
 }

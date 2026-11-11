@@ -14,6 +14,7 @@ Dibella's Wardrobe is a desktop previewer for Skyrim Special Edition and Anniver
 - Adjust lighting, shader display options, and language in Settings. Translation choices are loaded from `locales.json`.
 - Tune screen-space reflections (SSR), ambient occlusion (GTAO), and screen-space subsurface scattering (SSSS) in Settings.
 - Adjust CBPC body physics using the viewport's breast-gravity and per-area softness controls.
+- Simulate HDT-SMP cloth, hair and capes for outfits that ship an SMP physics XML, using a native Bullet engine. Toggle it with **Cloth Physics (SMP)** on the animation toolbar.
 
 ## Advanced viewport effects
 
@@ -26,6 +27,7 @@ These are screen-space approximations evaluated from the rendered meshes' color 
 - Windows (the bundled NIF parser includes `io_scene_nifly/NiflyDLL.dll`).
 - Python 3.10 or newer.
 - A graphics driver that supports OpenGL 3.3.
+- For HDT-SMP cloth physics: `SmpBridge.dll` and `libbulletc.dll`, built from `smp_bridge/` (see [Build the SMP physics library](#build-the-smp-physics-library)). Portable releases already include them. Without them the app still runs; cloth then follows its skeleton parent and the SMP toggle is disabled.
 
 ## Install
 
@@ -46,6 +48,27 @@ If PowerShell prevents virtual-environment activation, run the Python executable
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
+
+## Build the SMP physics library
+
+HDT-SMP cloth physics runs in `smp_bridge/SmpBridge`, a C# project (BulletSharp) compiled with .NET Native AOT into a plain native `SmpBridge.dll` that Python loads with `ctypes`. No .NET runtime is needed to run the app, but building the library needs:
+
+- the .NET 8 SDK, and
+- the Visual Studio "Desktop development with C++" build tools (the Native AOT linker).
+
+```powershell
+dotnet publish smp_bridge/SmpBridge -c Release -r win-x64
+```
+
+The output in `smp_bridge/SmpBridge/bin/Release/net8.0/win-x64/publish/` must contain `SmpBridge.dll` and `libbulletc.dll`; the app finds them there automatically. Set the `SMP_BRIDGE_DIR` environment variable to load them from another folder.
+
+### How SMP physics is applied
+
+For each visible outfit the app reads the XML path stored in the NIF's `HDT Skinned Mesh Physics Object` string extra data (relative to the mod root), falling back to a `[nif_name].xml` next to the NIF. Additional collision XMLs can be listed under `"smp": { "collision_xmls": ["C:\\path\\to\\Collision.xml"] }` in the configuration; they are loaded into the same world before outfit XMLs. Set `"show_collisions": true` in the same section to draw the loaded XML primitives.
+
+Mass-zero and keyframed bodies follow the animated skeleton; positive-mass dynamic bodies use `<generic-constraint>` springs. Explicit sphere, capsule, and box shapes are used for collisions. Capsule `height` denotes total end-to-end height; alternatively `p0` and `p1` define the centers of its caps. Box shapes require explicit `half-extents`. Shapeless bodies have no collision geometry. CBPC does not supply SMP colliders. Shared bones remain active in SMP; when CBPC is active, its result takes precedence for visual deformation.
+
+`<per-vertex-shape>` and `<per-triangle-shape>` resolve skinned NIF shapes by name. Their vertices and triangle plates follow the animated or simulated bones, and contacts are submitted to Bullet using the XML's margins, penetration, weight thresholds and collision filters. An XML loaded as an additional collision XML can resolve shapes from any visible NIF; an outfit XML resolves shapes from its own NIF. Missing meshes are reported in the SMP diagnostics. `VirtualGround` requires a matching NIF shape; it is not an implicit floor. `stiffspring` and `conetwist` constraints and `<pattern>` macros are not simulated.
 
 ## Run
 
@@ -83,16 +106,17 @@ Then run the release script from the project directory:
 python build_release.py
 ```
 
-The script cleans `build/` and `dist/`, builds with `package.spec`, validates the executable and bundled runtime assets, and writes a portable ZIP under `dist/`. Version is read from `VERSION`, `version.txt`, or the optional `version` field in `config.json`, in that order; if none is present, it defaults to `0.1.0`.
+The script publishes the SMP bridge (`dotnet publish`), cleans `build/` and `dist/`, builds with `package.spec`, validates the executable and bundled runtime assets (including `SmpBridge.dll` and `libbulletc.dll`), and writes a portable ZIP under `dist/`. Version is read from `VERSION`, `version.txt`, or the optional `version` field in `config.json`, in that order; if none is present, it defaults to `0.1.0`.
 
 The release starts with default settings rather than including the builder's `config.json`. Settings are saved in the portable distribution when the app closes.
 
 Options:
 
 ```text
---version 1.2.3   Override the release version
---skip-zip        Build and validate without creating the ZIP
---no-clean        Keep existing build/ and dist/ directories
+--version 1.2.3       Override the release version
+--skip-zip            Build and validate without creating the ZIP
+--no-clean            Keep existing build/ and dist/ directories
+--skip-native-build   Reuse the existing SmpBridge.dll instead of running dotnet publish
 ```
 
 ## Using the preview
@@ -127,14 +151,15 @@ previous dynamics exactly.
 
 ## Configuration and languages
 
-The default configuration file is `config.json` in the project directory. It stores the last-used folder, language, lighting and display settings, and locked NIF paths. Use `--config` to select another file.
+The default configuration file is `config.json` in the project directory. It stores the last-used folder, language, lighting and display settings, CBPC and SMP physics settings, and locked NIF paths. Use `--config` to select another file.
 
 Available languages are read from `locales.json`. Each locale is an object keyed by language code and must include a `language_name` string; translated UI text is defined by the other entries in that object.
 
 ## Project files
 
 - `main.py` - application entry point.
-- `src/` - user interface, NIF loader, mod scanner, texture resolver, and viewport.
+- `src/` - user interface, NIF loader, mod scanner, texture resolver, viewport, and the CBPC and SMP physics layers (`smp_bridge.py` is the `ctypes` binding to the native SMP library).
+- `smp_bridge/` - C# (.NET 8, BulletSharp, Native AOT) source of the HDT-SMP physics engine, built into `SmpBridge.dll`.
 - `io_scene_nifly/` - bundled NIF parsing library and native DLL.
 - `shaders/` - mesh and post-processing GLSL shaders used by the viewport.
 - `requirements.txt` - Python dependencies.

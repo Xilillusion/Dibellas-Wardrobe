@@ -90,6 +90,13 @@ class CbpcConfig:
 
 
 @dataclass
+class SmpConfig:
+    enabled: bool = True
+    collision_xmls: list[str] = field(default_factory=list)
+    show_collisions: bool = False
+
+
+@dataclass
 class AppConfig:
     default_folder: str = ""
     language: str = ""
@@ -97,6 +104,7 @@ class AppConfig:
     effects: ViewportEffectsConfig = field(default_factory=ViewportEffectsConfig)
     checkboxes: CheckboxConfig = field(default_factory=CheckboxConfig)
     cbpc: CbpcConfig = field(default_factory=CbpcConfig)
+    smp: SmpConfig = field(default_factory=SmpConfig)
     locked_nifs: list[str] = field(default_factory=list)
     locked_presets: Dict[str, list[str]] = field(default_factory=dict)
     locked_preset_names: Dict[str, str] = field(default_factory=dict)
@@ -251,6 +259,18 @@ class AppConfig:
                     cfg.cbpc.softness = dict.fromkeys(SOFTNESS_GROUPS, value)
                 else:
                     log.warning("Ignoring invalid legacy CBPC bounce setting")
+
+        smp_data = data.get("smp", {})
+        if isinstance(smp_data, dict):
+            if isinstance(smp_data.get("enabled"), bool):
+                cfg.smp.enabled = smp_data["enabled"]
+            if isinstance(smp_data.get("show_collisions"), bool):
+                cfg.smp.show_collisions = smp_data["show_collisions"]
+            paths = smp_data.get("collision_xmls", [])
+            if isinstance(paths, list) and all(isinstance(path, str) for path in paths):
+                cfg.smp.collision_xmls = paths
+            else:
+                log.warning("Ignoring invalid SMP collision XML paths")
 
         return cfg
 
