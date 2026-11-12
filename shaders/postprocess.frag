@@ -1,28 +1,38 @@
 #version 330
 
+// The viewport inserts ENABLE_GTAO / ENABLE_SSSS defines after #version
+// according to the active outfit preset. Without either, this is a copy pass.
+// SPLIT_COMPOSITE runs after a preset with "ssss_after_preset": u_scene_color
+// is the preset's diffuse, scattered only where u_scene_specular.a masks it,
+// and the specular RGB is added afterwards so SSSS never blurs it.
+
 in vec2 v_uv;
 out vec4 fragColor;
 
 uniform sampler2D u_scene_color;
+#ifdef SPLIT_COMPOSITE
+uniform sampler2D u_scene_specular;
+#endif
+
+#if defined(ENABLE_GTAO) || defined(ENABLE_SSSS)
 uniform sampler2D u_scene_depth;
 uniform vec2 u_viewport_size;
-uniform mat4 u_projection;
 uniform mat4 u_inverse_projection;
+#endif
 
-uniform bool u_enable_ssr;
-uniform float u_ssr_step_size;
-uniform int u_ssr_max_steps;
-uniform float u_ssr_thickness;
-
-uniform bool u_enable_ao;
+#ifdef ENABLE_GTAO
 uniform float u_ao_radius;
 uniform float u_ao_intensity;
 uniform float u_ao_bias;
+#endif
 
-uniform bool u_enable_ssss;
+#ifdef ENABLE_SSSS
 uniform float u_ssss_radius;
+uniform float u_ssss_strength;
 uniform vec3 u_ssss_falloff_color;
+#endif
 
+#if defined(ENABLE_GTAO) || defined(ENABLE_SSSS)
 const float BACKGROUND_DEPTH = 0.999999;
 
 vec3 view_position(vec2 uv, float depth) {
@@ -65,7 +75,9 @@ bool surface_normal(vec2 uv, vec3 center, out vec3 normal) {
     }
     return dot(normal, normal) > 0.5;
 }
+#endif
 
+#ifdef ENABLE_GTAO
 float ambient_occlusion(vec2 uv, vec3 position, vec3 normal) {
     const vec2 offsets[8] = vec2[](
         vec2(1.0, 0.0), vec2(-1.0, 0.0),
@@ -97,40 +109,12 @@ float ambient_occlusion(vec2 uv, vec3 position, vec3 normal) {
     }
     return samples > 0.0 ? clamp(occlusion / samples, 0.0, 1.0) : 0.0;
 }
+#endif
 
-vec3 screen_space_reflection(vec2 uv, vec3 position, vec3 normal) {
-    vec3 ray_direction = normalize(reflect(normalize(position), normal));
-    vec3 ray_position = position + ray_direction * u_ssr_step_size;
-    for (int i = 0; i < 128; ++i) {
-        if (i >= u_ssr_max_steps) {
-            break;
-        }
-        vec4 projected = u_projection * vec4(ray_position, 1.0);
-        if (projected.w <= 0.0) {
-            break;
-        }
-        vec2 sample_uv = projected.xy / projected.w * 0.5 + 0.5;
-        if (any(lessThanEqual(sample_uv, vec2(0.0))) ||
-            any(greaterThanEqual(sample_uv, vec2(1.0)))) {
-            break;
-        }
-
-        float sample_depth = texture(u_scene_depth, sample_uv).r;
-        if (sample_depth < BACKGROUND_DEPTH && i > 1) {
-            vec3 scene_position = view_position(sample_uv, sample_depth);
-            float ray_depth = -ray_position.z;
-            float scene_depth = -scene_position.z;
-            float depth_delta = ray_depth - scene_depth;
-            if (depth_delta >= 0.0 && depth_delta <= u_ssr_thickness) {
-                return texture(u_scene_color, sample_uv).rgb;
-            }
-        }
-        ray_position += ray_direction * u_ssr_step_size;
-    }
-    return vec3(-1.0);
-}
-
-vec3 subsurface_scatter(vec2 uv, vec3 position, vec3 normal, vec3 source_color) {
+#ifdef ENABLE_SSSS
+vec3 subsurface_scatter(
+    vec2 uv, vec3 position, vec3 normal, vec3 source_color, float strength
+) {
     const vec2 offsets[8] = vec2[](
         vec2(1.0, 0.0), vec2(-1.0, 0.0),
         vec2(0.0, 1.0), vec2(0.0, -1.0),
@@ -162,43 +146,53 @@ vec3 subsurface_scatter(vec2 uv, vec3 position, vec3 normal, vec3 source_color) 
             continue;
         }
         float weight = 1.0 - float(i) * 0.055;
+#ifdef SPLIT_COMPOSITE
+        // Only masked neighbours scatter, so unmasked surfaces do not bleed in.
+        weight *= texture(u_scene_specular, sample_uv).a;
+        if (weight <= 0.0) {
+            continue;
+        }
+#endif
         scattered += texture(u_scene_color, sample_uv).rgb * weight;
         weight_sum += weight;
     }
     vec3 blur_color = scattered / weight_sum;
     vec3 tinted_scatter = mix(blur_color, blur_color * u_ssss_falloff_color, 0.35);
-    return mix(source_color, tinted_scatter, 0.35);
+    return mix(source_color, tinted_scatter, strength);
 }
+#endif
 
 void main() {
     vec4 source = texture(u_scene_color, v_uv);
-    float depth = texture(u_scene_depth, v_uv).r;
-    if (depth >= BACKGROUND_DEPTH) {
-        fragColor = source;
-        return;
-    }
-
-    vec3 position = view_position(v_uv, depth);
-    vec3 normal;
-    if (!surface_normal(v_uv, position, normal)) {
-        fragColor = source;
-        return;
-    }
-
     vec3 color = source.rgb;
-    if (u_enable_ssr) {
-        vec3 reflected_color = screen_space_reflection(v_uv, position, normal);
-        if (reflected_color.r >= 0.0) {
-            float facing = 1.0 - max(dot(normal, normalize(-position)), 0.0);
-            color = mix(color, reflected_color, 0.2 + 0.2 * facing);
+#ifdef SPLIT_COMPOSITE
+    vec4 specular = texture(u_scene_specular, v_uv);
+    float ssss_mask = specular.a;
+#else
+    float ssss_mask = 1.0;
+#endif
+#if defined(ENABLE_GTAO) || defined(ENABLE_SSSS)
+    float depth = texture(u_scene_depth, v_uv).r;
+    if (depth < BACKGROUND_DEPTH) {
+        vec3 position = view_position(v_uv, depth);
+        vec3 normal;
+        if (surface_normal(v_uv, position, normal)) {
+#ifdef ENABLE_SSSS
+            if (ssss_mask > 0.0) {
+                color = subsurface_scatter(
+                    v_uv, position, normal, color, u_ssss_strength * ssss_mask
+                );
+            }
+#endif
+#ifdef ENABLE_GTAO
+            float occlusion = ambient_occlusion(v_uv, position, normal);
+            color *= 1.0 - clamp(occlusion * u_ao_intensity * 0.65, 0.0, 0.85);
+#endif
         }
     }
-    if (u_enable_ssss) {
-        color = subsurface_scatter(v_uv, position, normal, color);
-    }
-    if (u_enable_ao) {
-        float occlusion = ambient_occlusion(v_uv, position, normal);
-        color *= 1.0 - clamp(occlusion * u_ao_intensity * 0.65, 0.0, 0.85);
-    }
+#endif
+#ifdef SPLIT_COMPOSITE
+    color += specular.rgb;
+#endif
     fragColor = vec4(color, source.a);
 }

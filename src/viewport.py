@@ -10,8 +10,9 @@ from __future__ import annotations
 
 import logging
 import math
+import struct
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -32,7 +33,16 @@ from .cbpc_manager import (
 )
 from .cbpc_overlay import CbpcOverlay
 from .nif_loader import MAX_SHADER_BONES, LoadedNifData, ShapeMeshData
+from .shader_presets import (
+    NO_POSTPROCESS,
+    PostProcessProfile,
+    UniformValue,
+    load_postprocess_profile,
+    load_preset_label,
+    load_preset_uniforms,
+)
 from .smp_bridge import SmpBridgeSolver
+from .smaa import DEFAULT_SMAA_QUALITY, SMAA_QUALITIES, SmaaPostProcess
 from .texture_resolver import ResolvedTexture, TextureResolver
 
 log = logging.getLogger("dibellas_wardrobe.viewport")
@@ -69,7 +79,8 @@ class GpuShapeItem:
 class ViewportRenderSettings:
     """Real-time lighting and shader toggles controlled by the UI."""
 
-    light_azimuth_deg: float = 35.0
+    shader_preset: str = "none"
+    light_azimuth_deg: float = 110.0
     light_elevation_deg: float = 28.0
     light_intensity: float = 0.85
     ambient_intensity: float = 0.45
@@ -84,19 +95,8 @@ class ViewportRenderSettings:
     wireframe_overlay: bool = False
     show_ground_grid: bool = True
 
-    enable_ssr: bool = False
-    ssr_step_size: float = 1.0
-    ssr_max_steps: int = 32
-    ssr_thickness: float = 2.0
-
-    enable_ao: bool = False
-    ao_radius: float = 8.0
-    ao_intensity: float = 1.0
-    ao_bias: float = 0.02
-
-    enable_ssss: bool = False
-    ssss_radius: float = 5.0
-    ssss_falloff_color: Tuple[float, float, float] = (1.0, 0.45, 0.35)
+    enable_smaa: bool = True
+    smaa_quality: str = DEFAULT_SMAA_QUALITY
 
 
 class OutfitViewportWidget(QOpenGLWidget):
@@ -106,6 +106,7 @@ class OutfitViewportWidget(QOpenGLWidget):
     """
 
     statsChanged = Signal(int, int, int)  # (nif_count, shape_count, triangle_count)
+    shaderPresetError = Signal(str)
     animationTimeChanged = Signal(float, float)  # (current_time, duration)
     animationStateChanged = Signal(bool)  # (is_playing)
     animationStopped = Signal()
@@ -133,9 +134,37 @@ class OutfitViewportWidget(QOpenGLWidget):
         )
         self.post_prog: Optional[moderngl.Program] = None
         self.post_vao: Optional[moderngl.VertexArray] = None
+        # GTAO/SSSS program variants keyed by
+        # (enable_gtao, enable_ssss, ssss_after_preset).
+        self._post_variants: Dict[
+            Tuple[bool, bool, bool], Tuple[moderngl.Program, moderngl.VertexArray]
+        ] = {}
+        self._failed_post_variants: set[Tuple[bool, bool, bool]] = set()
+        self.preset_prog: Optional[moderngl.Program] = None
+        self.preset_vao: Optional[moderngl.VertexArray] = None
+        self._loaded_shader_preset = "none"
+        self.postprocess_profile: PostProcessProfile = NO_POSTPROCESS
+        self.preset_uniforms: Dict[str, UniformValue] = {}
+        # View-space key light direction for presets; zero while lighting is off.
+        self._key_light_view = glm.vec3(0.0)
+        # Rotates view-space directions into the studio cubemap's world space.
+        self._view_to_world = glm.mat3(1.0)
+        self.shader_presets = self._discover_shader_presets()
         self.scene_color: Optional[moderngl.Texture] = None
         self.scene_depth: Optional[moderngl.Texture] = None
+        self.scene_normal: Optional[moderngl.Texture] = None
         self.scene_fbo: Optional[moderngl.Framebuffer] = None
+        self.material_fbo: Optional[moderngl.Framebuffer] = None
+        self.material_clear_fbo: Optional[moderngl.Framebuffer] = None
+        self.material_textures: List[moderngl.Texture] = []
+        self.preset_color: Optional[moderngl.Texture] = None
+        self.preset_fbo: Optional[moderngl.Framebuffer] = None
+        # Diffuse and specular + SSSS mask written by "ssss_after_preset" presets.
+        self.split_diffuse: Optional[moderngl.Texture] = None
+        self.split_specular: Optional[moderngl.Texture] = None
+        self.split_fbo: Optional[moderngl.Framebuffer] = None
+        self.smaa: Optional[SmaaPostProcess] = None
+        self._smaa_failed_qualities: set[str] = set()
         self._scene_target_size: Tuple[int, int] = (0, 0)
         self.grid_prog: Optional[moderngl.Program] = None
         self.grid_vao: Optional[moderngl.VertexArray] = None
@@ -625,13 +654,8 @@ class OutfitViewportWidget(QOpenGLWidget):
         )
         self.bone_ubo.bind_to_uniform_block(0)
 
-        post_vert_src = (_SHADER_DIR / "postprocess.vert").read_text(encoding="utf-8")
-        post_frag_src = (_SHADER_DIR / "postprocess.frag").read_text(encoding="utf-8")
-        self.post_prog = self.ctx.program(
-            vertex_shader=post_vert_src,
-            fragment_shader=post_frag_src,
-        )
-        self.post_vao = self.ctx.vertex_array(self.post_prog, [])
+        self.post_prog, self.post_vao = self._compile_postprocess_variant(False, False)
+        self.smaa = SmaaPostProcess(self.ctx)
 
         self._init_default_textures()
         self._init_ground_grid()
@@ -643,6 +667,25 @@ class OutfitViewportWidget(QOpenGLWidget):
             for key, nif_data in pending.items():
                 self._gpu_nifs[key] = [self._upload_shape(key, sh) for sh in nif_data.shapes]
             self._emit_stats()
+
+    @staticmethod
+    def _discover_shader_presets(
+        shader_dir: Path = _SHADER_DIR,
+    ) -> Tuple[Tuple[str, str], ...]:
+        excluded = {"default", "postprocess"}
+        presets = []
+        for path in sorted(shader_dir.glob("*.frag"), key=lambda item: item.name.casefold()):
+            if path.stem.casefold() in excluded:
+                continue
+            try:
+                label = load_preset_label(path)
+            except ValueError as exc:
+                log.warning("Ignoring label of preset %s: %s", path.stem, exc)
+                label = None
+            if label is None:
+                label = path.stem.replace("_", " ").replace("-", " ").title()
+            presets.append((path.stem, label))
+        return tuple(presets)
 
     def resizeGL(self, w: int, h: int) -> None:
         pass
@@ -663,12 +706,17 @@ class OutfitViewportWidget(QOpenGLWidget):
         vp_h = max(1, int(self.height() * dpr))
         self.ctx.viewport = (0, 0, vp_w, vp_h)
         self._ensure_scene_target(vp_w, vp_h)
+        self._ensure_selected_shader_preset()
         assert self.scene_fbo is not None
         self.scene_fbo.use()
         self.ctx.viewport = (0, 0, vp_w, vp_h)
 
-        # Effects use only mesh color and depth; the grid is composited afterward.
+        # Clear the normal validity channel independently from the scene color.
+        self.scene_fbo.color_mask = ((True, True, True, True), (False, False, False, False))
         self.scene_fbo.clear(0.13, 0.14, 0.17, 1.0, depth=1.0)
+        self.scene_fbo.color_mask = ((False, False, False, False), (True, True, True, True))
+        self.scene_fbo.clear(0.0, 0.0, 0.0, 0.0, depth=1.0)
+        self.scene_fbo.color_mask = ((True, True, True, True), (True, True, True, True))
 
         aspect = vp_w / float(vp_h)
         proj = glm.perspective(glm.radians(self.cam_fov_deg), aspect, 1.0, 2500.0)
@@ -711,7 +759,7 @@ class OutfitViewportWidget(QOpenGLWidget):
 
         # Pass 1: Opaque & Alpha-Cutout meshes
         self.ctx.enable(moderngl.DEPTH_TEST)
-        self.ctx.depth_mask = True
+        self.scene_fbo.depth_mask = True
         self.ctx.disable(moderngl.BLEND)
         for item in opaque_items:
             self._render_shape_item(item, wireframe=False)
@@ -722,20 +770,71 @@ class OutfitViewportWidget(QOpenGLWidget):
             self.ctx.blend_func = (moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA)
             # Keep depth writes on if alpha test is also enabled (e.g. lace/hair), else depth_mask=False
             for item in transparent_items:
-                self.ctx.depth_mask = bool(item.shape_data.alpha_prop.alpha_test)
+                writes_depth = bool(item.shape_data.alpha_prop.alpha_test)
+                self.scene_fbo.depth_mask = writes_depth
+                self.scene_fbo.color_mask = (
+                    (True, True, True, True),
+                    (writes_depth, writes_depth, writes_depth, writes_depth),
+                )
                 self._render_shape_item(item, wireframe=False)
-            self.ctx.depth_mask = True
+            self.scene_fbo.depth_mask = True
             self.ctx.disable(moderngl.BLEND)
+            self.scene_fbo.color_mask = ((True, True, True, True), (True, True, True, True))
 
         # Optional Pass 3: Wireframe overlay
         if self.settings.wireframe_overlay:
+            self.scene_fbo.color_mask = ((True, True, True, True), (False, False, False, False))
             self.ctx.enable(moderngl.BLEND)
             self.ctx.blend_func = (moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA)
             for item in opaque_items + transparent_items:
                 self._render_shape_item(item, wireframe=True)
             self.ctx.disable(moderngl.BLEND)
+            self.scene_fbo.color_mask = ((True, True, True, True), (True, True, True, True))
 
-        self._composite_postprocess(output_fbo, proj, vp_w, vp_h)
+        smaa_quality = self._prepare_smaa(vp_w, vp_h)
+        final_fbo = output_fbo
+        if smaa_quality is not None:
+            assert self.smaa is not None and self.smaa.input_fbo is not None
+            final_fbo = self.smaa.input_fbo
+
+        if self.preset_prog is not None and self.preset_vao is not None:
+            if any(name in self.preset_prog for name in (
+                "u_material_normal", "u_material_env_mask",
+                "u_material_subsurface", "u_material_flags",
+            )):
+                self._render_preset_materials(opaque_items, transparent_items, vp_w, vp_h)
+            profile = self.postprocess_profile
+            split = profile.ssss_after_preset
+            # A split preset runs GTAO before itself and SSSS after itself.
+            pre_profile = (
+                replace(profile, enable_ssss=False, ssss_after_preset=False)
+                if split else profile
+            )
+            preset_input = self.scene_color
+            if pre_profile.enable_gtao or pre_profile.enable_ssss:
+                self._ensure_preset_target(vp_w, vp_h)
+                assert self.preset_fbo is not None
+                self._composite_postprocess(
+                    self.preset_fbo, proj, vp_w, vp_h, pre_profile
+                )
+                preset_input = self.preset_color
+            assert preset_input is not None
+            if split:
+                self._ensure_split_target(vp_w, vp_h)
+                assert self.split_fbo is not None
+                # Clear so a preset that skips the specular output adds nothing.
+                self.split_fbo.clear(0.0, 0.0, 0.0, 0.0)
+                self._composite_shader_preset(
+                    self.split_fbo, preset_input, proj, vp_w, vp_h
+                )
+                self._composite_postprocess(
+                    final_fbo, proj, vp_w, vp_h, replace(profile, enable_gtao=False)
+                )
+            else:
+                self._composite_shader_preset(final_fbo, preset_input, proj, vp_w, vp_h)
+        else:
+            # No preset: present the scene through the copy-only variant.
+            self._composite_postprocess(final_fbo, proj, vp_w, vp_h, NO_POSTPROCESS)
 
         if (
             self.settings.show_ground_grid
@@ -743,10 +842,10 @@ class OutfitViewportWidget(QOpenGLWidget):
             and self.grid_prog is not None
             and self.scene_depth is not None
         ):
-            output_fbo.use()
+            final_fbo.use()
             self.ctx.viewport = (0, 0, vp_w, vp_h)
             self.ctx.disable(moderngl.DEPTH_TEST)
-            self.ctx.depth_mask = False
+            final_fbo.depth_mask = False
             self.ctx.enable(moderngl.BLEND)
             self.ctx.blend_func = (moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA)
             self.grid_prog["u_mvp"].write(bytes(glm.transpose(proj * view)))
@@ -755,9 +854,33 @@ class OutfitViewportWidget(QOpenGLWidget):
             self.scene_depth.use(location=0)
             self.grid_prog["u_scene_depth"].value = 0
             self.grid_vao.render(moderngl.LINES)
-            self.ctx.depth_mask = True
+            final_fbo.depth_mask = True
             self.ctx.disable(moderngl.BLEND)
             self.ctx.enable(moderngl.DEPTH_TEST)
+
+        if smaa_quality is not None:
+            assert self.smaa is not None
+            self.smaa.apply(output_fbo, smaa_quality, vp_w, vp_h)
+
+    def _prepare_smaa(self, width: int, height: int) -> Optional[str]:
+        """Ready SMAA for this frame; returns its quality, or None to render without it."""
+        quality = self.settings.smaa_quality
+        if quality not in SMAA_QUALITIES:
+            quality = DEFAULT_SMAA_QUALITY
+        if (
+            not self.settings.enable_smaa
+            or self.smaa is None
+            or quality in self._smaa_failed_qualities
+        ):
+            return None
+        try:
+            self.smaa.prepare(quality, width, height)
+        except (OSError, ValueError, KeyError, moderngl.Error) as exc:
+            # Anti-aliasing is cosmetic: keep drawing the scene without it.
+            log.error("Could not initialize SMAA (%s): %s", quality, exc)
+            self._smaa_failed_qualities.add(quality)
+            return None
+        return quality
 
     def _ensure_scene_target(self, width: int, height: int) -> None:
         assert self.ctx is not None
@@ -773,34 +896,210 @@ class OutfitViewportWidget(QOpenGLWidget):
         self.scene_depth.filter = (moderngl.NEAREST, moderngl.NEAREST)
         self.scene_depth.repeat_x = False
         self.scene_depth.repeat_y = False
+        self.scene_normal = self.ctx.texture((width, height), 4, dtype="f2")
+        self.scene_normal.filter = (moderngl.NEAREST, moderngl.NEAREST)
+        self.scene_normal.repeat_x = False
+        self.scene_normal.repeat_y = False
         self.scene_fbo = self.ctx.framebuffer(
-            color_attachments=[self.scene_color],
+            color_attachments=[self.scene_color, self.scene_normal],
             depth_attachment=self.scene_depth,
         )
         self._scene_target_size = (width, height)
 
+    def _ensure_preset_target(self, width: int, height: int) -> None:
+        assert self.ctx is not None
+        if self.preset_fbo is not None and self._scene_target_size == (width, height):
+            return
+        if self.preset_fbo is not None:
+            self.preset_fbo.release()
+        if self.preset_color is not None:
+            self.preset_color.release()
+        self.preset_color = self.ctx.texture((width, height), 4, dtype="f1")
+        self.preset_color.filter = (moderngl.LINEAR, moderngl.LINEAR)
+        self.preset_color.repeat_x = False
+        self.preset_color.repeat_y = False
+        self.preset_fbo = self.ctx.framebuffer(color_attachments=[self.preset_color])
+
+    def _ensure_split_target(self, width: int, height: int) -> None:
+        assert self.ctx is not None
+        if self.split_fbo is not None and self._scene_target_size == (width, height):
+            return
+        for resource in (self.split_fbo, self.split_diffuse, self.split_specular):
+            if resource is not None:
+                resource.release()
+        self.split_diffuse = self.ctx.texture((width, height), 4, dtype="f1")
+        self.split_diffuse.filter = (moderngl.LINEAR, moderngl.LINEAR)
+        # Half float keeps bright highlights unclipped until the final composite.
+        self.split_specular = self.ctx.texture((width, height), 4, dtype="f2")
+        self.split_specular.filter = (moderngl.NEAREST, moderngl.NEAREST)
+        for texture in (self.split_diffuse, self.split_specular):
+            texture.repeat_x = False
+            texture.repeat_y = False
+        self.split_fbo = self.ctx.framebuffer(
+            color_attachments=[self.split_diffuse, self.split_specular]
+        )
+
+    def _render_preset_materials(
+        self,
+        opaque_items: List[GpuShapeItem],
+        transparent_items: List[GpuShapeItem],
+        width: int,
+        height: int,
+    ) -> None:
+        assert self.ctx is not None and self.scene_depth is not None
+        if self.material_fbo is None:
+            self.material_textures = [
+                self.ctx.texture((width, height), 4, dtype="f1") for _ in range(4)
+            ]
+            for texture in self.material_textures:
+                texture.filter = (moderngl.NEAREST, moderngl.NEAREST)
+                texture.repeat_x = False
+                texture.repeat_y = False
+            self.material_fbo = self.ctx.framebuffer(
+                color_attachments=self.material_textures,
+                depth_attachment=self.scene_depth,
+            )
+            self.material_clear_fbo = self.ctx.framebuffer(
+                color_attachments=self.material_textures
+            )
+        assert self.material_clear_fbo is not None
+        self.material_clear_fbo.use()
+        self.material_clear_fbo.clear(0.0, 0.0, 0.0, 0.0)
+        self.material_fbo.use()
+        self.ctx.viewport = (0, 0, width, height)
+        self.material_fbo.depth_mask = False
+        self.ctx.disable(moderngl.BLEND)
+        self.ctx.enable(moderngl.DEPTH_TEST)
+        self.ctx.depth_func = "=="
+        self._set_uniform("bPresetMaterialPass", True)
+        try:
+            for item in opaque_items:
+                self._render_shape_item(item, wireframe=False)
+            for item in transparent_items:
+                if item.shape_data.alpha_prop.alpha_test:
+                    self._render_shape_item(item, wireframe=False)
+        finally:
+            self._set_uniform("bPresetMaterialPass", False)
+            self.ctx.depth_func = "<"
+            self.material_fbo.depth_mask = True
+
     def _release_scene_target(self) -> None:
-        for resource in (self.scene_fbo, self.scene_color, self.scene_depth):
+        for resource in (
+            self.material_fbo,
+            self.material_clear_fbo,
+            *self.material_textures,
+            self.scene_fbo,
+            self.scene_color,
+            self.scene_depth,
+            self.scene_normal,
+            self.preset_fbo,
+            self.preset_color,
+            self.split_fbo,
+            self.split_diffuse,
+            self.split_specular,
+        ):
             if resource is not None:
                 resource.release()
         self.scene_fbo = None
+        self.material_fbo = None
+        self.material_clear_fbo = None
+        self.material_textures = []
         self.scene_color = None
         self.scene_depth = None
+        self.scene_normal = None
+        self.preset_fbo = None
+        self.preset_color = None
+        self.split_fbo = None
+        self.split_diffuse = None
+        self.split_specular = None
         self._scene_target_size = (0, 0)
+        if self.smaa is not None:
+            self.smaa.release_targets()
 
-    def _composite_postprocess(
+    def _ensure_selected_shader_preset(self) -> None:
+        if self.ctx is None or self._loaded_shader_preset == self.settings.shader_preset:
+            return
+
+        if self.preset_vao is not None:
+            self.preset_vao.release()
+            self.preset_vao = None
+        if self.preset_prog is not None:
+            self.preset_prog.release()
+            self.preset_prog = None
+        self._loaded_shader_preset = "none"
+        self.postprocess_profile = NO_POSTPROCESS
+        self.preset_uniforms = {}
+
+        selected = self.settings.shader_preset
+        if selected == "none":
+            return
+        shader_path = next(
+            (path for path, _label in self.shader_presets if path == selected),
+            None,
+        )
+        if shader_path is None:
+            self._report_shader_preset_error(
+                selected, "The selected shader preset is not available."
+            )
+            return
+
+        try:
+            vertex_source = (_SHADER_DIR / "postprocess.vert").read_text(
+                encoding="utf-8"
+            )
+            fragment_source = (_SHADER_DIR / f"{shader_path}.frag").read_text(
+                encoding="utf-8"
+            )
+            program = self.ctx.program(
+                vertex_shader=vertex_source,
+                fragment_shader=fragment_source,
+            )
+            vertex_array = self.ctx.vertex_array(program, [])
+        except (OSError, moderngl.Error) as exc:
+            self._report_shader_preset_error(selected, str(exc))
+            return
+
+        try:
+            profile = load_postprocess_profile(_SHADER_DIR / f"{shader_path}.frag")
+        except ValueError as exc:
+            # The preset still renders; it just runs without GTAO/SSSS.
+            log.warning("Ignoring post-process settings of preset %s: %s", selected, exc)
+            profile = NO_POSTPROCESS
+        try:
+            uniforms = load_preset_uniforms(_SHADER_DIR / f"{shader_path}.frag")
+        except ValueError as exc:
+            # Shader-side uniform defaults apply instead.
+            log.warning("Ignoring uniforms of preset %s: %s", selected, exc)
+            uniforms = {}
+
+        self.preset_prog = program
+        self.preset_vao = vertex_array
+        self.postprocess_profile = profile
+        self.preset_uniforms = uniforms
+        self._loaded_shader_preset = selected
+
+    def _report_shader_preset_error(self, selected: str, message: str) -> None:
+        log.error("Could not load shader preset %s: %s", selected, message)
+        self.settings.shader_preset = "none"
+        self._loaded_shader_preset = "none"
+        self.postprocess_profile = NO_POSTPROCESS
+        self.preset_uniforms = {}
+        self.shaderPresetError.emit(f"{selected}: {message}")
+
+    def _composite_shader_preset(
         self,
         output_fbo: moderngl.Framebuffer,
+        input_color: moderngl.Texture,
         projection: glm.mat4,
         width: int,
         height: int,
     ) -> None:
         assert (
             self.ctx is not None
-            and self.post_prog is not None
-            and self.post_vao is not None
-            and self.scene_color is not None
+            and self.preset_prog is not None
+            and self.preset_vao is not None
             and self.scene_depth is not None
+            and self.scene_normal is not None
         )
         output_fbo.use()
         self.ctx.viewport = (0, 0, width, height)
@@ -808,34 +1107,131 @@ class OutfitViewportWidget(QOpenGLWidget):
         self.ctx.disable(moderngl.BLEND)
         self.ctx.depth_mask = False
 
-        self.scene_color.use(location=0)
+        input_color.use(location=0)
         self.scene_depth.use(location=1)
-        self.post_prog["u_scene_color"].value = 0
-        self.post_prog["u_scene_depth"].value = 1
-        self.post_prog["u_viewport_size"].value = (float(width), float(height))
-        self.post_prog["u_projection"].write(bytes(glm.transpose(projection)))
-        self.post_prog["u_inverse_projection"].write(
+        self.scene_normal.use(location=2)
+        self.preset_prog["u_scene_color"].value = 0
+        self.preset_prog["u_scene_depth"].value = 1
+        if "u_scene_normal" in self.preset_prog:
+            self.preset_prog["u_scene_normal"].value = 2
+        for index, name in enumerate((
+            "u_material_normal", "u_material_env_mask",
+            "u_material_subsurface", "u_material_flags",
+        )):
+            if name in self.preset_prog:
+                self.material_textures[index].use(location=index + 3)
+                self.preset_prog[name].value = index + 3
+        self.preset_prog["u_viewport_size"].value = (float(width), float(height))
+        if "u_key_light" in self.preset_prog:
+            self.preset_prog["u_key_light"].value = tuple(self._key_light_view)
+        if "u_studio_cubemap" in self.preset_prog and self.default_cubemap is not None:
+            self.default_cubemap.use(location=7)
+            self.preset_prog["u_studio_cubemap"].value = 7
+        if "u_view_to_world" in self.preset_prog:
+            self.preset_prog["u_view_to_world"].write(
+                bytes(glm.transpose(self._view_to_world))
+            )
+        self.preset_prog["u_inverse_projection"].write(
             bytes(glm.transpose(glm.inverse(projection)))
         )
+        for name, value in list(self.preset_uniforms.items()):
+            if name not in self.preset_prog:
+                continue
+            try:
+                self.preset_prog[name].value = value
+            except (struct.error, TypeError, ValueError, moderngl.Error) as exc:
+                # A value shaped unlike the GLSL uniform; keep the shader's default.
+                log.warning("Ignoring preset uniform %s=%r: %s", name, value, exc)
+                del self.preset_uniforms[name]
+        self.preset_vao.render(moderngl.TRIANGLES, vertices=3)
 
-        settings = self.settings
-        self.post_prog["u_enable_ssr"].value = settings.enable_ssr
-        self.post_prog["u_ssr_step_size"].value = max(0.1, settings.ssr_step_size)
-        self.post_prog["u_ssr_max_steps"].value = max(
-            1, min(128, int(settings.ssr_max_steps))
+        self.ctx.depth_mask = True
+        self.ctx.enable(moderngl.DEPTH_TEST)
+
+    def _compile_postprocess_variant(
+        self, enable_gtao: bool, enable_ssss: bool, split_composite: bool = False
+    ) -> Tuple[moderngl.Program, moderngl.VertexArray]:
+        assert self.ctx is not None
+        vertex_source = (_SHADER_DIR / "postprocess.vert").read_text(encoding="utf-8")
+        fragment_source = (_SHADER_DIR / "postprocess.frag").read_text(encoding="utf-8")
+        defines = "".join(
+            f"#define {name}\n"
+            for name, enabled in (
+                ("ENABLE_GTAO", enable_gtao),
+                ("ENABLE_SSSS", enable_ssss),
+                ("SPLIT_COMPOSITE", split_composite),
+            )
+            if enabled
         )
-        self.post_prog["u_ssr_thickness"].value = max(0.01, settings.ssr_thickness)
-        self.post_prog["u_enable_ao"].value = settings.enable_ao
-        self.post_prog["u_ao_radius"].value = max(0.1, settings.ao_radius)
-        self.post_prog["u_ao_intensity"].value = max(0.0, settings.ao_intensity)
-        self.post_prog["u_ao_bias"].value = max(0.0, settings.ao_bias)
-        self.post_prog["u_enable_ssss"].value = settings.enable_ssss
-        self.post_prog["u_ssss_radius"].value = max(1.0, settings.ssss_radius)
-        self.post_prog["u_ssss_falloff_color"].value = tuple(
-            max(0.0, min(1.0, float(channel)))
-            for channel in settings.ssss_falloff_color
+        if defines:
+            version_line, newline, body = fragment_source.partition("\n")
+            fragment_source = f"{version_line}{newline}{defines}{body}"
+        program = self.ctx.program(vertex_shader=vertex_source, fragment_shader=fragment_source)
+        return program, self.ctx.vertex_array(program, [])
+
+    def _postprocess_variant(
+        self, profile: PostProcessProfile
+    ) -> Tuple[moderngl.Program, moderngl.VertexArray]:
+        assert self.post_prog is not None and self.post_vao is not None
+        key = (profile.enable_gtao, profile.enable_ssss, profile.ssss_after_preset)
+        if key == (False, False, False) or key in self._failed_post_variants:
+            return self.post_prog, self.post_vao
+        variant = self._post_variants.get(key)
+        if variant is None:
+            try:
+                variant = self._compile_postprocess_variant(*key)
+            except (OSError, moderngl.Error) as exc:
+                log.error("Could not compile post-process variant %s: %s", key, exc)
+                self._failed_post_variants.add(key)
+                return self.post_prog, self.post_vao
+            self._post_variants[key] = variant
+        return variant
+
+    def _composite_postprocess(
+        self,
+        output_fbo: moderngl.Framebuffer,
+        projection: glm.mat4,
+        width: int,
+        height: int,
+        profile: PostProcessProfile,
+    ) -> None:
+        assert (
+            self.ctx is not None
+            and self.scene_color is not None
+            and self.scene_depth is not None
         )
-        self.post_vao.render(moderngl.TRIANGLES, vertices=3)
+        program, vertex_array = self._postprocess_variant(profile)
+        output_fbo.use()
+        self.ctx.viewport = (0, 0, width, height)
+        self.ctx.disable(moderngl.DEPTH_TEST)
+        self.ctx.disable(moderngl.BLEND)
+        self.ctx.depth_mask = False
+
+        source = self.scene_color
+        if profile.ssss_after_preset:
+            assert self.split_diffuse is not None and self.split_specular is not None
+            source = self.split_diffuse
+            if "u_scene_specular" in program:
+                self.split_specular.use(location=2)
+                program["u_scene_specular"].value = 2
+        source.use(location=0)
+        program["u_scene_color"].value = 0
+        if "u_scene_depth" in program:
+            self.scene_depth.use(location=1)
+            program["u_scene_depth"].value = 1
+            program["u_viewport_size"].value = (float(width), float(height))
+            program["u_inverse_projection"].write(
+                bytes(glm.transpose(glm.inverse(projection)))
+            )
+        if "u_ao_radius" in program:
+            program["u_ao_radius"].value = profile.gtao_radius
+            program["u_ao_intensity"].value = profile.gtao_intensity
+            program["u_ao_bias"].value = profile.gtao_bias
+        if "u_ssss_radius" in program:
+            program["u_ssss_radius"].value = profile.sss_radius
+            program["u_ssss_strength"].value = profile.sss_strength
+            program["u_ssss_falloff_color"].value = profile.sss_falloff_color
+        vertex_array.render(moderngl.TRIANGLES, vertices=3)
 
         self.ctx.depth_mask = True
         self.ctx.enable(moderngl.DEPTH_TEST)
@@ -1143,6 +1539,10 @@ class OutfitViewportWidget(QOpenGLWidget):
             )
         )
         fill_az = az - math.radians(115.0)
+        self._key_light_view = (
+            glm.normalize(glm.mat3(view) * key_dir) if s.enable_lighting else glm.vec3(0.0)
+        )
+        self._view_to_world = glm.mat3(model) * glm.inverse(glm.mat3(view))
         fill_dir = glm.normalize(
             glm.vec3(
                 math.sin(fill_az) * 0.85,
@@ -1182,6 +1582,9 @@ class OutfitViewportWidget(QOpenGLWidget):
         self._set_uniform("texLightmask", 6)
         self._set_uniform("texGlowmap", 7)
         self._set_uniform("texFaceTint", 8)
+        self._set_uniform("texPresetNormal", 9)
+        self._set_uniform("texPresetEnvMask", 10)
+        self._set_uniform("texPresetSubsurface", 11)
 
     def _render_shape_item(self, item: GpuShapeItem, wireframe: bool = False) -> None:
         assert self.ctx is not None and self.prog is not None
@@ -1255,6 +1658,27 @@ class OutfitViewportWidget(QOpenGLWidget):
         item.textures.get("Lightmask", self.fallback_2d_textures["White"]).use(location=6)
         item.textures.get("Glow", self.fallback_2d_textures["Glow"]).use(location=7)
         item.textures.get("FaceTint", self.fallback_2d_textures["White"]).use(location=8)
+
+        for uniform, primary, secondary, location, fallback in (
+            ("bPresetHasNormal", "Normal", "PresetNormal", 9, "Normal"),
+            ("bPresetHasEnvMask", "EnvMask", "PresetEnvMask", 10, "EnvMask"),
+            ("bPresetHasSubsurface", "Subsurface", "Subsurface", 11, "White"),
+        ):
+            slot = next((
+                candidate for candidate in (primary, secondary)
+                if candidate in item.textures
+                and candidate in mat.resolved_textures
+                and not mat.resolved_textures[candidate].is_fallback
+            ), None)
+            self._set_uniform(uniform, slot is not None)
+            if uniform == "bPresetHasNormal":
+                model_space = mat.b_model_space
+                if slot == "PresetNormal":
+                    normal_path = mat.resolved_textures[slot].raw_nif_path
+                    model_space = normal_path.lower().endswith("_msn.dds")
+                self._set_uniform("bPresetNormalModelSpace", model_space)
+            texture = item.textures[slot] if slot is not None else self.fallback_2d_textures[fallback]
+            texture.use(location=location)
 
         item.vao.render(moderngl.TRIANGLES)
         if wireframe:

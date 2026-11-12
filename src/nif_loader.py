@@ -331,6 +331,34 @@ def _apply_shape_transform(
     return positions, normals
 
 
+def _resolve_preset_textures(
+    mat: ShaderMaterialData, resolver: TextureResolver, nif_path: Path
+) -> None:
+    diffuse_path = mat.raw_textures.get("Diffuse", "").replace("\\", "/")
+    diffuse_stem = diffuse_path[:-4] if diffuse_path.lower().endswith(".dds") else diffuse_path
+    diffuse_stems = [diffuse_stem] if diffuse_stem else []
+    if diffuse_stem.lower().endswith("_d"):
+        diffuse_stems.append(diffuse_stem[:-2])
+    norm_raw = mat.raw_textures.get("Normal", "")
+    env_mask_raw = mat.raw_textures.get("EnvMask", "") or mat.raw_textures.get("EnvMapMask", "")
+    soft_raw = mat.raw_textures.get("SoftLighting", "") or mat.raw_textures.get("RimLighting", "")
+    for slot, explicit, suffixes in (
+        ("PresetNormal", norm_raw, ("_n", "_msn")),
+        ("PresetEnvMask", env_mask_raw, ("_m",)),
+        ("Subsurface", soft_raw if soft_raw.lower().endswith("_sk.dds") else "", ("_sk",)),
+    ):
+        candidates = [explicit] if explicit else (
+            [f"{stem}{suffix}.dds" for stem in diffuse_stems for suffix in suffixes]
+        )
+        for candidate in candidates:
+            if resolver.resolve_path(candidate, nif_path) is None:
+                continue
+            texture = resolver.load_or_fallback(slot, candidate, nif_path)
+            if not texture.is_fallback:
+                mat.resolved_textures[slot] = texture
+                break
+
+
 def _extract_shader_data(
     shape, nif_path: Path, resolver: TextureResolver
 ) -> ShaderMaterialData:
@@ -483,6 +511,8 @@ def _extract_shader_data(
     soft_raw = mat.raw_textures.get("SoftLighting", "") or mat.raw_textures.get("RimLighting", "")
     if soft_raw:
         mat.resolved_textures["Lightmask"] = resolver.load_or_fallback("Lightmask", soft_raw, nif_path)
+
+    _resolve_preset_textures(mat, resolver, nif_path)
 
     mat.default_resolved_textures = dict(mat.resolved_textures)
     mat.default_flags = {

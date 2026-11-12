@@ -1,0 +1,19 @@
+{
+  "label": "Dark Fantasy",
+  "uniforms": {
+    "u_contrast_power": 1.35,
+    "u_rim_intensity": 1.0,
+    "u_metal_boost": 1.0
+  },
+  "postprocess": {
+    "enable_gtao": true,
+    "gtao_radius": 10.0,
+    "gtao_intensity": 1.35,
+    "gtao_bias": 0.03,
+    "enable_ssss": true,
+    "sss_radius": 1.0,
+    "sss_strength": 0.75,
+    "sss_falloff_color": [0.75, 0.32, 0.25],
+    "ssss_after_preset": true
+  }
+}

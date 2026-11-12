@@ -23,6 +23,14 @@ SPEC_PATH = ROOT / "package.spec"
 SMP_PROJECT = ROOT / "smp_bridge" / "SmpBridge"
 SMP_PUBLISH_DIR = SMP_PROJECT / "bin" / "Release" / "net8.0" / "win-x64" / "publish"
 SMP_LIBRARIES = ("SmpBridge.dll", "libbulletc.dll")
+SMAA_ASSETS = (
+    "smaa/SMAA.hlsl",
+    "smaa/smaa.vert",
+    "smaa/smaa.frag",
+    "smaa/AreaTex.bin",
+    "smaa/SearchTex.bin",
+    "smaa/LICENSE.txt",
+)
 DEFAULT_VERSION = "0.1.0"
 SEMVER_PATTERN = re.compile(
     r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
@@ -121,6 +129,7 @@ def validate_inputs() -> None:
         "default.frag",
         "postprocess.vert",
         "postprocess.frag",
+        *SMAA_ASSETS,
     )
     missing_shaders = [
         ROOT / "shaders" / name
@@ -281,14 +290,15 @@ def validate_output() -> Path:
     }
     found_shader_sets = [
         {
-            path.name
-            for path in directory.iterdir()
+            path.relative_to(directory).as_posix()
+            for path in directory.rglob("*")
             if path.is_file()
         }
         for shader_file in distribution.rglob("default.vert")
         for directory in (shader_file.parent,)
         if (directory / "default.frag").is_file()
     ]
+    expected_shaders.update(SMAA_ASSETS)
     if not any(expected_shaders.issubset(files) for files in found_shader_sets):
         raise BuildError(
             f"One or more required shaders are missing from {distribution}."

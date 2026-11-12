@@ -1,0 +1,18 @@
+{
+  "label": "3D Hentai",
+  "uniforms": {
+    "u_gloss_intensity": 1.0,
+    "u_rim_intensity": 1.0
+  },
+  "postprocess": {
+    "enable_gtao": true,
+    "gtao_radius": 8.0,
+    "gtao_intensity": 0.7,
+    "gtao_bias": 0.03,
+    "enable_ssss": true,
+    "sss_radius": 4.5,
+    "sss_strength": 0.35,
+    "sss_falloff_color": [1.0, 0.4, 0.4],
+    "ssss_after_preset": true
+  }
+}

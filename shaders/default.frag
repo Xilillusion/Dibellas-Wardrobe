@@ -16,6 +16,14 @@ uniform sampler2D texBacklight;
 uniform sampler2D texLightmask;
 uniform sampler2D texGlowmap;
 uniform sampler2D texFaceTint;
+uniform sampler2D texPresetNormal;
+uniform sampler2D texPresetEnvMask;
+uniform sampler2D texPresetSubsurface;
+uniform bool bPresetMaterialPass;
+uniform bool bPresetHasNormal;
+uniform bool bPresetHasEnvMask;
+uniform bool bPresetHasSubsurface;
+uniform bool bPresetNormalModelSpace;
 
 uniform bool bLightEnabled;
 uniform bool bShowTexture;
@@ -98,7 +106,10 @@ in vec3 weightColor;
 in vec4 vColor;
 in vec2 vUV;
 
-out vec4 fragColor;
+layout(location = 0) out vec4 fragColor;
+layout(location = 1) out vec4 fragNormal;
+layout(location = 2) out vec4 fragPresetSubsurface;
+layout(location = 3) out vec4 fragPresetFlags;
 
 vec3 normal = vec3(0.0);
 float specFactor = 0.0;
@@ -180,6 +191,23 @@ void directionalLight(in DirectionalLight light, in vec3 lightDir, inout vec3 ou
 void main(void)
 {
 	uv = vUV * prop.uvScale + prop.uvOffset;
+	if (bPresetMaterialPass)
+	{
+		float diffuseAlpha = bShowTexture ? texture(texDiffuse, uv).a : 1.0;
+		if (alphaThreshold != -1.0 && vColor.a * diffuseAlpha <= alphaThreshold)
+			discard;
+		fragColor = bPresetHasNormal ? texture(texPresetNormal, uv) : vec4(0.0);
+		fragNormal = bPresetHasEnvMask ? texture(texPresetEnvMask, uv) : vec4(0.0);
+		fragPresetSubsurface = bPresetHasSubsurface ? texture(texPresetSubsurface, uv) : vec4(0.0);
+		fragPresetFlags = vec4(
+			bPresetHasNormal ? 1.0 : 0.0,
+			bPresetHasEnvMask ? 1.0 : 0.0,
+			bPresetHasSubsurface ? 1.0 : 0.0,
+			bPresetHasNormal && bPresetNormalModelSpace ? 1.0 : 0.0
+		);
+		gl_FragDepth = gl_FragCoord.z;
+		return;
+	}
 	vec4 color = vColor;
 	albedo = vColor.rgb;
 
@@ -400,6 +428,7 @@ void main(void)
 	color = clamp(color, 0.0, 1.0);
 
 	fragColor = color;
+	fragNormal = vec4(0.0);
 
 	if (!bWireframe)
 	{
@@ -408,6 +437,9 @@ void main(void)
 				discard;
 
 		fragColor.a *= prop.alpha;
+		vec3 shadingNormal = bLightEnabled ? normal : normalize(mv_normalMatrix * n);
+		if (dot(shadingNormal, shadingNormal) > 0.5)
+			fragNormal = vec4(shadingNormal * 0.5 + 0.5, 1.0);
 		gl_FragDepth = gl_FragCoord.z;
 	}
 	else

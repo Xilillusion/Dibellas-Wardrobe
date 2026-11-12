@@ -83,6 +83,32 @@ def test_missing_diffuse_is_absent_from_every_render_pass(viewport, show_texture
     ]
 
 
+def test_normal_buffer_tracks_only_depth_writing_meshes(viewport):
+    opaque = shape(valid_texture())
+    blended = shape(valid_texture(), alpha_blend=True)
+    cutout_blended = shape(valid_texture(), alpha_test=True, alpha_blend=True)
+    viewport._gpu_nifs = {"outfit": [opaque, blended, cutout_blended]}
+    viewport.settings.wireframe_overlay = True
+    masks = []
+
+    def capture_mask(item, wireframe):
+        masks.append((item, wireframe, viewport.scene_fbo.color_mask[1]))
+
+    viewport._render_shape_item.side_effect = capture_mask
+    viewport.paintGL()
+
+    on = (True, True, True, True)
+    off = (False, False, False, False)
+    assert masks == [
+        (opaque, False, on),
+        (blended, False, off),
+        (cutout_blended, False, on),
+        (opaque, True, off),
+        (blended, True, off),
+        (cutout_blended, True, off),
+    ]
+
+
 def test_assigning_and_resetting_diffuse_updates_visibility(viewport):
     fallback = TextureResolver().load_or_fallback("Diffuse", "textures/missing.dds")
     item = shape(fallback)

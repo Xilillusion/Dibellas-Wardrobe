@@ -19,7 +19,6 @@ from PySide6.QtCore import QPoint, QRect, QSignalBlocker, QSize, Qt, QTimer
 from PySide6.QtGui import QBrush, QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox,
-    QColorDialog,
     QComboBox,
     QCompleter,
     QFileDialog,
@@ -56,6 +55,7 @@ from .asset_scanner import (
 from .config import AppConfig, LightingConfig, ViewportEffectsConfig, load_locales
 from .mod_scanner import ModScanner, is_animation_hkx
 from .nif_loader import LoadedNifData, NifLoader
+from .smaa import SMAA_QUALITIES
 from .texture_popover import NifTexturePopover, resolve_shape_texture_path
 from .texture_resolver import TextureResolver
 from .ui_widgets import (
@@ -249,6 +249,11 @@ class DibellasWardrobeWindow(QMainWindow):
     def retranslate_ui(self) -> None:
         for widget, key, setter in self._i18n_bindings:
             getattr(widget, setter)(self._t(key))
+        if hasattr(self, "shader_preset_combo"):
+            self.shader_preset_combo.setItemText(0, self._t("shader_preset_none"))
+        if hasattr(self, "smaa_quality_combo"):
+            for index, quality in enumerate(SMAA_QUALITIES):
+                self.smaa_quality_combo.setItemText(index, self._t(f"smaa_quality_{quality}"))
         if hasattr(self, "locked_preset_combo"):
             self.locked_preset_combo.setToolTip(self._t("locked_preset_search_tip"))
             self.locked_preset_combo.lineEdit().setPlaceholderText(
@@ -595,6 +600,7 @@ class DibellasWardrobeWindow(QMainWindow):
         center_layout.setSpacing(4)
 
         self.viewport = OutfitViewportWidget(self)
+        self.viewport.shaderPresetError.connect(self._on_shader_preset_error)
         overlay = self.viewport.cbpc_overlay
         self._bind_text(overlay.checkbox, "cbpc_enable")
         for key in ("gravity", "breasts", "butt", "belly", "thigh"):
@@ -694,6 +700,7 @@ class DibellasWardrobeWindow(QMainWindow):
         cfg_effects = self.config.effects
         cfg_chk = self.config.checkboxes
         s = self.viewport.settings
+        s.shader_preset = self.config.shader_preset
 
         s.light_azimuth_deg = cfg_light.light_azimuth_deg
         s.light_elevation_deg = cfg_light.light_elevation_deg
@@ -702,17 +709,8 @@ class DibellasWardrobeWindow(QMainWindow):
         s.specular_multiplier = cfg_light.specular_multiplier
         s.env_reflection_multiplier = cfg_light.env_reflection_multiplier
 
-        s.enable_ssr = cfg_effects.enable_ssr
-        s.ssr_step_size = cfg_effects.ssr_step_size
-        s.ssr_max_steps = cfg_effects.ssr_max_steps
-        s.ssr_thickness = cfg_effects.ssr_thickness
-        s.enable_ao = cfg_effects.enable_ao
-        s.ao_radius = cfg_effects.ao_radius
-        s.ao_intensity = cfg_effects.ao_intensity
-        s.ao_bias = cfg_effects.ao_bias
-        s.enable_ssss = cfg_effects.enable_ssss
-        s.ssss_radius = cfg_effects.ssss_radius
-        s.ssss_falloff_color = cfg_effects.ssss_falloff_color
+        s.enable_smaa = cfg_effects.enable_smaa
+        s.smaa_quality = cfg_effects.smaa_quality
 
         cb = self.config.cbpc
         self.viewport.set_cbpc_gravity(cb.gravity)
@@ -821,6 +819,21 @@ class DibellasWardrobeWindow(QMainWindow):
             light_form, self._t("env_reflection"), 0, 300, int(round(cfg_light.env_reflection_multiplier * 100)),
             f"{cfg_light.env_reflection_multiplier:.2f}x", self._on_lighting_changed, "env_reflection",
         )
+        self.lbl_shader_preset = QLabel()
+        self._bind_text(self.lbl_shader_preset, "shader_preset")
+        self.shader_preset_combo = QComboBox()
+        self.shader_preset_combo.addItem(self._t("shader_preset_none"), "none")
+        for preset_id, label in self.viewport.shader_presets:
+            self.shader_preset_combo.addItem(label, preset_id)
+        preset_index = self.shader_preset_combo.findData(self.config.shader_preset)
+        if preset_index < 0:
+            preset_index = 0
+            self.viewport.settings.shader_preset = "none"
+        self.shader_preset_combo.setCurrentIndex(preset_index)
+        self.shader_preset_combo.currentIndexChanged.connect(
+            self._on_shader_preset_changed
+        )
+        light_form.addRow(self.lbl_shader_preset, self.shader_preset_combo)
         scroll_layout.addWidget(light_group)
 
         # Meshes / Shader Options
@@ -839,86 +852,29 @@ class DibellasWardrobeWindow(QMainWindow):
         self._bind_text(self.chk_grid, "ground_grid")
         scroll_layout.addWidget(shader_group)
 
-        # SSR Group
-        ssr_group = RefreshableGroupBox(self._t("ssr_options"), self._reset_ssr_controls)
-        self._bind_text(ssr_group, "ssr_options", "setTitle")
-        assert ssr_group.btn_refresh is not None
-        self._bind_text(ssr_group.btn_refresh, "reset_ssr", "setToolTip")
-        ssr_layout = QVBoxLayout(ssr_group)
-        self.chk_ssr = self._add_checkbox(
-            ssr_layout, self._t("ssr_enabled"), cfg_effects.enable_ssr, self._on_effects_changed
+        # SMAA Group
+        smaa_group = RefreshableGroupBox(self._t("smaa_options"), self._reset_smaa_controls)
+        self._bind_text(smaa_group, "smaa_options", "setTitle")
+        assert smaa_group.btn_refresh is not None
+        self._bind_text(smaa_group.btn_refresh, "reset_smaa", "setToolTip")
+        smaa_layout = QVBoxLayout(smaa_group)
+        self.chk_smaa = self._add_checkbox(
+            smaa_layout, self._t("smaa_enabled"), cfg_effects.enable_smaa, self._on_effects_changed
         )
-        self._bind_text(self.chk_ssr, "ssr_enabled")
-        ssr_form = QFormLayout()
-        self.slider_ssr_step, self.lbl_ssr_step = self._add_slider_row(
-            ssr_form, self._t("ssr_step_size"), 1, 50, int(round(cfg_effects.ssr_step_size * 10)),
-            f"{cfg_effects.ssr_step_size:.1f}", self._on_effects_changed, "ssr_step_size",
-        )
-        self.slider_ssr_steps, self.lbl_ssr_steps = self._add_slider_row(
-            ssr_form, self._t("ssr_max_steps"), 8, 128, int(cfg_effects.ssr_max_steps),
-            str(cfg_effects.ssr_max_steps), self._on_effects_changed, "ssr_max_steps",
-        )
-        self.slider_ssr_thickness, self.lbl_ssr_thickness = self._add_slider_row(
-            ssr_form, self._t("ssr_thickness"), 1, 100, int(round(cfg_effects.ssr_thickness * 10)),
-            f"{cfg_effects.ssr_thickness:.1f}", self._on_effects_changed, "ssr_thickness",
-        )
-        ssr_layout.addLayout(ssr_form)
-        scroll_layout.addWidget(ssr_group)
+        self._bind_text(self.chk_smaa, "smaa_enabled")
+        smaa_form = QFormLayout()
+        self.lbl_smaa_quality = QLabel()
+        self._bind_text(self.lbl_smaa_quality, "smaa_quality")
+        self.smaa_quality_combo = QComboBox()
+        for quality in SMAA_QUALITIES:
+            self.smaa_quality_combo.addItem(self._t(f"smaa_quality_{quality}"), quality)
+        quality_index = self.smaa_quality_combo.findData(cfg_effects.smaa_quality)
+        self.smaa_quality_combo.setCurrentIndex(max(0, quality_index))
+        self.smaa_quality_combo.currentIndexChanged.connect(self._on_effects_changed)
+        smaa_form.addRow(self.lbl_smaa_quality, self.smaa_quality_combo)
+        smaa_layout.addLayout(smaa_form)
+        scroll_layout.addWidget(smaa_group)
 
-        # AO Group
-        ao_group = RefreshableGroupBox(self._t("ao_options"), self._reset_ao_controls)
-        self._bind_text(ao_group, "ao_options", "setTitle")
-        assert ao_group.btn_refresh is not None
-        self._bind_text(ao_group.btn_refresh, "reset_ao", "setToolTip")
-        ao_layout = QVBoxLayout(ao_group)
-        self.chk_ao = self._add_checkbox(
-            ao_layout, self._t("ao_enabled"), cfg_effects.enable_ao, self._on_effects_changed
-        )
-        self._bind_text(self.chk_ao, "ao_enabled")
-        ao_form = QFormLayout()
-        self.slider_ao_radius, self.lbl_ao_radius = self._add_slider_row(
-            ao_form, self._t("ao_radius"), 1, 40, int(round(cfg_effects.ao_radius)),
-            f"{cfg_effects.ao_radius:.0f}", self._on_effects_changed, "ao_radius",
-        )
-        self.slider_ao_intensity, self.lbl_ao_intensity = self._add_slider_row(
-            ao_form, self._t("ao_intensity"), 0, 300, int(round(cfg_effects.ao_intensity * 100)),
-            f"{cfg_effects.ao_intensity:.2f}", self._on_effects_changed, "ao_intensity",
-        )
-        self.slider_ao_bias, self.lbl_ao_bias = self._add_slider_row(
-            ao_form, self._t("ao_bias"), 1, 100, int(round(cfg_effects.ao_bias * 1000)),
-            f"{cfg_effects.ao_bias:.3f}", self._on_effects_changed, "ao_bias",
-        )
-        ao_layout.addLayout(ao_form)
-        scroll_layout.addWidget(ao_group)
-
-        # SSSS Group
-        ssss_group = RefreshableGroupBox(self._t("ssss_options"), self._reset_ssss_controls)
-        self._bind_text(ssss_group, "ssss_options", "setTitle")
-        assert ssss_group.btn_refresh is not None
-        self._bind_text(ssss_group.btn_refresh, "reset_ssss", "setToolTip")
-        ssss_layout = QVBoxLayout(ssss_group)
-        self.chk_ssss = self._add_checkbox(
-            ssss_layout, self._t("ssss_enabled"), cfg_effects.enable_ssss, self._on_effects_changed
-        )
-        self._bind_text(self.chk_ssss, "ssss_enabled")
-        ssss_form = QFormLayout()
-        self.slider_ssss_radius, self.lbl_ssss_radius = self._add_slider_row(
-            ssss_form, self._t("ssss_radius"), 1, 24, int(round(cfg_effects.ssss_radius)),
-            f"{cfg_effects.ssss_radius:.0f}", self._on_effects_changed, "ssss_radius",
-        )
-        self.btn_ssss_falloff = QPushButton()
-        self.btn_ssss_falloff.clicked.connect(self._choose_ssss_falloff_color)
-        falloff_row = QWidget()
-        falloff_layout = QHBoxLayout(falloff_row)
-        falloff_layout.setContentsMargins(0, 0, 0, 0)
-        falloff_layout.addWidget(self.btn_ssss_falloff)
-        falloff_label = QLabel()
-        self._bind_text(falloff_label, "ssss_falloff_color")
-        ssss_form.addRow(falloff_label, falloff_row)
-        ssss_layout.addLayout(ssss_form)
-        scroll_layout.addWidget(ssss_group)
-
-        self._update_ssss_falloff_button()
         self._on_effects_changed()
 
         scroll_layout.addStretch(1)
@@ -2088,6 +2044,28 @@ class DibellasWardrobeWindow(QMainWindow):
         self.slider_env.setValue(int(round(defaults.env_reflection_multiplier * 100)))
         self._on_lighting_changed()
 
+    def _on_shader_preset_changed(self, _index: int) -> None:
+        selected = self.shader_preset_combo.currentData()
+        self.viewport.settings.shader_preset = (
+            selected if isinstance(selected, str) else "none"
+        )
+        self.config.shader_preset = self.viewport.settings.shader_preset
+        self.viewport.update()
+
+    def _on_shader_preset_error(self, error: str) -> None:
+        self.config.shader_preset = "none"
+        if hasattr(self, "shader_preset_combo"):
+            blocker = QSignalBlocker(self.shader_preset_combo)
+            self.shader_preset_combo.setCurrentIndex(0)
+            del blocker
+        message = self._t("shader_preset_error_message", error=error)
+        QTimer.singleShot(
+            0,
+            lambda: QMessageBox.warning(
+                self, self._t("shader_preset_error"), message
+            ),
+        )
+
     def _on_shader_toggles_changed(self) -> None:
         s = self.viewport.settings
         s.wireframe_overlay = self.chk_wireframe.isChecked()
@@ -2096,76 +2074,18 @@ class DibellasWardrobeWindow(QMainWindow):
 
     def _on_effects_changed(self) -> None:
         settings = self.viewport.settings
-        settings.enable_ssr = self.chk_ssr.isChecked()
-        settings.ssr_step_size = self.slider_ssr_step.value() / 10.0
-        settings.ssr_max_steps = self.slider_ssr_steps.value()
-        settings.ssr_thickness = self.slider_ssr_thickness.value() / 10.0
-        settings.enable_ao = self.chk_ao.isChecked()
-        settings.ao_radius = float(self.slider_ao_radius.value())
-        settings.ao_intensity = self.slider_ao_intensity.value() / 100.0
-        settings.ao_bias = self.slider_ao_bias.value() / 1000.0
-        settings.enable_ssss = self.chk_ssss.isChecked()
-        settings.ssss_radius = float(self.slider_ssss_radius.value())
-
-        self.lbl_ssr_step.setText(f"{settings.ssr_step_size:.1f}")
-        self.lbl_ssr_steps.setText(str(settings.ssr_max_steps))
-        self.lbl_ssr_thickness.setText(f"{settings.ssr_thickness:.1f}")
-        self.lbl_ao_radius.setText(f"{settings.ao_radius:.0f}")
-        self.lbl_ao_intensity.setText(f"{settings.ao_intensity:.2f}")
-        self.lbl_ao_bias.setText(f"{settings.ao_bias:.3f}")
-        self.lbl_ssss_radius.setText(f"{settings.ssss_radius:.0f}")
-
-        for control in (self.slider_ssr_step, self.slider_ssr_steps, self.slider_ssr_thickness):
-            control.setEnabled(settings.enable_ssr)
-        for control in (self.slider_ao_radius, self.slider_ao_intensity, self.slider_ao_bias):
-            control.setEnabled(settings.enable_ao)
-        self.slider_ssss_radius.setEnabled(settings.enable_ssss)
-        self.btn_ssss_falloff.setEnabled(settings.enable_ssss)
+        settings.enable_smaa = self.chk_smaa.isChecked()
+        settings.smaa_quality = str(self.smaa_quality_combo.currentData())
+        self.smaa_quality_combo.setEnabled(settings.enable_smaa)
         self.viewport.update()
 
-    def _reset_ssr_controls(self) -> None:
+    def _reset_smaa_controls(self) -> None:
         defaults = ViewportEffectsConfig()
-        self.chk_ssr.setChecked(defaults.enable_ssr)
-        self.slider_ssr_step.setValue(int(round(defaults.ssr_step_size * 10)))
-        self.slider_ssr_steps.setValue(defaults.ssr_max_steps)
-        self.slider_ssr_thickness.setValue(int(round(defaults.ssr_thickness * 10)))
-        self._on_effects_changed()
-
-    def _reset_ao_controls(self) -> None:
-        defaults = ViewportEffectsConfig()
-        self.chk_ao.setChecked(defaults.enable_ao)
-        self.slider_ao_radius.setValue(int(round(defaults.ao_radius)))
-        self.slider_ao_intensity.setValue(int(round(defaults.ao_intensity * 100)))
-        self.slider_ao_bias.setValue(int(round(defaults.ao_bias * 1000)))
-        self._on_effects_changed()
-
-    def _reset_ssss_controls(self) -> None:
-        defaults = ViewportEffectsConfig()
-        self.chk_ssss.setChecked(defaults.enable_ssss)
-        self.slider_ssss_radius.setValue(int(round(defaults.ssss_radius)))
-        self.viewport.settings.ssss_falloff_color = defaults.ssss_falloff_color
-        self._update_ssss_falloff_button()
-        self._on_effects_changed()
-
-    def _update_ssss_falloff_button(self) -> None:
-        color = QColor.fromRgbF(*self.viewport.settings.ssss_falloff_color)
-        self.btn_ssss_falloff.setText(color.name().upper())
-        self.btn_ssss_falloff.setStyleSheet(
-            f"background-color: {color.name()}; color: #14161c;"
+        self.chk_smaa.setChecked(defaults.enable_smaa)
+        self.smaa_quality_combo.setCurrentIndex(
+            max(0, self.smaa_quality_combo.findData(defaults.smaa_quality))
         )
-
-    def _choose_ssss_falloff_color(self) -> None:
-        initial = QColor.fromRgbF(*self.viewport.settings.ssss_falloff_color)
-        color = QColorDialog.getColor(initial, self, self._t("ssss_falloff_color"))
-        if not color.isValid():
-            return
-        self.viewport.settings.ssss_falloff_color = (
-            color.redF(),
-            color.greenF(),
-            color.blueF(),
-        )
-        self._update_ssss_falloff_button()
-        self.viewport.update()
+        self._on_effects_changed()
 
     # ------------------------------------------------------------------
     # Config Persistence
@@ -2177,6 +2097,7 @@ class DibellasWardrobeWindow(QMainWindow):
             str(self.current_root_dir) if self.current_root_dir else ""
         )
         self.config.language = self.language
+        self.config.shader_preset = str(self.shader_preset_combo.currentData() or "none")
 
         light = self.config.lighting
         light.light_azimuth_deg = float(self.slider_light_azimuth.value())
@@ -2187,17 +2108,8 @@ class DibellasWardrobeWindow(QMainWindow):
         light.env_reflection_multiplier = self.slider_env.value() / 100.0
 
         eff = self.config.effects
-        eff.enable_ssr = self.chk_ssr.isChecked()
-        eff.ssr_step_size = self.slider_ssr_step.value() / 10.0
-        eff.ssr_max_steps = self.slider_ssr_steps.value()
-        eff.ssr_thickness = self.slider_ssr_thickness.value() / 10.0
-        eff.enable_ao = self.chk_ao.isChecked()
-        eff.ao_radius = float(self.slider_ao_radius.value())
-        eff.ao_intensity = self.slider_ao_intensity.value() / 100.0
-        eff.ao_bias = self.slider_ao_bias.value() / 1000.0
-        eff.enable_ssss = self.chk_ssss.isChecked()
-        eff.ssss_radius = float(self.slider_ssss_radius.value())
-        eff.ssss_falloff_color = self.viewport.settings.ssss_falloff_color
+        eff.enable_smaa = self.chk_smaa.isChecked()
+        eff.smaa_quality = str(self.smaa_quality_combo.currentData())
 
         c = self.config.checkboxes
         c.meshes_and_caliente_only = self.chk_meshes_and_caliente_only.isChecked()
