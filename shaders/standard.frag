@@ -148,6 +148,9 @@ vec3 subsurface_scatter(vec2 uv, vec3 center, vec3 color, vec3 normal, float pix
         }
         float sample_weight = i < 4 ? 1.6 : 0.9;
         if (scene_normal(sample_uv, sample_normal)) {
+            if (dot(sample_normal, normal) < 0.0) {
+                sample_normal = -sample_normal;
+            }
             sample_weight *= smoothstep(0.55, 0.9, dot(normal, sample_normal));
         }
         sum += texture(u_scene_color, sample_uv).rgb * sample_weight;
@@ -227,26 +230,35 @@ void main() {
     vec3 center = view_position(v_uv, depth);
     vec3 geometric;
     float pixel_size;
-    if (depth_normal(v_uv, center, geometric, pixel_size)) {
+    bool has_geometry = depth_normal(v_uv, center, geometric, pixel_size);
+    vec3 normal;
+    bool has_normal = scene_normal(v_uv, normal);
+    if (has_normal && has_geometry) {
+        if (dot(normal, geometric) < 0.0) {
+            normal = -normal;
+        }
+        has_normal = dot(normal, geometric) >= 0.15;
+    }
+    if (has_normal) {
         vec4 flags = texture(u_material_flags, v_uv);
         vec3 tint = flags.b > 0.5 ? texture(u_material_subsurface, v_uv).rgb : vec3(0.0);
         float scatter = clamp(max(tint.r, max(tint.g, tint.b)), 0.0, 1.0);
-        vec3 normal;
-        if (!scene_normal(v_uv, normal) || dot(normal, geometric) <= 0.1) {
-            normal = geometric;
-        }
         bool light_on = dot(u_key_light, u_key_light) > 0.25;
         vec3 light = normalize(light_on ? u_key_light : FALLBACK_LIGHT);
         if (light_on) {
             color = relight(color, normal, light, scatter);
         }
-        if (scatter > 0.0) {
+        if (scatter > 0.0 && has_geometry) {
             color = subsurface_scatter(v_uv, center, color, normal, pixel_size,
                                        tint / scatter, scatter);
         }
-        float occlusion = contact_occlusion(v_uv, center, geometric, normal, pixel_size) * (1.0 - 0.45 * scatter);
+        float occlusion = has_geometry
+            ? contact_occlusion(v_uv, center, geometric, normal, pixel_size) * (1.0 - 0.45 * scatter)
+            : 0.0;
         color *= 1.0 - occlusion;
         color += specular(v_uv, center, color, normal, light, flags, occlusion);
+    } else if (has_geometry) {
+        color *= 1.0 - contact_occlusion(v_uv, center, geometric, geometric, pixel_size);
     }
 
     color *= EXPOSURE;

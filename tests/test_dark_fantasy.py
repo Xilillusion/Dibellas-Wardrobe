@@ -1,5 +1,3 @@
-import json
-
 import numpy as np
 import pytest
 
@@ -17,9 +15,9 @@ from test_shader_presets import (  # noqa: F401  (fixtures are used by name)
     shader_renderer_factory,
 )
 
-DARK_FANTASY_UNIFORMS = json.loads(
-    (SHADERS / "darkfantasy.json").read_text(encoding="utf-8")
-)["uniforms"]
+DARK_FANTASY_UNIFORMS = {
+    "u_contrast_power": 1.35, "u_rim_intensity": 1.0, "u_metal_boost": 1.0,
+}
 RIM_COLOR = np.array([0.55, 0.72, 0.95])
 
 
@@ -48,10 +46,7 @@ def _metal(red, gloss=0.6):
 
 
 def test_dark_fantasy_is_discovered_with_uniforms_and_postprocessing():
-    assert ("darkfantasy", "Dark Fantasy") in OutfitViewportWidget._discover_shader_presets()
-    assert DARK_FANTASY_UNIFORMS == {
-        "u_contrast_power": 1.35, "u_rim_intensity": 1.0, "u_metal_boost": 1.0,
-    }
+    assert ("darkfantasy", "Darkfantasy") in OutfitViewportWidget._discover_shader_presets()
     profile = load_postprocess_profile(SHADERS / "darkfantasy.frag")
     assert profile.enable_gtao and profile.gtao_intensity == pytest.approx(1.35)
     assert profile.enable_ssss and profile.ssss_after_preset
@@ -142,12 +137,12 @@ def _expected_rim(normal, light=(0.0, 0.0, 1.0), boost=1.0, intensity=1.0):
     return RIM_COLOR * intensity * rim
 
 
-def test_dark_fantasy_moonlight_rim_uses_boosted_grit_normals(dark_renderer):
+def test_dark_fantasy_moonlight_rim_uses_scene_normals(dark_renderer):
     tilted = _unit(np.sin(np.radians(60.0)), 0.0, np.cos(np.radians(60.0)))
     light = _unit(0.6, 0.0, 0.8)
     _, cloth = _pixel(dark_renderer, normal=tilted, key_light=light)
     np.testing.assert_allclose(
-        cloth[:3], _expected_rim(tilted, light, boost=1.25), rtol=2e-3, atol=1e-5
+        cloth[:3], _expected_rim(tilted, light), rtol=2e-3, atol=1e-5
     )
     assert cloth[2] > cloth[1] > cloth[0] > 0.05
     # Skin keeps its normal map as authored.

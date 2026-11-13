@@ -12,6 +12,7 @@ import logging
 import sys
 from pathlib import Path
 
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
 from src.main_window import DibellasWardrobeWindow
@@ -42,6 +43,9 @@ def main() -> int:
 
     app = QApplication(sys.argv)
     app.setApplicationName("Dibella's Wardrobe")
+    base_dir = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    icon = QIcon(str(base_dir / "icon.png"))
+    app.setWindowIcon(icon)
 
     window = DibellasWardrobeWindow(
         initial_root_dir=Path(args.root) if args.root else None,

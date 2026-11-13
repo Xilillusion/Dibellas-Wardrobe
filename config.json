@@ -1,7 +1,7 @@
 {
   "default_folder": "E:\\Skyrim\\MO2\\mods",
   "language": "en",
-  "shader_preset": "standard",
+  "shader_preset": "none",
   "lighting": {
     "light_azimuth_deg": 110.0,
     "light_elevation_deg": 28.0,

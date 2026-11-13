@@ -82,10 +82,6 @@ def test_shader_presets_discover_fragment_shaders_but_skip_builtin_stages(tmp_pa
     )
 
 
-def test_builtin_anime_preset_is_discovered():
-    assert ("anime", "Anime") in OutfitViewportWidget._discover_shader_presets()
-
-
 def test_shader_preset_config_round_trips(tmp_path):
     path = tmp_path / "config.json"
     path.write_text(json.dumps({"shader_preset": "realistic"}), encoding="utf-8")
@@ -97,11 +93,11 @@ def test_shader_preset_config_round_trips(tmp_path):
     assert json.loads(path.read_text(encoding="utf-8"))["shader_preset"] == "realistic"
 
 
-def test_anime_selection_round_trips(tmp_path):
+def test_vivid_selection_round_trips(tmp_path):
     path = tmp_path / "config.json"
-    config = AppConfig(language="en", shader_preset="anime")
+    config = AppConfig(language="en", shader_preset="vivid")
     config.save(path)
-    assert AppConfig.load(path, supported_languages=["en"]).shader_preset == "anime"
+    assert AppConfig.load(path, supported_languages=["en"]).shader_preset == "vivid"
 
 
 def test_legacy_shader_preset_selection_is_migrated(tmp_path):
@@ -123,7 +119,6 @@ def test_preset_normal_sampler_is_optional_and_bound_when_used(uses_normals):
     widget = SimpleNamespace(
         ctx=MagicMock(),
         preset_prog=program,
-        preset_uniforms={},
         preset_vao=MagicMock(),
         scene_depth=MagicMock(),
         scene_normal=MagicMock(),
@@ -148,7 +143,7 @@ def test_preset_material_samplers_are_bound_to_matching_textures():
     program.__contains__.side_effect = lambda name: name in names
     textures = [MagicMock() for _ in names]
     widget = SimpleNamespace(
-        ctx=MagicMock(), preset_prog=program, preset_vao=MagicMock(), preset_uniforms={},
+        ctx=MagicMock(), preset_prog=program, preset_vao=MagicMock(),
         scene_depth=MagicMock(), scene_normal=MagicMock(),
         material_textures=textures,
     )
@@ -279,11 +274,33 @@ def preset_renderer(shader_renderer_factory):
     )
 
 
-@pytest.fixture(scope="module")
-def anime_renderer(shader_renderer_factory):
-    return lambda color, depth, normals=None, materials=None, key_light=None: (
-        shader_renderer_factory("anime", color, depth, normals, materials, key_light)
+@pytest.mark.parametrize(("name", "expected"), [
+    ("anime", {
+        "u_shadow_step": 0.0, "u_rim_intensity": 0.35, "u_normal_strength": 0.30,
+        "u_saturation": 1.12, "u_gloss_intensity": 0.60,
+    }),
+    ("darkfantasy", {
+        "u_contrast_power": 1.35, "u_rim_intensity": 1.0, "u_metal_boost": 1.0,
+    }),
+    ("glossy", {"u_gloss_intensity": 1.0, "u_rim_intensity": 1.0}),
+    ("vivid", {"u_gloss_intensity": 1.0, "u_rim_intensity": 1.0}),
+])
+def test_preset_shader_defaults_are_initialized_without_sidecar_uniforms(
+    shader_renderer_factory, name, expected,
+):
+    ctx = shader_renderer_factory.ctx
+    program = ctx.program(
+        vertex_shader=(SHADERS / "postprocess.vert").read_text(encoding="utf-8"),
+        fragment_shader=(SHADERS / f"{name}.frag").read_text(encoding="utf-8"),
     )
+    try:
+        for uniform, value in expected.items():
+            assert program[uniform].value == pytest.approx(value)
+    finally:
+        program.release()
+    assert set(json.loads((SHADERS / f"{name}.json").read_text(encoding="utf-8"))) == {
+        "postprocess"
+    }
 
 
 @pytest.fixture(scope="module")
@@ -626,156 +643,10 @@ def _skin_maps():
     return _material_maps(subsurface=(1.0, 0.3, 0.2, 1.0))
 
 
-def test_anime_preserves_background_and_alpha(anime_renderer):
-    color, depth, normals = _material_scene(value=0.5)
-    depth[:4] = 1.0
-    color[:, :, 3] = 0.6
-    result = anime_renderer(color, depth, normals, key_light=_FRONT_LIGHT)
-    assert np.isfinite(result).all()
-    np.testing.assert_allclose(result[:4], color[:4], atol=1e-6)
-    np.testing.assert_allclose(result[:, :, 3], 0.6, atol=1e-6)
-
-
-def test_anime_shades_by_shape_with_crisp_cool_shadows(anime_renderer):
-    shades = {}
-    for name, normal in (("lit", _unit(0.3, 0.0, 1.0)), ("edge_lit", _unit(1.0, 0.0, 0.2)),
-                         ("edge_dark", _unit(1.0, 0.0, -0.2)), ("dark", _unit(1.0, 0.0, -0.8))):
-        color, depth, normals = _material_scene(value=0.5, normal=normal)
-        # Feed a flat source so only the relighting differs between samples.
-        shades[name] = anime_renderer(color, depth, normals, key_light=_FRONT_LIGHT)[24, 24]
-    # A narrow terminator separates two tones; each tone stays flat.
-    assert _luminance(shades["edge_dark"]) < _luminance(shades["edge_lit"]) * 0.97
-    assert abs(_luminance(shades["dark"]) - _luminance(shades["edge_dark"])) < 0.03
-    # Cloth shadows lean blue-violet instead of neutral grey.
-    assert shades["dark"][2] > shades["dark"][0] + 0.04
-
-
-def test_anime_flattens_lit_gradient(anime_renderer):
-    lum = []
-    for x, shade in ((0.2, 1.0), (0.75, 0.75)):
-        color, depth, normals = _material_scene(value=0.6 * shade, normal=_unit(x, 0.0, 1.0))
-        lum.append(_luminance(anime_renderer(color, depth, normals, key_light=_FRONT_LIGHT)[24, 24]))
-    # A 25% Lambert falloff in the source is visibly compressed.
-    assert lum[1] / lum[0] > 0.75 + 0.05
-
-
-def test_anime_keeps_texture_detail_in_the_lit_tone(anime_renderer):
-    color, depth, normals = _material_scene(value=0.5)
-    color[:, 24:, :3] = (0.7, 0.4, 0.25)
-    result = anime_renderer(color, depth, normals, key_light=_FRONT_LIGHT)
-    assert result[10, 40, 0] > result[10, 40, 1] > result[10, 40, 2]
-    assert result[10, 40, 0] > result[10, 10, 0]
-
-
-def test_anime_form_shadow_ignores_isolated_normal_grain(anime_renderer):
-    color, depth, normals = _material_scene(value=0.6)
-    baseline = anime_renderer(color, depth, normals, key_light=_FRONT_LIGHT)
-    normals[24, 24, :3] = _unit(1.0, 0.0, -0.4) * 0.5 + 0.5
-    speck = anime_renderer(color, depth, normals, key_light=_FRONT_LIGHT)
-    # Neither the speck nor its neighbours fall into shadow or get inked.
-    assert _luminance(speck[24, 24]) > _luminance(baseline[24, 24]) * 0.9
-    for y, x in ((24, 23), (24, 25), (23, 24), (25, 24)):
-        assert _luminance(speck[y, x]) > _luminance(baseline[y, x]) * 0.9
-
-
-def test_anime_skin_shadows_are_warm_and_terminator_glows(anime_renderer):
-    color, depth, normals = _material_scene(value=0.5, normal=_unit(1.0, 0.0, -0.8))
-    skin = anime_renderer(color, depth, normals, _skin_maps(), key_light=_FRONT_LIGHT)[24, 24]
-    cloth = anime_renderer(color, depth, normals, key_light=_FRONT_LIGHT)[24, 24]
-    assert skin[0] > skin[2] + 0.04 and cloth[2] > cloth[0]
-    assert _luminance(skin) > _luminance(cloth)
-
-    terminator = _unit(1.0, 0.0, -0.1)
-    color, depth, normals = _material_scene(value=0.5, normal=terminator)
-    skin = anime_renderer(color, depth, normals, _skin_maps(), key_light=_FRONT_LIGHT)[24, 24]
-    cloth = anime_renderer(color, depth, normals, key_light=_FRONT_LIGHT)[24, 24]
-    assert skin[0] / skin[2] > cloth[0] / cloth[2] + 0.3
-
-
-def test_anime_ignores_material_samples_without_flags(anime_renderer):
-    color, depth, normals = _material_scene(normal=_KEY_HALF_VECTOR)
-    baseline = anime_renderer(color, depth, normals, key_light=_FRONT_LIGHT)
-    maps = _material_maps(normal=(0.5, 0.5, 1.0, 1.0), env_mask=(1.0, 1.0, 1.0, 1.0),
-                          subsurface=(1.0, 0.3, 0.2, 1.0))
-    maps["u_material_flags"][:] = 0.0
-    np.testing.assert_allclose(
-        anime_renderer(color, depth, normals, maps, key_light=_FRONT_LIGHT), baseline, atol=1e-6
-    )
-
-
-def test_anime_env_mask_adds_crisp_highlight_only_near_the_light(anime_renderer):
-    half = _unit(0.0, 0.0, 2.0)
-    maps = _material_maps(env_mask=(0.8, 0.8, 0.8, 1.0))
-    color, depth, facing = _material_scene(normal=half)
-    base = anime_renderer(color, depth, facing, key_light=_FRONT_LIGHT)
-    lit = anime_renderer(color, depth, facing, maps, key_light=_FRONT_LIGHT)
-    assert lit[24, 24, 0] > base[24, 24, 0] + 0.13
-    color, depth, away = _material_scene(normal=_unit(0.4, 0.0, 1.0))
-    np.testing.assert_allclose(
-        anime_renderer(color, depth, away, maps, key_light=_FRONT_LIGHT)[24, 24],
-        anime_renderer(color, depth, away, key_light=_FRONT_LIGHT)[24, 24], atol=1e-6,
-    )
-
-
-@pytest.mark.parametrize("distance", [10.0, 100.0])
-def test_anime_inks_silhouettes_and_depth_steps_with_coloured_lines(anime_renderer, distance):
-    color = np.ones((48, 48, 4), dtype="f4")
-    color[:, :, :3] = (0.7, 0.45, 0.3)
-    depth = np.full((48, 48), _depth_at_distance(distance), dtype="f4")
-    depth[:, :12] = 1.0
-    depth[:, 24:] = _depth_at_distance(distance * 1.1)
-    result = anime_renderer(color, depth, key_light=_FRONT_LIGHT)
-    interior = result[20, 18]
-    for x in (12, 23):
-        line = result[20, x]
-        assert _luminance(line) < _luminance(interior) * 0.45
-        # Ink keeps the surface hue rather than being neutral black.
-        assert line[0] > line[1] > line[2]
-    # Steps get a single line on the nearer surface only.
-    np.testing.assert_allclose(result[20, 24], result[20, 30], atol=1e-5)
-    np.testing.assert_allclose(result[20, 11], color[20, 11], atol=1e-6)
-
-
-@pytest.mark.parametrize("distance", [10.0, 100.0])
-def test_anime_inks_folds_but_not_smooth_slopes(anime_renderer, distance):
-    columns = np.arange(48)
-    color, depth, normals = _material_scene(value=0.5)
-    slope = distance * (1.0 + 0.4 * (columns - 24) / 48)
-    depth[:] = _depth_at_distance(slope)[None, :]
-    smooth = anime_renderer(color, depth, normals, key_light=_FRONT_LIGHT)
-    assert np.ptp(_luminance_rows(smooth[20, 16:32])) < 1e-4
-    fold = distance * (1.0 + 0.15 * np.abs(columns - 24) / 24)
-    depth[:] = _depth_at_distance(fold)[None, :]
-    folded = anime_renderer(color, depth, normals, key_light=_FRONT_LIGHT)
-    assert _luminance(folded[20, 24]) < _luminance(folded[20, 20]) * 0.5
-    np.testing.assert_allclose(folded[20, 20], smooth[20, 20], atol=1e-5)
-
-
-def _luminance_rows(pixels):
-    return pixels[:, :3] @ np.array([0.2126, 0.7152, 0.0722])
-
-
-def test_anime_rim_light_brightens_silhouette_edges(anime_renderer):
-    color, depth, normals = _material_scene(value=0.5)
-    for x in range(12, 20):
-        t = (x - 12) / 8
-        normals[:, x, :3] = _unit(-(1.0 - t), 0.0, 0.3 + t) * 0.5 + 0.5
-    closed = anime_renderer(color, depth, normals, key_light=_unit(-0.6, 0.0, 0.8))
-    depth[:, :12] = 1.0
-    open_edge = anime_renderer(color, depth, normals, key_light=_unit(-0.6, 0.0, 0.8))
-    assert _luminance(open_edge[20, 13]) > _luminance(closed[20, 13]) + 0.05
-    np.testing.assert_allclose(open_edge[20, 30], closed[20, 30], atol=1e-6)
-
-
-def test_anime_without_scene_lighting_uses_fallback_light(anime_renderer):
-    color, depth, normals = _material_scene(value=0.5, normal=_unit(0.8, -0.5, -0.2))
-    unlit = anime_renderer(color, depth, normals)
-    np.testing.assert_allclose(
-        anime_renderer(color, depth, normals, key_light=(0.0, 0.0, 0.0)), unlit, atol=1e-6
-    )
-    # Facing away from the fallback light lands in the cool shadow tone.
-    assert unlit[24, 24, 2] > unlit[24, 24, 0]
-    assert np.isfinite(unlit).all()
+def _viewport_shaded_scene(normal, albedo=0.5, light=_FRONT_LIGHT):
+    """A flat-albedo patch carrying the viewport's own Lambert shading."""
+    shade = 0.65 + 0.35 * max(float(np.dot(normal, light)), 0.0)
+    return _material_scene(value=albedo * shade, normal=normal)
 
 
 def test_realistic_relights_toward_scene_key_light(preset_renderer):
@@ -863,25 +734,25 @@ def test_glossy_specular_never_reaches_the_diffuse_output(glossy_renderer):
     assert (lit_diffuse[:3] <= 1.0).all()
 
 
-def test_glossy_diffuse_is_hentai3d_under_a_wet_film(glossy_renderer, hentai3d_renderer):
+def test_glossy_diffuse_is_vivid_under_a_wet_film(glossy_renderer, vivid_renderer):
     color, depth, normals = _material_scene(value=0.5, normal=_tilted(30.0))
 
     def both(maps, key_light=_FRONT_LIGHT):
         glossy = glossy_renderer(color, depth, normals, maps, key_light)[0][24, 24, :3]
-        hentai = hentai3d_renderer(color, depth, normals, maps, key_light)[0][24, 24, :3]
-        return glossy, hentai
+        vivid = vivid_renderer(color, depth, normals, maps, key_light)[0][24, 24, :3]
+        return glossy, vivid
 
     # Plain cloth has no oil coverage: only the half warm tint differs.
-    glossy, hentai = both(None)
-    assert np.allclose(glossy / hentai, (1.02, 0.995, 0.98), atol=0.03)
-    # Oiled skin is darker and richer than 3D Hentai's dry skin.
-    glossy, hentai = both(_glossy_skin())
-    assert _luminance(glossy) < _luminance(hentai) * 0.95
-    assert glossy[0] / glossy[2] > hentai[0] / hentai[2]
+    glossy, vivid = both(None)
+    assert np.allclose(glossy / vivid, (1.02, 0.995, 0.98), atol=0.03)
+    # Oiled skin is darker and richer than Vivid's dry skin.
+    glossy, vivid = both(_glossy_skin())
+    assert _luminance(glossy) < _luminance(vivid) * 0.95
+    assert glossy[0] / glossy[2] > vivid[0] / vivid[2]
 
 
-def test_glossy_keeps_hentai3d_rim_and_tunable_uniforms(
-    shader_renderer_factory, hentai3d_renderer,
+def test_glossy_keeps_vivid_rim_and_tunable_uniforms(
+    shader_renderer_factory, vivid_renderer,
 ):
     def glossy(normal, maps, key_light, **uniforms):
         color, depth, normals = _material_scene(value=0.5, normal=normal)
@@ -891,11 +762,11 @@ def test_glossy_keeps_hentai3d_rim_and_tunable_uniforms(
         )[1][24, 24]
 
     contour, side = _unit(0.968, 0.0, 0.25), _unit(0.7, 0.0, 0.7)
-    # Matte cloth gets no oil, only 3D Hentai's rim light.
+    # Matte cloth gets no oil, only Vivid's rim light.
     rim = glossy(contour, None, side)
     color, depth, normals = _material_scene(value=0.5, normal=contour)
-    hentai = hentai3d_renderer(color, depth, normals, None, key_light=side)[1][24, 24]
-    np.testing.assert_allclose(rim[:3], hentai[:3], rtol=1e-4, atol=1e-6)
+    vivid = vivid_renderer(color, depth, normals, None, key_light=side)[1][24, 24]
+    np.testing.assert_allclose(rim[:3], vivid[:3], rtol=1e-4, atol=1e-6)
     assert rim[0] > 0.05
     np.testing.assert_allclose(glossy(contour, None, side, u_rim_intensity=2.0)[:3],
                                rim[:3] * 2.0, rtol=1e-4)
@@ -934,8 +805,10 @@ def test_glossy_shades_creases_and_dims_oil_inside_them(glossy_renderer):
     contact_depth = flat_depth.copy()
     contact_depth[28:37, 34:43] = _depth_at_distance(9.7)
     maps = _material_maps(size=64, env_mask=(1.0, 1.0, 1.0, 1.0))
-    flat_diffuse, flat_specular = glossy_renderer(color, flat_depth, None, maps, _FRONT_LIGHT)
-    diffuse, specular = glossy_renderer(color, contact_depth, None, maps, _FRONT_LIGHT)
+    normals = np.empty_like(color)
+    normals[:] = (0.5, 0.5, 1.0, 1.0)
+    flat_diffuse, flat_specular = glossy_renderer(color, flat_depth, normals, maps, _FRONT_LIGHT)
+    diffuse, specular = glossy_renderer(color, contact_depth, normals, maps, _FRONT_LIGHT)
     assert diffuse[32, 33, 0] < flat_diffuse[32, 33, 0] - 0.002
     assert specular[32, 33, 0] < flat_specular[32, 33, 0] * 0.95
     # Flat areas away from the contact are untouched.
@@ -955,7 +828,7 @@ def test_glossy_silhouette_without_scene_normal_stays_finite_and_lit(glossy_rend
     np.testing.assert_allclose(edge[24, 24, :3], inner[24, 24, :3], rtol=0.05)
 
 
-def test_glossy_smooths_skin_pores_under_highlights(glossy_renderer):
+def test_glossy_preserves_scene_normal_detail_under_highlights(glossy_renderer):
     def speck(maps):
         color, depth, normals = _material_scene(value=0.5)
         normals[24, 24, :3] = np.asarray(_tilted(8.0)) * 0.5 + 0.5
@@ -963,8 +836,8 @@ def test_glossy_smooths_skin_pores_under_highlights(glossy_renderer):
 
     skin = speck(_glossy_skin(env_mask=(1.0, 1.0, 1.0, 1.0)))
     cloth = speck(_material_maps(env_mask=(1.0, 1.0, 1.0, 1.0)))
-    # The pore keeps more of the highlight on skin than on equally glossy cloth.
-    assert skin[0] > cloth[0] * 1.5
+    # Neither skin nor cloth is flattened against the depth-derived triangle.
+    np.testing.assert_allclose(skin[:3], cloth[:3], rtol=1e-4, atol=1e-5)
 
 
 def _split_composite(ctx, diffuse, specular, ssss):
@@ -1074,65 +947,63 @@ def test_standard_is_discovered_with_realistic_postprocessing():
     )
 
 
-HENTAI3D_UNIFORMS = json.loads(
-    (SHADERS / "hentai3d.json").read_text(encoding="utf-8")
-)["uniforms"]
+VIVID_UNIFORMS = {"u_gloss_intensity": 1.0, "u_rim_intensity": 1.0}
 
 
 @pytest.fixture
-def hentai3d_renderer(shader_renderer_factory):
-    """Returns the (diffuse, gloss + rim + SSSS mask) outputs of the 3D Hentai preset."""
+def vivid_renderer(shader_renderer_factory):
+    """Returns the (diffuse, gloss + rim + SSSS mask) outputs of the Vivid preset."""
     def render(color, depth, normals=None, materials=None, key_light=None, **uniforms):
         return shader_renderer_factory(
-            "hentai3d", color, depth, normals, materials, key_light, outputs=2,
-            uniforms={**HENTAI3D_UNIFORMS, **uniforms},
+            "vivid", color, depth, normals, materials, key_light, outputs=2,
+            uniforms={**VIVID_UNIFORMS, **uniforms},
         )
     return render
 
 
-def _hentai3d_pixel(renderer, normal, maps=None, key_light=_FRONT_LIGHT, **uniforms):
+def _vivid_pixel(renderer, normal, maps=None, key_light=_FRONT_LIGHT, **uniforms):
     color, depth, normals = _material_scene(value=0.5, normal=normal)
     diffuse, specular = renderer(color, depth, normals, maps, key_light=key_light, **uniforms)
     return diffuse[24, 24], specular[24, 24]
 
 
-def test_hentai3d_preserves_background_and_splits_outputs(hentai3d_renderer):
+def test_vivid_preserves_background_and_splits_outputs(vivid_renderer):
     color, depth, normals = _material_scene(value=0.5)
     depth[:4] = 1.0
     color[:, :, 3] = 0.7
-    diffuse, specular = hentai3d_renderer(color, depth, normals, _glossy_skin(),
+    diffuse, specular = vivid_renderer(color, depth, normals, _glossy_skin(),
                                           key_light=_FRONT_LIGHT)
     assert np.isfinite(diffuse).all() and np.isfinite(specular).all()
     np.testing.assert_allclose(diffuse[:4], color[:4], atol=1e-6)
     np.testing.assert_allclose(specular[:4], 0.0, atol=1e-6)
     np.testing.assert_allclose(diffuse[:, :, 3], 0.7, atol=1e-6)
     assert specular[24, 24, 3] == pytest.approx(1.0)
-    _, cloth = _hentai3d_pixel(hentai3d_renderer, (0.0, 0.0, 1.0))
+    _, cloth = _vivid_pixel(vivid_renderer, (0.0, 0.0, 1.0))
     assert cloth[3] == pytest.approx(0.0)
 
 
-def test_hentai3d_skin_is_glossy_with_a_tight_highlight(hentai3d_renderer):
+def test_vivid_skin_is_glossy_with_a_tight_highlight(vivid_renderer):
     def gloss(degrees, maps=None, **uniforms):
-        return _hentai3d_pixel(hentai3d_renderer, _tilted(degrees),
+        return _vivid_pixel(vivid_renderer, _tilted(degrees),
                                _glossy_skin() if maps is None else maps, **uniforms)[1][0]
 
-    # Skin keeps 40% of the normal map's tilt, so 15 and 40 degrees act as 6 and 16.
+    # The scene's full shading-normal tilt is preserved on skin.
     peak, near, far = gloss(0.0), gloss(15.0), gloss(40.0)
     assert peak > 0.3
     assert near < peak * 0.8
     assert 0.0 < far < near
     assert gloss(0.0, u_gloss_intensity=0.0) < peak * 0.05
     # Untextured cloth gets no highlight head-on.
-    _, cloth = _hentai3d_pixel(hentai3d_renderer, (0.0, 0.0, 1.0))
+    _, cloth = _vivid_pixel(vivid_renderer, (0.0, 0.0, 1.0))
     np.testing.assert_allclose(cloth[:3], 0.0, atol=1e-6)
 
 
-def test_hentai3d_rim_lights_lit_contours_brightest_on_skin(hentai3d_renderer):
+def test_vivid_rim_lights_lit_contours_brightest_on_skin(vivid_renderer):
     contour = _unit(0.968, 0.0, 0.25)
     side_light = _unit(0.7, 0.0, 0.7)
 
     def rim(maps=None, key_light=side_light, **uniforms):
-        return _hentai3d_pixel(hentai3d_renderer, contour, maps, key_light, **uniforms)[1]
+        return _vivid_pixel(vivid_renderer, contour, maps, key_light, **uniforms)[1]
 
     cloth = rim()
     assert cloth[0] > 0.05 and cloth[0] > cloth[1]
@@ -1141,23 +1012,23 @@ def test_hentai3d_rim_lights_lit_contours_brightest_on_skin(hentai3d_renderer):
     np.testing.assert_allclose(rim(u_rim_intensity=2.0)[:3], cloth[:3] * 2.0, rtol=1e-4)
 
 
-def test_hentai3d_skin_is_pink_flushed_and_more_saturated_than_standard(
-    hentai3d_renderer, standard_renderer,
+def test_vivid_skin_is_pink_flushed_and_more_saturated_than_standard(
+    vivid_renderer, standard_renderer,
 ):
     color, depth, normals = _material_scene(value=0.5)
     color[:, :, :3] = (0.6, 0.45, 0.4)
     maps = _glossy_skin()
-    skin, _ = hentai3d_renderer(color, depth, normals, maps, key_light=_FRONT_LIGHT)
+    skin, _ = vivid_renderer(color, depth, normals, maps, key_light=_FRONT_LIGHT)
     standard = standard_renderer(color, depth, normals, maps, key_light=_FRONT_LIGHT)
     skin, standard = skin[24, 24], standard[24, 24]
     assert skin[0] / skin[1] > standard[0] / standard[1] * 1.05
-    cloth, _ = hentai3d_renderer(color, depth, normals, None, key_light=_FRONT_LIGHT)
+    cloth, _ = vivid_renderer(color, depth, normals, None, key_light=_FRONT_LIGHT)
     standard_cloth = standard_renderer(color, depth, normals, None, key_light=_FRONT_LIGHT)
     cloth, standard_cloth = cloth[24, 24], standard_cloth[24, 24]
     assert cloth[0] - cloth[2] > standard_cloth[0] - standard_cloth[2]
 
 
-def test_hentai3d_soft_ramp_steepens_the_terminator(hentai3d_renderer, standard_renderer):
+def test_vivid_soft_ramp_steepens_the_terminator(vivid_renderer, standard_renderer):
     color, depth, normals = _material_scene(value=0.5)
     lit_side, shadow_side = _unit(0.968, 0.0, 0.25), _unit(0.9987, 0.0, -0.05)
 
@@ -1166,13 +1037,13 @@ def test_hentai3d_soft_ramp_steepens_the_terminator(hentai3d_renderer, standard_
         dark = unpack(renderer(color, depth, normals, None, key_light=shadow_side))
         return _luminance(lit[24, 24]) - _luminance(dark[24, 24])
 
-    assert step(hentai3d_renderer, lambda out: out[0]) > step(standard_renderer, lambda out: out) * 1.15
+    assert step(vivid_renderer, lambda out: out[0]) > step(standard_renderer, lambda out: out) * 1.15
 
 
-def test_hentai3d_is_discovered_with_label_uniforms_and_pink_ssss():
-    assert ("hentai3d", "3D Hentai") in OutfitViewportWidget._discover_shader_presets()
-    assert set(HENTAI3D_UNIFORMS) == {"u_gloss_intensity", "u_rim_intensity"}
-    profile = load_postprocess_profile(SHADERS / "hentai3d.frag")
+def test_vivid_is_discovered_with_label_uniforms_and_pink_ssss():
+    assert ("vivid", "Vivid") in OutfitViewportWidget._discover_shader_presets()
+    assert set(VIVID_UNIFORMS) == {"u_gloss_intensity", "u_rim_intensity"}
+    profile = load_postprocess_profile(SHADERS / "vivid.frag")
     standard = load_postprocess_profile(SHADERS / "standard.frag")
     assert profile.enable_gtao and profile.enable_ssss and profile.ssss_after_preset
     assert profile.sss_strength > standard.sss_strength
@@ -1199,7 +1070,8 @@ def test_mesh_shader_outputs_normal_mapped_normals():
     vertex_shader = """
         #version 330
         out vec3 lightFrontal, lightDirectional0, lightDirectional1, lightDirectional2;
-        out vec3 viewDir, n;
+        out vec3 viewDir, n, v_view_normal;
+        uniform mat3 mv_normalMatrix;
         out mat3 mv_tbn;
         out float maskFactor;
         out vec3 weightColor;
@@ -1210,6 +1082,7 @@ def test_mesh_shader_outputs_normal_mapped_normals():
             gl_Position = vec4(positions[gl_VertexID], 0, 1);
             lightFrontal = lightDirectional0 = lightDirectional1 = lightDirectional2 = vec3(0, 0, 1);
             viewDir = n = vec3(0, 0, 1);
+            v_view_normal = mv_normalMatrix * n;
             mv_tbn = mat3(1);
             maskFactor = 1.0;
             weightColor = vec3(1);
@@ -1264,6 +1137,11 @@ def test_mesh_shader_outputs_normal_mapped_normals():
     program["bModelSpace"].value = False
     normal_map.write(np.array([0.8, 0.5, 0.0, 1.0], dtype="f4").tobytes())
     np.testing.assert_allclose(read_normal(), (0.8, 0.5, 0.9, 1.0), atol=1e-5)
+    program["bModelSpace"].value = True
+    normal_map.write(np.array([0.5, 0.5, 0.5, 1.0], dtype="f4").tobytes())
+    np.testing.assert_allclose(read_normal(), (0.5, 0.5, 1.0, 1.0), atol=1e-5)
+    program["bModelSpace"].value = False
+    normal_map.write(np.array([0.8, 0.5, 0.9, 1.0], dtype="f4").tobytes())
     program["bNormalMap"].value = False
     np.testing.assert_allclose(read_normal(), (0.5, 0.5, 1.0, 1.0), atol=1e-5)
     program["bLightEnabled"].value = False

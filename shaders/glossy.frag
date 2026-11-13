@@ -1,7 +1,7 @@
 #version 330
 
-// Glossy: 3D Hentai plus oil, the classic Skyrim "Korean-style" oiled skin.
-// The diffuse is 3D Hentai's (soft two-tone key, smoothed pink-flushed skin,
+// Glossy: Vivid plus oil, the classic Skyrim "Korean-style" oiled skin.
+// The diffuse is Vivid's (soft two-tone key, smoothed pink-flushed skin,
 // saturated grade) under a wet film, its rim light is kept, and its skin gloss
 // is replaced by oil: dual-lobe GGX specular (broad sheen + sharp wet
 // pinpoints) and a grazing studio reflection. glossy.json sets
@@ -36,7 +36,7 @@ const vec3 LUMINANCE = vec3(0.2126, 0.7152, 0.0722);
 const vec3 FALLBACK_LIGHT = vec3(-0.3537, 0.5558, 0.7680);
 const float PI = 3.14159265;
 
-// 3D Hentai: Standard with a slightly softer, warmer studio light.
+// Vivid: Standard with a slightly softer, warmer studio light.
 const vec3 KEY_COLOR = vec3(0.70, 0.66, 0.62);
 const vec3 SKY_AMBIENT = vec3(0.46, 0.46, 0.52);
 const vec3 GROUND_AMBIENT = vec3(0.40, 0.34, 0.31);
@@ -47,8 +47,6 @@ const float SATURATION = 1.15;
 
 // Share of the light ramp pulled towards a soft two-tone band.
 const float TOON_AMOUNT = 0.35;
-// Skin keeps this share of its normal-map detail, for smooth, doll-like skin.
-const float SKIN_NORMAL_DETAIL = 0.4;
 // Pink flush on skin, strongest along the light terminator.
 const vec3 FLUSH_TINT = vec3(1.08, 0.86, 0.90);
 const float FLUSH_STRENGTH = 0.55;
@@ -201,6 +199,9 @@ vec3 subsurface_scatter(vec2 uv, vec3 center, vec3 color, vec3 normal, float pix
         }
         float sample_weight = i < 4 ? 1.6 : 0.9;
         if (scene_normal(sample_uv, sample_normal)) {
+            if (dot(sample_normal, normal) < 0.0) {
+                sample_normal = -sample_normal;
+            }
             sample_weight *= smoothstep(0.55, 0.9, dot(normal, sample_normal));
         }
         sum += texture(u_scene_color, sample_uv).rgb * sample_weight;
@@ -279,32 +280,40 @@ void main() {
     bool light_on = dot(u_key_light, u_key_light) > 0.25;
     vec3 light = normalize(light_on ? u_key_light : FALLBACK_LIGHT);
 
-    // 3D Hentai diffuse. Silhouette pixels without a depth normal keep the
-    // scene colour, but still get oil and rim from their own shading normal.
+    // Depth geometry controls contact shading, never the lighting normal.
     vec3 geometric;
     float pixel_size;
     float occlusion = 0.0;
     vec3 normal;
     bool has_geometry = depth_normal(v_uv, center, geometric, pixel_size);
-    if (!scene_normal(v_uv, normal) || (has_geometry && dot(normal, geometric) <= 0.1)) {
-        normal = has_geometry ? geometric : vec3(0.0, 0.0, 1.0);
+    bool has_normal = scene_normal(v_uv, normal);
+    if (has_normal && has_geometry) {
+        if (dot(normal, geometric) < 0.0) {
+            normal = -normal;
+        }
+        has_normal = dot(normal, geometric) >= 0.15;
     }
-    if (has_geometry) {
-        normal = normalize(mix(normal, geometric, skin * (1.0 - SKIN_NORMAL_DETAIL)));
+    if (has_normal) {
         if (light_on) {
             color = relight(color, normal, light, scatter);
         }
-        if (scatter > 0.0) {
+        if (scatter > 0.0 && has_geometry) {
             color = subsurface_scatter(v_uv, center, color, normal, pixel_size,
                                        tint / scatter, scatter);
         }
-        occlusion = contact_occlusion(v_uv, center, geometric, normal, pixel_size)
-            * (1.0 - 0.45 * scatter);
+        if (has_geometry) {
+            occlusion = contact_occlusion(v_uv, center, geometric, normal, pixel_size)
+                * (1.0 - 0.45 * scatter);
+        }
         color *= 1.0 - occlusion;
 
         // Pink flush, deepest along the terminator where blood shows through.
         float terminator = 1.0 - smoothstep(0.0, 0.6, abs(dot(normal, light) - 0.1));
         color *= mix(vec3(1.0), FLUSH_TINT, skin * FLUSH_STRENGTH * (0.6 + 0.4 * terminator));
+    } else if (has_geometry) {
+        occlusion = contact_occlusion(v_uv, center, geometric, geometric, pixel_size)
+            * (1.0 - 0.45 * scatter);
+        color *= 1.0 - occlusion;
     }
 
     // Oil coverage: the env mask, else the tangent normal map's alpha. Skin is
@@ -325,9 +334,12 @@ void main() {
     // Oil and rim do not catch the key or the studio deep inside creases.
     float visibility = 1.0 - min(occlusion * 2.5, 0.85);
     vec3 view = normalize(-center);
-    vec3 shine = rim_light(normal, view, light, mix(RIM_CLOTH, RIM_SKIN, skin)) * visibility
-        * u_rim_intensity;
-    if (coverage > 0.004) {
+    vec3 shine = vec3(0.0);
+    if (has_normal) {
+        shine = rim_light(normal, view, light, mix(RIM_CLOTH, RIM_SKIN, skin)) * visibility
+            * u_rim_intensity;
+    }
+    if (has_normal && coverage > 0.004) {
         // A Complex Material mask with distinct channels carries metalness in blue.
         float metalness = flags.g > 0.5 && max(abs(mask.g - mask.r), abs(mask.b - mask.r)) > 0.04
             ? mask.b * (1.0 - skin) : 0.0;

@@ -1,8 +1,4 @@
 {
-  "uniforms": {
-    "u_gloss_intensity": 1.0,
-    "u_rim_intensity": 1.0
-  },
   "postprocess": {
     "enable_gtao": true,
     "gtao_radius": 8.0,

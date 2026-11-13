@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import logging
 import math
-import struct
 import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -36,10 +35,7 @@ from .nif_loader import MAX_SHADER_BONES, LoadedNifData, ShapeMeshData
 from .shader_presets import (
     NO_POSTPROCESS,
     PostProcessProfile,
-    UniformValue,
     load_postprocess_profile,
-    load_preset_label,
-    load_preset_uniforms,
 )
 from .smp_bridge import SmpBridgeSolver
 from .smaa import DEFAULT_SMAA_QUALITY, SMAA_QUALITIES, SmaaPostProcess
@@ -144,7 +140,6 @@ class OutfitViewportWidget(QOpenGLWidget):
         self.preset_vao: Optional[moderngl.VertexArray] = None
         self._loaded_shader_preset = "none"
         self.postprocess_profile: PostProcessProfile = NO_POSTPROCESS
-        self.preset_uniforms: Dict[str, UniformValue] = {}
         # View-space key light direction for presets; zero while lighting is off.
         self._key_light_view = glm.vec3(0.0)
         # Rotates view-space directions into the studio cubemap's world space.
@@ -677,13 +672,7 @@ class OutfitViewportWidget(QOpenGLWidget):
         for path in sorted(shader_dir.glob("*.frag"), key=lambda item: item.name.casefold()):
             if path.stem.casefold() in excluded:
                 continue
-            try:
-                label = load_preset_label(path)
-            except ValueError as exc:
-                log.warning("Ignoring label of preset %s: %s", path.stem, exc)
-                label = None
-            if label is None:
-                label = path.stem.replace("_", " ").replace("-", " ").title()
+            label = path.stem.replace("_", " ").replace("-", " ").title()
             presets.append((path.stem, label))
         return tuple(presets)
 
@@ -1028,7 +1017,6 @@ class OutfitViewportWidget(QOpenGLWidget):
             self.preset_prog = None
         self._loaded_shader_preset = "none"
         self.postprocess_profile = NO_POSTPROCESS
-        self.preset_uniforms = {}
 
         selected = self.settings.shader_preset
         if selected == "none":
@@ -1065,17 +1053,9 @@ class OutfitViewportWidget(QOpenGLWidget):
             # The preset still renders; it just runs without GTAO/SSSS.
             log.warning("Ignoring post-process settings of preset %s: %s", selected, exc)
             profile = NO_POSTPROCESS
-        try:
-            uniforms = load_preset_uniforms(_SHADER_DIR / f"{shader_path}.frag")
-        except ValueError as exc:
-            # Shader-side uniform defaults apply instead.
-            log.warning("Ignoring uniforms of preset %s: %s", selected, exc)
-            uniforms = {}
-
         self.preset_prog = program
         self.preset_vao = vertex_array
         self.postprocess_profile = profile
-        self.preset_uniforms = uniforms
         self._loaded_shader_preset = selected
 
     def _report_shader_preset_error(self, selected: str, message: str) -> None:
@@ -1083,7 +1063,6 @@ class OutfitViewportWidget(QOpenGLWidget):
         self.settings.shader_preset = "none"
         self._loaded_shader_preset = "none"
         self.postprocess_profile = NO_POSTPROCESS
-        self.preset_uniforms = {}
         self.shaderPresetError.emit(f"{selected}: {message}")
 
     def _composite_shader_preset(
@@ -1134,15 +1113,6 @@ class OutfitViewportWidget(QOpenGLWidget):
         self.preset_prog["u_inverse_projection"].write(
             bytes(glm.transpose(glm.inverse(projection)))
         )
-        for name, value in list(self.preset_uniforms.items()):
-            if name not in self.preset_prog:
-                continue
-            try:
-                self.preset_prog[name].value = value
-            except (struct.error, TypeError, ValueError, moderngl.Error) as exc:
-                # A value shaped unlike the GLSL uniform; keep the shader's default.
-                log.warning("Ignoring preset uniform %s=%r: %s", name, value, exc)
-                del self.preset_uniforms[name]
         self.preset_vao.render(moderngl.TRIANGLES, vertices=3)
 
         self.ctx.depth_mask = True

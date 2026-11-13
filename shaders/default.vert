@@ -44,6 +44,7 @@ out vec3 lightDirectional2;
 
 out vec3 viewDir;
 out vec3 n;
+out vec3 v_view_normal;
 out mat3 mv_tbn;
 
 out float maskFactor;
@@ -82,6 +83,7 @@ void main(void)
 
 	// Object-space normal (transformed by mv_normalMatrix in default.frag when normal map is off)
 	n = localNormal;
+	v_view_normal = normalize(mv_normalMatrix * localNormal);
 
 	if (bModelSpace)
 	{

@@ -35,6 +35,7 @@ analysis = Analysis(
         (str(ROOT / "assets" / "CBPConfig.json"), "assets"),
         (str(ROOT / "assets" / "CITATION.md"), "assets"),
         (str(ROOT / "locales.json"), "."),
+        (str(ROOT / "icon.png"), "."),
     ],
     hiddenimports=collect_submodules("pyn") + ["anim_fo4", "anim_skyrim"],
     hookspath=[],

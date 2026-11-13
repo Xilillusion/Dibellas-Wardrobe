@@ -3,7 +3,7 @@
 // Dark Fantasy: Standard restyled for grimdark, Souls-like armour, leather and
 // cloaks. Chiaroscuro key lighting over a near-black cool fill, a slightly
 // desaturated albedo graded slate-blue in shadow and warm where key-lit,
-// boosted normal-map grit, starkly gleaming metal with tinted studio
+// starkly gleaming metal with tinted studio
 // reflections, a cold moonlight Fresnel rim, and pale, weathered skin.
 // darkfantasy.json sets "ssss_after_preset", so this writes a split output:
 // diffuse goes through the built-in SSSS pass, while highlights,
@@ -48,9 +48,6 @@ const vec3 SHADOW_GRADE = vec3(0.84, 0.91, 1.08);
 const vec3 LIT_GRADE = vec3(1.03, 1.0, 0.96);
 const float EXPOSURE = 1.05;
 const float CONTRAST = 0.5;
-
-// Normal-map influence beyond 1.0 exaggerates scratches, grain and weave.
-const float GRIT_NORMAL_BOOST = 1.25;
 
 // Metal is an env mask of at least this much (Skyrim _m.dds).
 const float METAL_MASK = 0.3;
@@ -182,6 +179,9 @@ vec3 subsurface_scatter(vec2 uv, vec3 center, vec3 color, vec3 normal, float pix
         }
         float sample_weight = i < 4 ? 1.6 : 0.9;
         if (scene_normal(sample_uv, sample_normal)) {
+            if (dot(sample_normal, normal) < 0.0) {
+                sample_normal = -sample_normal;
+            }
             sample_weight *= smoothstep(0.55, 0.9, dot(normal, sample_normal));
         }
         sum += texture(u_scene_color, sample_uv).rgb * sample_weight;
@@ -277,36 +277,46 @@ void main() {
     bool light_on = dot(u_key_light, u_key_light) > 0.25;
     vec3 light = normalize(light_on ? u_key_light : FALLBACK_LIGHT);
 
-    // Silhouette pixels without a depth normal keep their diffuse, as in
-    // Standard, but still get highlights and rim from their own shading normal.
+    // Depth geometry controls contact shading, never the lighting normal.
     vec3 geometric;
     float pixel_size;
     bool has_geometry = depth_normal(v_uv, center, geometric, pixel_size);
     vec3 normal;
-    if (!scene_normal(v_uv, normal) || (has_geometry && dot(normal, geometric) <= 0.1)) {
-        normal = has_geometry ? geometric : vec3(0.0, 0.0, 1.0);
+    bool has_normal = scene_normal(v_uv, normal);
+    if (has_normal && has_geometry) {
+        if (dot(normal, geometric) < 0.0) {
+            normal = -normal;
+        }
+        has_normal = dot(normal, geometric) >= 0.15;
     }
     float occlusion = 0.0;
     float lit = smoothstep(0.08, 0.55, dot(color, LUMINANCE));
-    if (has_geometry) {
-        // Skin keeps its normal map as authored; armour, leather and cloth grit is boosted.
-        normal = normalize(mix(geometric, normal, mix(GRIT_NORMAL_BOOST, 1.0, skin)));
+    if (has_normal) {
         if (light_on) {
             color = relight(color, normal, light, scatter, lit);
         }
-        if (scatter > 0.0) {
+        if (scatter > 0.0 && has_geometry) {
             color = subsurface_scatter(v_uv, center, color, normal, pixel_size,
                                        SSS_TINT / SSS_TINT.r, scatter);
         }
-        occlusion = contact_occlusion(v_uv, center, geometric, normal, pixel_size)
+        if (has_geometry) {
+            occlusion = contact_occlusion(v_uv, center, geometric, normal, pixel_size)
+                * (1.0 - 0.45 * scatter);
+        }
+        color *= 1.0 - occlusion;
+    } else if (has_geometry) {
+        occlusion = contact_occlusion(v_uv, center, geometric, geometric, pixel_size)
             * (1.0 - 0.45 * scatter);
         color *= 1.0 - occlusion;
     }
 
     vec3 view = normalize(-center);
     float visibility = 1.0 - min(occlusion * 2.5, 0.85);
-    vec3 shine = armor_specular(v_uv, center, color, normal, light, flags, visibility)
-        + moon_rim(normal, view, light) * visibility;
+    vec3 shine = vec3(0.0);
+    if (has_normal) {
+        shine = armor_specular(v_uv, center, color, normal, light, flags, visibility)
+            + moon_rim(normal, view, light) * visibility;
+    }
 
     color = mix(vec3(dot(color, LUMA_601)), color, ALBEDO_SATURATION);
     color *= mix(SHADOW_GRADE, LIT_GRADE, clamp(lit, 0.0, 1.0));

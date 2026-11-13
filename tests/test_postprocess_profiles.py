@@ -1,6 +1,5 @@
 import json
 import os
-import struct
 from unittest.mock import MagicMock
 
 import glm
@@ -14,8 +13,6 @@ from src.shader_presets import (
     NO_POSTPROCESS,
     PostProcessProfile,
     load_postprocess_profile,
-    load_preset_label,
-    load_preset_uniforms,
 )
 from src.viewport import _SHADER_DIR, OutfitViewportWidget
 
@@ -60,50 +57,17 @@ def test_invalid_profile_is_rejected(tmp_path, payload):
         load_postprocess_profile(fragment)
 
 
-def test_label_and_uniforms_are_optional(tmp_path):
-    assert load_preset_label(tmp_path / "look.frag") is None
-    assert load_preset_uniforms(tmp_path / "look.frag") == {}
-    fragment = write_metadata(tmp_path, {"postprocess": {}})
-    assert load_preset_label(fragment) is None
-    assert load_preset_uniforms(fragment) == {}
-
-
-def test_label_and_uniforms_are_read(tmp_path):
+def test_legacy_metadata_does_not_change_postprocessing_or_filename_label(tmp_path):
     fragment = write_metadata(tmp_path, {
-        "label": "  Silk (Velvet / Sheen) ",
-        "uniforms": {"u_sheen_intensity": 2, "u_tint": [1, 0.5, 0.25]},
+        "label": "Old label",
+        "uniforms": {"u_sheen_intensity": 2},
+        "postprocess": {"enable_gtao": True},
     })
-    assert load_preset_label(fragment) == "Silk (Velvet / Sheen)"
-    assert load_preset_uniforms(fragment) == {
-        "u_sheen_intensity": 2.0, "u_tint": (1.0, 0.5, 0.25),
-    }
-    # The post-process section is independent of them.
-    assert load_postprocess_profile(fragment) == NO_POSTPROCESS
-
-
-@pytest.mark.parametrize("label", ["", "   ", 3, "x" * 65])
-def test_invalid_label_is_rejected(tmp_path, label):
-    with pytest.raises(ValueError, match="look.json"):
-        load_preset_label(write_metadata(tmp_path, {"label": label}))
-
-
-@pytest.mark.parametrize("uniforms", [
-    [], {"sheen": 1.0}, {"u_": 1.0}, {"u_a-b": 1.0}, {"u_key_light": [0, 0, 1]},
-    {"u_x": "1"}, {"u_x": True}, {"u_x": float("inf")}, {"u_x": [1]},
-    {"u_x": [1, 2, 3, 4, 5]}, {"u_x": [1, "2"]},
-])
-def test_invalid_uniforms_are_rejected(tmp_path, uniforms):
-    with pytest.raises(ValueError, match="look.json"):
-        load_preset_uniforms(write_metadata(tmp_path, {"uniforms": uniforms}))
-
-
-def test_discovery_falls_back_to_file_name_for_bad_labels(tmp_path, caplog):
-    (tmp_path / "soft_cloth.frag").write_text("", encoding="utf-8")
-    (tmp_path / "soft_cloth.json").write_text(json.dumps({"label": 5}), encoding="utf-8")
+    fragment.write_text("", encoding="utf-8")
+    assert load_postprocess_profile(fragment).enable_gtao
     assert OutfitViewportWidget._discover_shader_presets(tmp_path) == (
-        ("soft_cloth", "Soft Cloth"),
+        ("look", "Look"),
     )
-    assert "soft_cloth" in caplog.text
 
 
 def test_malformed_json_is_rejected(tmp_path):
@@ -113,15 +77,13 @@ def test_malformed_json_is_rejected(tmp_path):
 
 
 def test_builtin_presets_configure_postprocess():
+    for sidecar in _SHADER_DIR.glob("*.json"):
+        assert set(json.loads(sidecar.read_text(encoding="utf-8"))) == {"postprocess"}
     realistic = load_postprocess_profile(_SHADER_DIR / "realistic.frag")
     assert realistic.enable_gtao and realistic.enable_ssss
     assert 0.0 < realistic.gtao_intensity < 1.0
     assert 0.0 < realistic.sss_strength < 0.5
-    anime = load_postprocess_profile(_SHADER_DIR / "anime.frag")
-    assert anime.enable_gtao and anime.enable_ssss
-    assert anime.gtao_intensity <= realistic.gtao_intensity
-    assert anime.sss_strength <= realistic.sss_strength
-    assert not realistic.ssss_after_preset and not anime.ssss_after_preset
+    assert not realistic.ssss_after_preset
     glossy = load_postprocess_profile(_SHADER_DIR / "glossy.frag")
     assert glossy.enable_gtao and glossy.enable_ssss and glossy.ssss_after_preset
     assert glossy.sss_strength > realistic.sss_strength
@@ -329,40 +291,14 @@ def test_invalid_profile_keeps_preset_without_effects(viewport, monkeypatch, cap
 
 
 
-def test_selecting_preset_loads_its_uniforms_and_none_clears_them(viewport):
-    del viewport._ensure_selected_shader_preset
-    viewport.settings.shader_preset = "glossy"
-    viewport._ensure_selected_shader_preset()
-    assert viewport.preset_uniforms == load_preset_uniforms(_SHADER_DIR / "glossy.frag")
-    viewport.settings.shader_preset = "none"
-    viewport._ensure_selected_shader_preset()
-    assert viewport.preset_uniforms == {}
-
-
-def test_invalid_uniforms_keep_preset_with_shader_defaults(viewport, monkeypatch, caplog):
-    del viewport._ensure_selected_shader_preset
-
-    def reject(_path):
-         in caplog.text
-
-
-def test_preset_receives_sidecar_uniforms_and_drops_mismatched_ones(caplog):
+def test_preset_does_not_override_shader_specific_uniforms():
     program = MagicMock()
-    uniforms = {}
-    program.__getitem__.side_effect = lambda name: uniforms.setdefault(name, MagicMock())
-    program.__contains__.side_effect = lambda name: name in ("u_sheen_intensity", "u_bad")
-    bad = MagicMock()
-    type(bad).value = property(lambda _self: 0.0, MagicMock(side_effect=struct.error("float")))
-    uniforms["u_bad"] = bad
-    widget = MagicMock(preset_prog=program, preset_uniforms={
-        "u_sheen_intensity": 1.5, "u_bad": (1.0, 2.0), "u_unused": 3.0,
-    })
+    program.__contains__.side_effect = lambda name: name == "u_gloss_intensity"
+    widget = MagicMock(preset_prog=program)
     OutfitViewportWidget._composite_shader_preset(
         widget, MagicMock(), MagicMock(), glm.mat4(1.0), 8, 8
     )
-    assert uniforms["u_sheen_intensity"].value == 1.5
-    assert widget.preset_uniforms == {"u_sheen_intensity": 1.5, "u_unused": 3.0}
-    assert "u_bad" in caplog.text
+    assert all(call.args != ("u_gloss_intensity",) for call in program.__getitem__.call_args_list)
 
 
 def test_preset_receives_view_space_key_light():

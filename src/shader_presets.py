@@ -21,12 +21,6 @@ an SSSS mask (alpha). The built-in SSSS pass then runs after the preset,
 scattering only the masked diffuse, and adds the specular back unblurred.
 GTAO still runs before the preset.
 
-Two more optional top-level keys are read independently of "postprocess":
-`"label"` replaces the selector name derived from the file name, and
-`"uniforms"` maps preset `float`/`vecN` uniform names to a number or a list of
-2-4 numbers, set each frame the preset renders::
-
-    {"label": "Glossy (Oiled)", "uniforms": {"u_gloss_intensity": 1.0}}
 """
 
 from __future__ import annotations
@@ -35,7 +29,7 @@ import json
 import math
 from dataclasses import dataclass, fields
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Dict, Tuple
 
 
 @dataclass(frozen=True)
@@ -67,18 +61,6 @@ def preset_metadata_path(fragment_path: Path) -> Path:
     return fragment_path.with_suffix(".json")
 
 
-UniformValue = Union[float, Tuple[float, ...]]
-
-# Uniforms the viewport binds itself; a sidecar may not override them.
-_RESERVED_UNIFORMS = frozenset({
-    "u_scene_color", "u_scene_depth", "u_scene_normal", "u_material_normal",
-    "u_material_env_mask", "u_material_subsurface", "u_material_flags",
-    "u_viewport_size", "u_inverse_projection", "u_key_light",
-    "u_studio_cubemap", "u_view_to_world",
-})
-_MAX_LABEL_LENGTH = 64
-
-
 def _read_metadata(fragment_path: Path) -> Dict[str, Any]:
     """The sidecar's top-level object, or {} without one; raises ValueError if unreadable."""
     metadata_path = preset_metadata_path(fragment_path)
@@ -91,46 +73,6 @@ def _read_metadata(fragment_path: Path) -> Dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError(f"{metadata_path.name}: expected a JSON object")
     return data
-
-
-def load_preset_label(fragment_path: Path) -> Optional[str]:
-    """The sidecar's display label, or None to use the file name; raises ValueError if invalid."""
-    label = _read_metadata(fragment_path).get("label")
-    if label is None:
-        return None
-    if not isinstance(label, str) or not label.strip() or len(label.strip()) > _MAX_LABEL_LENGTH:
-        raise ValueError(
-            f"{preset_metadata_path(fragment_path).name}: \"label\" must be a non-empty "
-            f"string of at most {_MAX_LABEL_LENGTH} characters"
-        )
-    return label.strip()
-
-
-def load_preset_uniforms(fragment_path: Path) -> Dict[str, UniformValue]:
-    """The sidecar's uniform overrides; raises ValueError if any are invalid."""
-    name = preset_metadata_path(fragment_path).name
-    section = _read_metadata(fragment_path).get("uniforms", {})
-    if not isinstance(section, dict):
-        raise ValueError(f"{name}: \"uniforms\" must be an object")
-    uniforms: Dict[str, UniformValue] = {}
-    for uniform, value in section.items():
-        if not uniform.startswith("u_") or not uniform[2:].isidentifier():
-            raise ValueError(f"{name}: uniform name {uniform!r} must look like u_name")
-        if uniform in _RESERVED_UNIFORMS:
-            raise ValueError(f"{name}: uniform {uniform} is set by the viewport")
-        if _is_number(value):
-            uniforms[uniform] = float(value)
-        elif (
-            isinstance(value, list)
-            and 2 <= len(value) <= 4
-            and all(_is_number(component) for component in value)
-        ):
-            uniforms[uniform] = tuple(float(component) for component in value)
-        else:
-            raise ValueError(
-                f"{name}: uniform {uniform} must be a number or a list of 2-4 numbers"
-            )
-    return uniforms
 
 
 def load_postprocess_profile(fragment_path: Path) -> PostProcessProfile:

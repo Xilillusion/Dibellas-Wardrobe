@@ -132,7 +132,9 @@ class AppConfig:
 
         shader_preset = data.get("shader_preset")
         if isinstance(shader_preset, str):
-            cfg.shader_preset = "realistic" if shader_preset == "preset_1" else shader_preset
+            cfg.shader_preset = {"preset_1": "realistic", "simp": "simple"}.get(
+                shader_preset, shader_preset
+            )
 
         locked_presets = data.get("locked_presets")
         if isinstance(locked_presets, dict):

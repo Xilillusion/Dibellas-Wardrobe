@@ -98,6 +98,7 @@ in vec3 lightDirectional2;
 
 in vec3 viewDir;
 in vec3 n;
+in vec3 v_view_normal;
 in mat3 mv_tbn;
 
 in float maskFactor;
@@ -144,6 +145,13 @@ vec3 tonemap(in vec3 x)
 	const float F = 0.30;
 
 	return ((x * (A * x + C * B) + D * E) / (x * (A * x + B) + D * F)) - E / F;
+}
+
+vec3 view_shading_normal(vec3 candidate)
+{
+	float lengthSquared = dot(candidate, candidate);
+	return lengthSquared > 1.0e-12
+		? candidate * inversesqrt(lengthSquared) : normalize(v_view_normal);
 }
 
 void directionalLight(in DirectionalLight light, in vec3 lightDir, inout vec3 outDiffuse, inout vec3 outSpec)
@@ -209,6 +217,7 @@ void main(void)
 		return;
 	}
 	vec4 color = vColor;
+	normal = normalize(v_view_normal);
 	albedo = vColor.rgb;
 
 	// Skin or hair tint color
@@ -277,10 +286,9 @@ void main(void)
 				if (bModelSpace)
 				{
 					// Model Space Normal Map
-					normal = normalize(normalMap.rgb * 2.0 - 1.0);
+					normal = normalMap.rgb * 2.0 - 1.0;
 					normal.r = -normal.r;
-					normal = mv_tbn * normal;
-					normal = normalize(normal);
+					normal = view_shading_normal(mv_tbn * normal);
 
 					if (bSpecular)
 					{
@@ -294,7 +302,7 @@ void main(void)
 					vec3 tangentNormal = normalMap.rgb * 2.0 - 1.0;
 					if (normalMap.b < 0.01)
 						tangentNormal.b = sqrt(max(0.0, 1.0 - dot(tangentNormal.rg, tangentNormal.rg)));
-					normal = normalize(mv_tbn * tangentNormal);
+					normal = view_shading_normal(mv_tbn * tangentNormal);
 
 					if (bSpecular)
 					{
@@ -305,8 +313,7 @@ void main(void)
 			else
 			{
 				// Vertex normal for shading with disabled maps
-				normal = mv_normalMatrix * n;
-				normal = normalize(normal);
+				normal = normalize(v_view_normal);
 			}
 
 			shininess = prop.shininess;
@@ -437,9 +444,9 @@ void main(void)
 				discard;
 
 		fragColor.a *= prop.alpha;
-		vec3 shadingNormal = bLightEnabled ? normal : normalize(mv_normalMatrix * n);
-		if (dot(shadingNormal, shadingNormal) > 0.5)
-			fragNormal = vec4(shadingNormal * 0.5 + 0.5, 1.0);
+		// Encode the exact view-space normal used by directionalLight, including its fallback.
+		if (dot(normal, normal) > 0.5)
+			fragNormal = vec4(normal * 0.5 + 0.5, 1.0);
 		gl_FragDepth = gl_FragCoord.z;
 	}
 	else

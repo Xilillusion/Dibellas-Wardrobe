@@ -98,6 +98,10 @@ bool shading_normal_at(vec2 uv, out vec3 normal) {
     return true;
 }
 
+vec3 matching_hemisphere(vec3 normal, vec3 reference) {
+    return dot(normal, reference) < 0.0 ? -normal : normal;
+}
+
 bool surface_basis(vec2 uv, vec3 center, out vec3 normal, out float pixel_size) {
     vec2 texel = 1.0 / u_viewport_size;
     vec3 left, right, down, up;
@@ -172,7 +176,7 @@ float contact_occlusion(
 }
 
 float normal_cavity(
-    vec2 uv, vec3 center, vec3 geometric_normal, vec3 shading_normal, float pixel_size
+    vec2 uv, vec3 center, vec3 shading_normal, float pixel_size
 ) {
     const vec2 offsets[4] = vec2[](
         vec2(1.0, 0.0), vec2(-1.0, 0.0),
@@ -188,12 +192,12 @@ float normal_cavity(
         if (!neighbor_position(sample_uv, sample_position) ||
             abs(sample_position.z - center.z) > pixel_size * 0.8 ||
             !shading_normal_at(sample_uv, sample_normal) ||
-            dot(sample_normal, geometric_normal) <= 0.1 ||
-            dot(sample_normal, shading_normal) < 0.5) {
+            abs(dot(sample_normal, shading_normal)) < 0.5) {
             continue;
         }
+        sample_normal = matching_hemisphere(sample_normal, shading_normal);
         vec3 delta = sample_position - center;
-        vec3 tangent = delta - geometric_normal * dot(delta, geometric_normal);
+        vec3 tangent = delta - shading_normal * dot(delta, shading_normal);
         float tangent_length = length(tangent);
         if (tangent_length < 0.000001) {
             continue;
@@ -228,6 +232,7 @@ vec3 surface_detail(
         float sample_weight = 1.0;
         vec3 sample_normal;
         if (has_normal && shading_normal_at(sample_uv, sample_normal)) {
+            sample_normal = matching_hemisphere(sample_normal, normal);
             sample_weight = smoothstep(0.75, 0.95, dot(normal, sample_normal));
         }
         sum += texture(u_scene_color, sample_uv).rgb * sample_weight;
@@ -250,6 +255,7 @@ float normal_variance(vec2 uv, vec3 normal) {
     for (int i = 0; i < 4; ++i) {
         vec3 sample_normal;
         if (shading_normal_at(uv + offsets[i] * texel, sample_normal)) {
+            sample_normal = matching_hemisphere(sample_normal, normal);
             agreement += max(dot(normal, sample_normal), 0.0);
             samples += 1.0;
         }
@@ -260,7 +266,7 @@ float normal_variance(vec2 uv, vec3 normal) {
 // Light entering skin or similar materials exits nearby: blur lighting across
 // the same subsurface surface and bleed the _sk tint into the shadowed side.
 vec3 subsurface_scatter(
-    vec2 uv, vec3 center, vec3 color, vec3 geometric_normal, vec3 normal,
+    vec2 uv, vec3 center, vec3 color, vec3 normal,
     float pixel_size, Material material, float strength
 ) {
     // xy: pixel offset, z: tap distance, w: weight. Cardinal taps cover the near
@@ -281,7 +287,7 @@ vec3 subsurface_scatter(
         vec2 sample_uv = (floor(uv * u_viewport_size + taps[i].xy) + 0.5) * texel;
         vec3 sample_position;
         if (!neighbor_position(sample_uv, sample_position) ||
-            abs(dot(sample_position - center, geometric_normal)) >
+            abs(dot(sample_position - center, normal)) >
                 pixel_size * taps[i].z * 0.8 ||
             texture(u_material_flags, sample_uv).b <= 0.5) {
             continue;
@@ -289,6 +295,7 @@ vec3 subsurface_scatter(
         float sample_weight = taps[i].w;
         vec3 sample_normal;
         if (shading_normal_at(sample_uv, sample_normal)) {
+            sample_normal = matching_hemisphere(sample_normal, normal);
             sample_weight *= smoothstep(0.55, 0.9, dot(normal, sample_normal));
         }
         sum += texture(u_scene_color, sample_uv).rgb * sample_weight;
@@ -422,43 +429,50 @@ void main() {
 
     vec3 color = source.rgb;
     vec3 center = view_position(v_uv, depth);
-    vec3 normal;
+    vec3 geometric;
     float pixel_size;
-    if (surface_basis(v_uv, center, normal, pixel_size)) {
-        vec3 shading_normal;
-        bool has_normal = shading_normal_at(v_uv, shading_normal);
-        if (has_normal && dot(shading_normal, normal) <= 0.1) {
-            has_normal = false;
+    bool has_geometry = surface_basis(v_uv, center, geometric, pixel_size);
+    vec3 shading_normal;
+    bool has_normal = shading_normal_at(v_uv, shading_normal);
+    if (has_normal && has_geometry) {
+        if (dot(shading_normal, geometric) < 0.0) {
+            shading_normal = -shading_normal;
         }
-        vec3 contact_normal = normal;
+        has_normal = dot(shading_normal, geometric) >= 0.15;
+    }
+    if (has_normal) {
         Material material = material_at(v_uv);
         float scatter = subsurface_strength(material);
-        if (has_normal) {
-            contact_normal = normalize(mix(normal, shading_normal, 0.35));
-            color *= 1.0 - normal_cavity(v_uv, center, normal, shading_normal, pixel_size)
+        if (has_geometry) {
+            color *= 1.0 - normal_cavity(v_uv, center, shading_normal, pixel_size)
                 * (1.0 - 0.6 * scatter);
-        } else {
-            shading_normal = normal;
         }
         vec3 light = key_light_direction();
         if (scene_light_on()) {
             color = relight(color, shading_normal, light, scatter);
         }
-        color = surface_detail(
-            v_uv, center, color, pixel_size, shading_normal, has_normal,
-            0.18 * (1.0 - 0.45 * scatter)
-        );
-        if (scatter > 0.0) {
-            color = subsurface_scatter(
-                v_uv, center, color, normal, shading_normal, pixel_size, material, scatter
+        if (has_geometry) {
+            color = surface_detail(
+                v_uv, center, color, pixel_size, shading_normal, true,
+                0.18 * (1.0 - 0.45 * scatter)
             );
         }
-        float occlusion = contact_occlusion(v_uv, center, normal, contact_normal, pixel_size)
-            * (1.0 - 0.45 * scatter);
+        if (scatter > 0.0 && has_geometry) {
+            color = subsurface_scatter(
+                v_uv, center, color, shading_normal, pixel_size, material, scatter
+            );
+        }
+        float occlusion = has_geometry
+            ? contact_occlusion(v_uv, center, geometric, shading_normal, pixel_size)
+                * (1.0 - 0.45 * scatter)
+            : 0.0;
         color *= 1.0 - occlusion;
         color += material_specular(
             v_uv, center, color, shading_normal, light, material, occlusion
         );
+    } else if (has_geometry) {
+        color = surface_detail(v_uv, center, color, pixel_size, vec3(0.0), false, 0.18);
+        color *= 1.0 - contact_occlusion(v_uv, center, geometric, geometric, pixel_size);
     }
 
     color *= EXPOSURE;
