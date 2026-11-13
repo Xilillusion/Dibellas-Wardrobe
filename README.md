@@ -99,16 +99,16 @@ If PowerShell prevents virtual-environment activation, run the Python executable
 
 ## Build the SMP physics library
 
-HDT-SMP cloth physics runs in `smp_bridge/SmpBridge`, a C# project (BulletSharp) compiled with .NET Native AOT into a plain native `SmpBridge.dll` that Python loads with `ctypes`. No .NET runtime is needed to run the app, but building the library needs:
+HDT-SMP cloth physics runs in `smp_bridge`, a C# project (BulletSharp) compiled with .NET Native AOT into a plain native `SmpBridge.dll` that Python loads with `ctypes`. No .NET runtime is needed to run the app, but building the library needs:
 
 - the .NET 8 SDK, and
 - the Visual Studio "Desktop development with C++" build tools (the Native AOT linker).
 
 ```powershell
-dotnet publish smp_bridge/SmpBridge -c Release -r win-x64
+dotnet publish smp_bridge -c Release -r win-x64
 ```
 
-The output in `smp_bridge/SmpBridge/bin/Release/net8.0/win-x64/publish/` must contain `SmpBridge.dll` and `libbulletc.dll`; the app finds them there automatically. Set the `SMP_BRIDGE_DIR` environment variable to load them from another folder.
+The output in `smp_bridge/bin/Release/net8.0/win-x64/publish/` must contain `SmpBridge.dll` and `libbulletc.dll`; the app finds them there automatically. Set the `SMP_BRIDGE_DIR` environment variable to load them from another folder.
 
 ### How SMP physics is applied
 
@@ -154,7 +154,7 @@ Then run the release script from the project directory:
 python build_release.py
 ```
 
-The script publishes the SMP bridge (`dotnet publish`), cleans `build/` and `dist/`, builds with `package.spec`, validates the executable and bundled runtime assets (including `SmpBridge.dll` and `libbulletc.dll`), and writes a portable ZIP under `dist/`. Version is read from `VERSION`, `version.txt`, or the optional `version` field in `config.json`, in that order; if none is present, it defaults to `0.1.0`.
+The script publishes the SMP bridge (`dotnet publish`), cleans `build/` and `dist/`, builds with `package.spec`, validates the executable and bundled runtime assets (including `SmpBridge.dll` and `libbulletc.dll`), and writes a portable ZIP under `dist/`. Pass `--version 1.2.0` to set the release version; otherwise it is read from `VERSION`, `version.txt`, or the optional `version` field in `config.json`, in that order, and defaults to `0.1.0` if none is present.
 
 The release starts with default settings rather than including the builder's `config.json`. Settings are saved in the portable distribution when the app closes.
 

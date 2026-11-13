@@ -8,13 +8,13 @@ from PyInstaller.utils.hooks import collect_submodules
 ROOT = Path(SPECPATH).resolve()
 NIFLY_ROOT = ROOT / "io_scene_nifly"
 HKX_ROOT = NIFLY_ROOT / "hkx"
-SMP_PUBLISH = ROOT / "smp_bridge" / "SmpBridge" / "bin" / "Release" / "net8.0" / "win-x64" / "publish"
+SMP_PUBLISH = ROOT / "smp_bridge" / "bin" / "Release" / "net8.0" / "win-x64" / "publish"
 SMP_LIBRARIES = ("SmpBridge.dll", "libbulletc.dll")
 for library in SMP_LIBRARIES:
     if not (SMP_PUBLISH / library).is_file():
         raise SystemExit(
             f"{library} is missing from {SMP_PUBLISH}. "
-            "Build it first: dotnet publish smp_bridge/SmpBridge -c Release -r win-x64"
+            "Build it first: dotnet publish smp_bridge -c Release -r win-x64"
         )
 sys.path.insert(0, str(NIFLY_ROOT))
 sys.path.insert(0, str(HKX_ROOT))

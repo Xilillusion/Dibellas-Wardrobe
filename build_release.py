@@ -20,7 +20,7 @@ from typing import Optional, Sequence
 ROOT = Path(__file__).resolve().parent
 APP_NAME = "DibellaWardrobe"
 SPEC_PATH = ROOT / "package.spec"
-SMP_PROJECT = ROOT / "smp_bridge" / "SmpBridge"
+SMP_PROJECT = ROOT / "smp_bridge"
 SMP_PUBLISH_DIR = SMP_PROJECT / "bin" / "Release" / "net8.0" / "win-x64" / "publish"
 SMP_LIBRARIES = ("SmpBridge.dll", "libbulletc.dll")
 SMAA_ASSETS = (
@@ -216,7 +216,7 @@ def build_native_library(skip: bool = False) -> None:
     if missing:
         raise BuildError(
             f"SMP bridge libraries are missing from {SMP_PUBLISH_DIR}: {', '.join(missing)}\n"
-            "Build them with:\n  dotnet publish smp_bridge/SmpBridge -c Release -r win-x64"
+            "Build them with:\n  dotnet publish smp_bridge -c Release -r win-x64"
         )
     log(f"SMP bridge libraries ready in {SMP_PUBLISH_DIR}")
 

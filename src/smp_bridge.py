@@ -1,7 +1,7 @@
 """
 HDT-SMP cloth physics bridge: a zero-copy ``ctypes`` binding to the Native AOT ``SmpBridge.dll``.
 
-``SmpBridge.dll`` (``smp_bridge/SmpBridge``, C# + BulletSharp compiled with Native AOT) steps a Bullet world with
+``SmpBridge.dll`` (``smp_bridge``, C# + BulletSharp compiled with Native AOT) steps a Bullet world with
 6DOF spring constraints parsed from an outfit's SMP XML. It is a plain C ABI loaded with ``ctypes.CDLL``, so it needs
 no managed runtime, and per-frame data moves through preallocated contiguous float32 NumPy buffers whose raw
 pointers are handed to the native side: a step allocates nothing on either side of the boundary.
@@ -38,7 +38,7 @@ _RESOURCE_ROOT = Path(getattr(sys, "_MEIPASS", _REPO_ROOT))
 DLL_NAME = "SmpBridge.dll"
 BULLET_DLL_NAME = "libbulletc.dll"
 ENV_DIR = "SMP_BRIDGE_DIR"
-PUBLISH_DIR = _REPO_ROOT / "smp_bridge" / "SmpBridge" / "bin" / "Release" / "net8.0" / "win-x64" / "publish"
+PUBLISH_DIR = _REPO_ROOT / "smp_bridge" / "bin" / "Release" / "net8.0" / "win-x64" / "publish"
 # Must equal SmpExports.AbiVersion in SmpBridge.cs.
 ABI_VERSION = 3
 
@@ -87,7 +87,7 @@ class SmpNative:
             searched = ", ".join(str(p) for p in native_search_dirs(directory))
             raise SmpBridgeError(
                 f"{DLL_NAME} and {BULLET_DLL_NAME} were not found (searched: {searched}). "
-                "Build them with: dotnet publish smp_bridge/SmpBridge -c Release -r win-x64"
+                "Build them with: dotnet publish smp_bridge -c Release -r win-x64"
             )
         self.directory = found
         self._dll_dir = os.add_dll_directory(str(found)) if hasattr(os, "add_dll_directory") else None
