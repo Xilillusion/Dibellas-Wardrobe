@@ -35,9 +35,9 @@ analysis = Analysis(
         (str(ROOT / "assets" / "CBPConfig.json"), "assets"),
         (str(ROOT / "assets" / "CITATION.md"), "assets"),
         (str(ROOT / "locales.json"), "."),
-        (str(ROOT / "icon.png"), "."),
+        (str(ROOT / "dibellas-wardrobe.ico"), "."),
     ],
-    hiddenimports=collect_submodules("pyn") + ["anim_fo4", "anim_skyrim"],
+    hiddenimports=collect_submodules("pyn") + collect_submodules("numpy._core") + ["anim_fo4", "anim_skyrim"],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -57,9 +57,10 @@ executable = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,
     console=False,
     disable_windowed_traceback=False,
+    icon=str(ROOT / "dibellas-wardrobe.ico"),
 )
 
 distribution = COLLECT(
@@ -67,7 +68,6 @@ distribution = COLLECT(
     analysis.binaries,
     analysis.datas,
     strip=False,
-    upx=True,
-    upx_exclude=["SmpBridge.dll", "libbulletc.dll"],
+    upx=False,
     name="DibellaWardrobe",
 )

@@ -1,5 +1,5 @@
 """
-Dibella's Wardrobe — Standalone Skyrim SE/AE Outfit Previewer
+Dibella's Wardrobe â€” Standalone Skyrim SE/AE Outfit Previewer
 
 Usage:
     D:/Python/python.exe main.py [--root <path_to_mods_folder>] [--body <path_to_femalebody_1.nif>]
@@ -44,7 +44,7 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("Dibella's Wardrobe")
     base_dir = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
-    icon = QIcon(str(base_dir / "icon.png"))
+    icon = QIcon(str(base_dir / "dibellas-wardrobe.ico"))
     app.setWindowIcon(icon)
 
     window = DibellasWardrobeWindow(
