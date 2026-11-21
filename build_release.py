@@ -18,7 +18,7 @@ from typing import Optional, Sequence
 
 
 ROOT = Path(__file__).resolve().parent
-APP_NAME = "DibellaWardrobe"
+APP_NAME = "Dibella's Wardrobe"
 SPEC_PATH = ROOT / "package.spec"
 SMP_PROJECT = ROOT / "smp_bridge"
 SMP_PUBLISH_DIR = SMP_PROJECT / "bin" / "Release" / "net8.0" / "win-x64" / "publish"

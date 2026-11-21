@@ -53,7 +53,7 @@ executable = EXE(
     analysis.scripts,
     [],
     exclude_binaries=True,
-    name="DibellaWardrobe",
+    name="Dibella's Wardrobe",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -69,5 +69,5 @@ distribution = COLLECT(
     analysis.datas,
     strip=False,
     upx=False,
-    name="DibellaWardrobe",
+    name="Dibella's Wardrobe",
 )

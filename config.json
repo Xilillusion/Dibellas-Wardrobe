@@ -1,7 +1,7 @@
 {
   "default_folder": "E:\\Skyrim\\Dibellas-Wardrobe\\sample",
   "language": "en",
-  "shader_preset": "realistic",
+  "shader_preset": "vivid",
   "lighting": {
     "light_azimuth_deg": 110.0,
     "light_elevation_deg": 28.0,
@@ -22,7 +22,6 @@
     "show_ground_grid": false
   },
   "cbpc": {
-    "enabled": true,
     "gravity": 0.0,
     "softness": {
       "breasts": 5.0,
