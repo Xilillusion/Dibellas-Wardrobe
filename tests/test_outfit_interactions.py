@@ -206,8 +206,8 @@ class OutfitInteractionTests(unittest.TestCase):
         self.window = DibellasWardrobeWindow(initial_root_dir=root, config_path=config_path)
         overlay = self.window.viewport.cbpc_overlay
         expected = {
-            "zh": ("启用 CBPC 物理", ("重力", "胸部柔软度", "臀部柔软度", "腹部柔软度", "大腿柔软度")),
-            "en": ("Enable CBPC Physics", ("Gravity", "Breasts softness", "Butt softness", "Belly softness", "Thigh softness")),
+            "zh": ("重力", "胸部柔软度", "臀部柔软度", "腹部柔软度", "大腿柔软度"),
+            "en": ("Gravity", "Breasts softness", "Butt softness", "Belly softness", "Thigh softness"),
         }
         keys = ("gravity", "breasts", "butt", "belly", "thigh")
         changes = []
@@ -217,10 +217,9 @@ class OutfitInteractionTests(unittest.TestCase):
             self.window.language_combo.setCurrentIndex(self.window.language_combo.findData(language))
             self.assertEqual(self.window.language, language)
             self.assertEqual(overlay.parentWidget().title(), {"zh": "物理", "en": "Physics"}[language])
-            self.assertEqual(overlay.checkbox.text(), expected[language][0])
-            self.assertEqual(tuple(overlay.captions[key].text() for key in keys), expected[language][1])
+            self.assertEqual(tuple(overlay.captions[key].text() for key in keys), expected[language])
             sliders = (overlay.slider, *(overlay.softness_sliders[key] for key in keys[1:]))
-            self.assertEqual(tuple(slider.accessibleName() for slider in sliders), expected[language][1])
+            self.assertEqual(tuple(slider.accessibleName() for slider in sliders), expected[language])
         self.assertEqual(changes, [])
 
     def test_settings_button_controls_physics_panel_visibility(self):
@@ -250,8 +249,6 @@ class OutfitInteractionTests(unittest.TestCase):
         viewport = self.window.viewport
         overlay = viewport.cbpc_overlay
         self.assertIs(overlay.layout().itemAt(0).widget(), overlay.smp_checkbox)
-        self.assertIs(overlay.layout().itemAt(1).widget(), overlay.checkbox)
-        self.assertEqual(overlay.smp_checkbox.styleSheet(), overlay.checkbox.styleSheet())
         self.assertEqual(overlay.smp_checkbox.text(), "Enable SMP Physics")
         self.assertFalse(self.window.anim_toolbar.isVisible())
         self.window.btn_settings.click()
@@ -273,7 +270,6 @@ class OutfitInteractionTests(unittest.TestCase):
         self.assertTrue(self.window.viewport.smp.enabled)
         self.window.language_combo.setCurrentIndex(self.window.language_combo.findData("zh"))
         self.assertEqual(overlay.smp_checkbox.text(), "启用 SMP 物理")
-        self.assertEqual(overlay.checkbox.text(), "启用 CBPC 物理")
 
     @patch("src.smp_bridge.SmpBridgeSolver.available", new_callable=PropertyMock, return_value=True)
     def test_smp_unavailable_state_and_tooltip_follow_language(self, _available):

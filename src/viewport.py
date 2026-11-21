@@ -81,7 +81,7 @@ class ViewportRenderSettings:
     light_intensity: float = 0.85
     ambient_intensity: float = 0.45
     specular_multiplier: float = 1.0
-    env_reflection_multiplier: float = 1.0
+    env_reflection_multiplier: float = 0.0
 
     enable_lighting: bool = True
     show_textures: bool = True
@@ -192,7 +192,6 @@ class OutfitViewportWidget(QOpenGLWidget):
             self, GRAVITY_MIN, GRAVITY_MAX, (SOFTNESS_MIN, SOFTNESS_MAX)
         )
         self.cbpc_overlay.hide()
-        self.cbpc_overlay.enabledChanged.connect(self.set_cbpc_enabled)
         self.cbpc_overlay.smpEnabledChanged.connect(self.set_smp_enabled)
         self.cbpc_overlay.gravityChanged.connect(self.set_cbpc_gravity)
         self.cbpc_overlay.softnessChanged.connect(self.set_cbpc_softness)
@@ -554,12 +553,6 @@ class OutfitViewportWidget(QOpenGLWidget):
     # CBPC physics control
     # ------------------------------------------------------------------
 
-    def set_cbpc_enabled(self, enabled: bool) -> None:
-        self.cbpc.set_enabled(enabled)
-        if enabled:
-            self._update_pose(self._anim_current_time, 0.0, reset=True)
-        self._refresh_pose()
-
     def set_cbpc_gravity(self, factor: float) -> None:
         """Adjust breast rest position without rebuilding or restarting animation."""
         self.cbpc.set_gravity(factor)
@@ -615,10 +608,8 @@ class OutfitViewportWidget(QOpenGLWidget):
 
     def _sync_cbpc_overlay(self) -> None:
         self.cbpc_overlay.sync(
-            self.cbpc.enabled,
             self.cbpc.has_physics,
             self.cbpc.gravity,
-            len(self.cbpc.active_bones),
             self.cbpc.softness,
         )
     def grab_viewport_image(self) -> np.ndarray:

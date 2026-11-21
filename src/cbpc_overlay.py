@@ -14,9 +14,8 @@ SOFTNESS_STEPS = 2  # slider resolution: 1.0x == 2
 
 
 class CbpcOverlay(QFrame):
-    """SMP and CBPC enable, breast gravity, and per-area softness controls."""
+    """SMP enable, CBPC breast gravity, and per-area softness controls."""
 
-    enabledChanged = Signal(bool)
     smpEnabledChanged = Signal(bool)
     gravityChanged = Signal(float)
     softnessChanged = Signal(str, float)
@@ -35,7 +34,6 @@ class CbpcOverlay(QFrame):
         self.smp_checkbox = QCheckBox("Enable SMP Physics", self)
         self._smp_tooltip = ""
         self._smp_unavailable_tip = ""
-        self.checkbox = QCheckBox("Enable CBPC Physics", self)
         self.slider = QSlider(Qt.Orientation.Horizontal, self)
         self.slider.setRange(round(minimum * STEPS_PER_UNIT), round(maximum * STEPS_PER_UNIT))
         self.slider.setTickPosition(QSlider.TickPosition.TicksBelow)
@@ -49,7 +47,6 @@ class CbpcOverlay(QFrame):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
         layout.addWidget(self.smp_checkbox)
-        layout.addWidget(self.checkbox)
         layout.addLayout(self._row("gravity", "Gravity", self.slider, self.label))
         for group, caption in (("breasts", "Breasts"), ("butt", "Butt"), ("belly", "Belly"), ("thigh", "Thigh")):
             slider = QSlider(Qt.Orientation.Horizontal, self)
@@ -64,7 +61,6 @@ class CbpcOverlay(QFrame):
             slider.valueChanged.connect(lambda value, group=group: self._on_softness(group, value))
 
         self.smp_checkbox.toggled.connect(self.smpEnabledChanged)
-        self.checkbox.toggled.connect(self.enabledChanged)
         self.slider.valueChanged.connect(self._on_slider)
         self._update_label()
         for group in self.softness_sliders:
@@ -113,22 +109,20 @@ class CbpcOverlay(QFrame):
     def _apply_smp_tooltip(self) -> None:
         self.smp_checkbox.setToolTip(self._smp_unavailable_tip or self._smp_tooltip)
 
-    def sync(self, enabled: bool, available: bool, gravity: float, bone_count: int = 0,
+    def sync(self, available: bool, gravity: float,
              softness: Optional[Mapping[str, float]] = None) -> None:
         """Reflect manager state without emitting change signals."""
-        controls = (self.checkbox, self.slider, *self.softness_sliders.values())
+        controls = (self.slider, *self.softness_sliders.values())
         for w in controls:
             w.blockSignals(True)
-        self.checkbox.setEnabled(available)
-        self.slider.setEnabled(available and enabled)
-        self.label.setEnabled(available and enabled)
+        self.slider.setEnabled(available)
+        self.label.setEnabled(available)
         for group, slider in self.softness_sliders.items():
-            slider.setEnabled(available and enabled)
-            self.softness_labels[group].setEnabled(available and enabled)
+            slider.setEnabled(available)
+            self.softness_labels[group].setEnabled(available)
             slider.setValue(round((softness[group] if softness is not None else 1.0) * SOFTNESS_STEPS))
         for c in self.captions.values():
-            c.setEnabled(available and enabled)
-        self.checkbox.setChecked(bool(enabled and available))
+            c.setEnabled(available)
         self.slider.setValue(round(gravity * STEPS_PER_UNIT))
         for w in controls:
             w.blockSignals(False)

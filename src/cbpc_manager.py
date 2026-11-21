@@ -69,7 +69,6 @@ class CbpcManager:
         self.collider_nodes = set(collision.get("collider_nodes", ()))
         if self.collision_nodes and "collider_nodes" not in collision:
             log.error("CBPC collision config %s is missing collider_nodes", config_path or CBPC_CONFIG_PATH)
-        self.enabled: bool = True
         self.gravity: float = DEFAULT_GRAVITY
         self.softness: Dict[str, float] = dict.fromkeys(SOFTNESS_GROUPS, 1.0)
         self.solver = CbpcSolver()
@@ -90,10 +89,7 @@ class CbpcManager:
 
     @property
     def is_active(self) -> bool:
-        return self.enabled and self.has_physics
-
-    def set_enabled(self, enabled: bool) -> None:
-        self.enabled = bool(enabled)
+        return self.has_physics
 
     def set_gravity(self, factor: float) -> None:
         """Adjust the breast rest position without changing spring dynamics."""
