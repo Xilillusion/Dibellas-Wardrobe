@@ -9,6 +9,7 @@ from src.viewport import OutfitViewportWidget
 from test_shader_presets import (  # noqa: F401
     SHADERS,
     _material_scene,
+    _material_maps,
     shader_renderer_factory,
 )
 
@@ -99,3 +100,47 @@ def test_simple_invalid_normals_do_not_create_lighting_artifacts(simple_renderer
     shadow = simple_renderer(color, depth, normals, key_light=(0, 0, -1))
     np.testing.assert_allclose(lit, shadow, atol=1e-6)
     assert np.isfinite(lit).all()
+
+
+def test_simple_glossy_discovery_and_postprocessing():
+    assert ("simple_glossy", "Simple Glossy") in OutfitViewportWidget._discover_shader_presets()
+    assert load_postprocess_profile(SHADERS / "simple_glossy.frag") == load_postprocess_profile(
+        SHADERS / "simple.frag"
+    )
+
+
+def test_simple_glossy_keeps_simple_base_and_adds_masked_highlights(
+    shader_renderer_factory, simple_renderer,
+):
+    color, depth, normals = _material_scene(value=0.4)
+    color[..., 3] = 0.7
+    depth[:4] = 1.0
+    skin = _material_maps(subsurface=(0.0, 0.0, 0.0, 0.0))
+    cloth = _material_maps(env_mask=(1.0, 1.0, 1.0, 1.0))
+
+    def render(maps=None, **uniforms):
+        return shader_renderer_factory(
+            "simple_glossy", color, depth, normals, maps, (0.0, 0.0, 1.0),
+            uniforms=uniforms,
+        )
+
+    base = simple_renderer(color, depth, normals, key_light=(0.0, 0.0, 1.0))
+    disabled = render(skin, u_gloss_intensity=0.0)
+    np.testing.assert_allclose(disabled, base, atol=1e-6)
+    matte = render(u_gloss_intensity=1.0)
+    np.testing.assert_allclose(matte, base, atol=1e-6)
+    for maps in (skin, cloth):
+        glossy = render(maps)
+        assert glossy[24, 24, 0] > base[24, 24, 0] + 1.0
+        np.testing.assert_allclose(glossy[:4], base[:4], atol=1e-6)
+        np.testing.assert_allclose(glossy[..., 3], 0.7, atol=1e-6)
+        assert np.isfinite(glossy).all()
+    half = render(skin, u_gloss_intensity=0.5)
+    full = render(skin, u_gloss_intensity=1.0)
+    np.testing.assert_allclose(half[..., :3] - base[..., :3],
+                               (full[..., :3] - base[..., :3]) * 0.5, atol=1e-5)
+    normals[..., 3] = 0.0
+    invalid = render(skin)
+    np.testing.assert_allclose(invalid, simple_renderer(
+        color, depth, normals, key_light=(0.0, 0.0, 1.0)
+    ), atol=1e-6)

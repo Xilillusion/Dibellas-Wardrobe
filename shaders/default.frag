@@ -286,10 +286,16 @@ void main(void)
 				if (bModelSpace)
 				{
 					// Model Space Normal Map
+					/*
 					normal = normalMap.rgb * 2.0 - 1.0;
 					normal.r = -normal.r;
 					normal = view_shading_normal(mv_tbn * normal);
+					*/
 
+					// Model Space Normal Map: already aligned without mv_normalMatrix distortion
+					normal = normalMap.rgb * 2.0 - 1.0;
+					normal.r = -normal.r;
+					normal = normalize(normal);
 					if (bSpecular)
 					{
 						specFactor = specMap.r;

@@ -15,7 +15,7 @@ const float BACKGROUND_DEPTH = 0.999999;
 const vec3 LUMINANCE = vec3(0.2126, 0.7152, 0.0722);
 const float EXPOSURE = 1.12;
 const float CONTRAST = 0.45;
-const float SATURATION = 1.15;
+const float SATURATION = 1.20;
 
 void main() {
     vec4 source = texture(u_scene_color, v_uv);

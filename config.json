@@ -1,14 +1,14 @@
 {
-  "default_folder": "E:\\Skyrim\\MO2\\mods",
+  "default_folder": "E:\\Skyrim\\Dibellas-Wardrobe\\sample",
   "language": "en",
-  "shader_preset": "none",
+  "shader_preset": "anime",
   "lighting": {
     "light_azimuth_deg": 110.0,
     "light_elevation_deg": 28.0,
     "light_intensity": 0.85,
     "ambient_intensity": 0.45,
     "specular_multiplier": 1.0,
-    "env_reflection_multiplier": 1.0
+    "env_reflection_multiplier": 0.0
   },
   "effects": {
     "enable_smaa": true,
@@ -57,7 +57,19 @@
       "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\pantyt2_1.nif",
       "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\topint_1.nif",
       "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\topoutmet_1.nif",
-      "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\topoutsmpt_1.nif"
+      "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\meshes\\Coco_Cloths\\Mysterious Mage\\topoutsmpt_1.nif",
+      "E:\\Skyrim\\MO2\\overwrite\\SKSE\\Plugins\\CharGen\\Waifu.nif"
+    ],
+    "3": [
+      "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\CBBE 3BA\\meshes\\actors\\character\\character assets\\femalehands_1.nif",
+      "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\COCO Ahri Uniforms\\meshes\\Coco_Cloths\\Ahri_uniforms_v2\\bra_1.nif",
+      "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\COCO Ahri Uniforms\\meshes\\Coco_Cloths\\Ahri_uniforms_v2\\briefs_1.nif",
+      "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\COCO Ahri Uniforms\\meshes\\Coco_Cloths\\Ahri_uniforms_v2\\necklacef_1.nif",
+      "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\COCO Ahri Uniforms\\meshes\\Coco_Cloths\\Ahri_uniforms_v2\\shoes_1.nif",
+      "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\COCO Ahri Uniforms\\meshes\\Coco_Cloths\\Ahri_uniforms_v2\\skirt_1.nif",
+      "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\COCO Ahri Uniforms\\meshes\\Coco_Cloths\\Ahri_uniforms_v2\\stock_1.nif",
+      "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\COCO Ahri Uniforms\\meshes\\Coco_Cloths\\Ahri_uniforms_v2\\top_1.nif",
+      "E:\\Skyrim\\MO2\\overwrite\\SKSE\\Plugins\\CharGen\\Waifu.nif"
     ]
   },
   "locked_preset_diffuse_textures": {
@@ -118,6 +130,15 @@
         "2": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\textures\\Coco_Cloths\\Mysterious Mage\\4\\topwai.dds",
         "3": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\textures\\Coco_Cloths\\Mysterious Mage\\4\\topwai.dds",
         "4": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\[COCO] Mysterious Mage [SE] - 3BA\\textures\\Coco_Cloths\\Mysterious Mage\\4\\topwai.dds"
+      },
+      "E:\\Skyrim\\MO2\\overwrite\\SKSE\\Plugins\\CharGen\\Waifu.nif": {
+        "0": "E:\\Skyrim\\MO2\\mods\\B and B NPC Replacer\\textures\\actors\\character\\mouth\\mouthhuman.dds",
+        "1": "E:\\Skyrim\\MO2\\mods\\Caliente's Beautiful Bodies Enhancer -CBBE-\\textures\\actors\\character\\female\\femalehead.dds",
+        "2": "E:\\Skyrim\\MO2\\mods\\Tullius Hair Pack\\Textures\\ks hairdo's\\HDT\\Moonrise.dds",
+        "3": "E:\\Skyrim\\MO2\\mods\\Tullius Hair Pack\\Textures\\ks hairdo's\\HDT\\Moonrise.dds",
+        "7": "E:\\Skyrim\\MO2\\mods\\Tullius Hair 3 textures Pack 1004\\textures\\KS Hairdo's\\HDT\\hairline\\hairline01.dds",
+        "8": "E:\\Skyrim\\MO2\\mods\\Tullius Eyes Pack v\\textures\\actors\\character\\SGeyes\\sgeyes08.dds",
+        "9": "E:\\Skyrim\\MO2\\mods\\ESL High Poly Pretty Face and Darker Brows Stand Alone\\textures\\actors\\character\\femalebrows\\PDB\\femalebrow_08.dds"
       }
     },
     "2": {
@@ -151,10 +172,55 @@
         "2": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\CBBE 3BA\\textures\\actors\\character\\female\\femalebody_etc_v2_1.dds",
         "3": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\CBBE 3BA\\textures\\actors\\character\\female\\femalebody_etc_v2_1.dds"
       }
+    },
+    "3": {
+      "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\COCO Ahri Uniforms\\meshes\\Coco_Cloths\\Ahri_uniforms_v2\\top_1.nif": {
+        "0": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\CBBE 3BA\\textures\\actors\\character\\female\\femalebody_1.dds",
+        "1": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\COCO Ahri Uniforms\\Textures\\Coco_Cloths\\Ahri_uniforms_v2\\1\\top.dds",
+        "2": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\COCO Ahri Uniforms\\Textures\\Coco_Cloths\\Ahri_uniforms_v2\\1\\top.dds",
+        "3": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\CBBE 3BA\\textures\\actors\\character\\female\\femalebody_etc_v2_1.dds",
+        "4": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\CBBE 3BA\\textures\\actors\\character\\female\\femalebody_etc_v2_1.dds"
+      },
+      "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\COCO Ahri Uniforms\\meshes\\Coco_Cloths\\Ahri_uniforms_v2\\shoes_1.nif": {
+        "0": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\COCO Ahri Uniforms\\Textures\\Coco_Cloths\\Ahri_uniforms_v2\\1\\shoes.dds",
+        "1": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\CBBE 3BA\\textures\\actors\\character\\female\\femalebody_1.dds"
+      },
+      "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\COCO Ahri Uniforms\\meshes\\Coco_Cloths\\Ahri_uniforms_v2\\bra_1.nif": {
+        "0": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\COCO Ahri Uniforms\\Textures\\Coco_Cloths\\Ahri_uniforms_v2\\1\\bra.dds",
+        "1": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\COCO Ahri Uniforms\\Textures\\Coco_Cloths\\Ahri_uniforms_v2\\1\\bra.dds"
+      },
+      "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\COCO Ahri Uniforms\\meshes\\Coco_Cloths\\Ahri_uniforms_v2\\necklacef_1.nif": {
+        "0": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\COCO Ahri Uniforms\\Textures\\Coco_Cloths\\Ahri_uniforms_v2\\1\\neck.dds",
+        "1": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\COCO Ahri Uniforms\\Textures\\Coco_Cloths\\Ahri_uniforms_v2\\1\\neck.dds",
+        "2": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\COCO Ahri Uniforms\\Textures\\Coco_Cloths\\Ahri_uniforms_v2\\1\\bra.dds"
+      },
+      "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\COCO Ahri Uniforms\\meshes\\Coco_Cloths\\Ahri_uniforms_v2\\briefs_1.nif": {
+        "0": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\COCO Ahri Uniforms\\Textures\\Coco_Cloths\\Ahri_uniforms_v2\\1\\panties.dds"
+      },
+      "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\CBBE 3BA\\meshes\\actors\\character\\character assets\\femalehands_1.nif": {
+        "0": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\CBBE 3BA\\textures\\actors\\character\\female\\femalehands_1.dds"
+      },
+      "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\COCO Ahri Uniforms\\meshes\\Coco_Cloths\\Ahri_uniforms_v2\\skirt_1.nif": {
+        "0": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\COCO Ahri Uniforms\\Textures\\Coco_Cloths\\Ahri_uniforms_v2\\1\\skirt.dds",
+        "1": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\COCO Ahri Uniforms\\Textures\\Coco_Cloths\\Ahri_uniforms_v2\\1\\skirt.dds"
+      },
+      "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\COCO Ahri Uniforms\\meshes\\Coco_Cloths\\Ahri_uniforms_v2\\stock_1.nif": {
+        "0": "E:\\Skyrim\\Dibellas-Wardrobe\\sample\\COCO Ahri Uniforms\\Textures\\Coco_Cloths\\Ahri_uniforms_v2\\1\\stock.dds"
+      },
+      "E:\\Skyrim\\MO2\\overwrite\\SKSE\\Plugins\\CharGen\\Waifu.nif": {
+        "0": "E:\\Skyrim\\MO2\\mods\\B and B NPC Replacer\\textures\\actors\\character\\mouth\\mouthhuman.dds",
+        "1": "E:\\Skyrim\\MO2\\mods\\Caliente's Beautiful Bodies Enhancer -CBBE-\\textures\\actors\\character\\female\\femalehead.dds",
+        "2": "E:\\Skyrim\\MO2\\mods\\Tullius Hair Pack\\Textures\\ks hairdo's\\HDT\\Moonrise.dds",
+        "3": "E:\\Skyrim\\MO2\\mods\\Tullius Hair Pack\\Textures\\ks hairdo's\\HDT\\Moonrise.dds",
+        "7": "E:\\Skyrim\\MO2\\mods\\Tullius Hair 3 textures Pack 1004\\textures\\KS Hairdo's\\HDT\\hairline\\hairline01.dds",
+        "8": "E:\\Skyrim\\MO2\\mods\\Tullius Eyes Pack v\\textures\\actors\\character\\SGeyes\\sgeyes08.dds",
+        "9": "E:\\Skyrim\\MO2\\mods\\ESL High Poly Pretty Face and Darker Brows Stand Alone\\textures\\actors\\character\\femalebrows\\PDB\\femalebrow_08.dds"
+      }
     }
   },
   "locked_preset_names": {
     "2": "Echidna",
-    "1": "Mage"
+    "1": "Mage",
+    "3": "Ahri"
   }
 }

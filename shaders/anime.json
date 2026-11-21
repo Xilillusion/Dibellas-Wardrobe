@@ -1,0 +1,9 @@
+{
+  "postprocess": {
+    "enable_gtao": true,
+    "gtao_radius": 6.0,
+    "gtao_intensity": 0.45,
+    "gtao_bias": 0.02,
+    "enable_ssss": false
+  }
+}
