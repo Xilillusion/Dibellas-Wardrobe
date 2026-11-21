@@ -48,7 +48,6 @@ class LightingConfig:
     light_intensity: float = 0.85
     ambient_intensity: float = 0.45
     specular_multiplier: float = 1.0
-    env_reflection_multiplier: float = 1.0
 
 
 @dataclass
@@ -77,7 +76,6 @@ SOFTNESS_MAX = 10.0
 
 @dataclass
 class CbpcConfig:
-    enabled: bool = True
     gravity: float = 1.0 / 3.0  # breast gravity factor (0 = Armor, 1 = More Gravity)
     softness: Dict[str, float] = field(default_factory=lambda: dict.fromkeys(SOFTNESS_GROUPS, 1.0))
 
@@ -217,8 +215,6 @@ class AppConfig:
 
         cb_data = data.get("cbpc", {})
         if isinstance(cb_data, dict):
-            if isinstance(cb_data.get("enabled"), bool):
-                cfg.cbpc.enabled = cb_data["enabled"]
             gravity = cb_data.get("gravity")
             if isinstance(gravity, (int, float)) and not isinstance(gravity, bool) and math.isfinite(gravity):
                 cfg.cbpc.gravity = max(0.0, min(5.0, float(gravity)))

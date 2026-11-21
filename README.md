@@ -187,8 +187,9 @@ Each preset also saves the resolved diffuse texture path for each mesh shape, in
 replacements; other texture maps are not stored. Presets sharing a mesh can use different diffuse
 textures. Missing saved textures are logged and the mesh's default diffuse texture is used.
 
-Open the settings sidebar with the gear icon to access SMP and CBPC physics controls. The CBPC
-controls include breast gravity and separate softness values for breasts, butt, belly and thighs.
+Open the settings sidebar with the gear icon to access SMP and CBPC physics controls. CBPC physics
+is always enabled when supported body bones are loaded. Its controls include breast gravity and
+separate softness values for breasts, butt, belly and thighs.
 Each softness slider ranges from 0× (motion off for that area) to 10× (softer, slower response) in 0.5× steps;
 existing values between steps remain unchanged until the slider is adjusted.
 1× is the baseline. Breast gravity lowers the breast rest position without changing spring

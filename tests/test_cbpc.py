@@ -482,10 +482,10 @@ def test_overlay_states():
     host = QWidget()
     host.resize(600, 400)
     ov = CbpcOverlay(host, GRAVITY_MIN, GRAVITY_MAX)
-    ov.sync(True, False, 1.0)
-    assert not ov.checkbox.isEnabled() and not ov.checkbox.isChecked() and not ov.slider.isEnabled()
-    ov.sync(True, True, 1.0, 4)
-    assert ov.checkbox.isChecked() and ov.slider.isEnabled()
+    ov.sync(False, 1.0)
+    assert not ov.slider.isEnabled()
+    ov.sync(True, 1.0)
+    assert ov.slider.isEnabled()
     assert ov.slider.minimum() == 0 and ov.slider.maximum() == round(GRAVITY_MAX * STEPS_PER_UNIT)
     assert ov.slider.value() == 30 and ov.label.text() == "1.00x"
     seen = []
@@ -502,14 +502,14 @@ def test_overlay_states():
     assert seen_softness == [("breasts", 10.0), ("butt", 2.0), ("belly", 0.0), ("thigh", 4.0)]
     assert ov.softness_labels["breasts"].text() == "10.0x"
     values = {"breasts": 0.2, "butt": 2.0, "belly": 3.0, "thigh": 1.5}
-    ov.sync(True, True, 1.0, 4, values)
+    ov.sync(True, 1.0, values)
     assert [ov.softness_sliders[g].value() for g in values] == [0, 4, 6, 3]
     assert ov.softness_labels["breasts"].text() == "0.2x"
     assert len(seen_softness) == 4
     ov.softness_sliders["breasts"].triggerAction(QAbstractSlider.SliderAction.SliderSingleStepAdd)
     assert seen_softness[-1] == ("breasts", 0.5)
     assert ov.softness_labels["breasts"].text() == "0.5x"
-    ov.sync(False, True, 1.0, 4, values)
+    ov.sync(False, 1.0, values)
     assert all(not slider.isEnabled() for slider in ov.softness_sliders.values())
     assert app is not None
 
@@ -692,13 +692,13 @@ def test_cbpc_settings_roundtrip_in_config(tmp_path):
     path = tmp_path / "config.json"
     cfg = AppConfig()
     values = {"breasts": 10.0, "butt": 0.0, "belly": 7.5, "thigh": 9.5, "other": 8.0}
-    cfg.cbpc.enabled, cfg.cbpc.gravity, cfg.cbpc.softness = False, 2.0, values
+    cfg.cbpc.gravity, cfg.cbpc.softness = 2.0, values
     cfg.save(path)
     loaded = AppConfig.load(path)
-    assert (loaded.cbpc.enabled, loaded.cbpc.gravity, loaded.cbpc.softness) == (False, 2.0, values)
+    assert (loaded.cbpc.gravity, loaded.cbpc.softness) == (2.0, values)
     path.write_text('{"cbpc": {"gravity": 99, "softness": "x", "enabled": 1}}', encoding="utf-8")
     bad = AppConfig.load(path)
-    assert bad.cbpc.gravity == 5.0 and all(v == 1.0 for v in bad.cbpc.softness.values()) and bad.cbpc.enabled is True
+    assert bad.cbpc.gravity == 5.0 and all(v == 1.0 for v in bad.cbpc.softness.values())
     path.write_text('{"cbpc": {"bounce": 5.0}}', encoding="utf-8")
     migrated = AppConfig.load(path)
     assert all(v == 0.2 for v in migrated.cbpc.softness.values())

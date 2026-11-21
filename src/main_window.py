@@ -602,7 +602,6 @@ class DibellasWardrobeWindow(QMainWindow):
         self.viewport = OutfitViewportWidget(self)
         self.viewport.shaderPresetError.connect(self._on_shader_preset_error)
         overlay = self.viewport.cbpc_overlay
-        self._bind_text(overlay.checkbox, "cbpc_enable")
         for key in ("gravity", "breasts", "butt", "belly", "thigh"):
             locale_key = f"cbpc_{key}"
             self._bind_text(overlay.captions[key], locale_key)
@@ -707,7 +706,6 @@ class DibellasWardrobeWindow(QMainWindow):
         s.light_intensity = cfg_light.light_intensity
         s.ambient_intensity = cfg_light.ambient_intensity
         s.specular_multiplier = cfg_light.specular_multiplier
-        s.env_reflection_multiplier = cfg_light.env_reflection_multiplier
 
         s.enable_smaa = cfg_effects.enable_smaa
         s.smaa_quality = cfg_effects.smaa_quality
@@ -716,7 +714,6 @@ class DibellasWardrobeWindow(QMainWindow):
         self.viewport.set_cbpc_gravity(cb.gravity)
         for group, factor in cb.softness.items():
             self.viewport.set_cbpc_softness(group, factor)
-        self.viewport.set_cbpc_enabled(cb.enabled)
 
         s.wireframe_overlay = cfg_chk.wireframe_overlay
         s.show_ground_grid = cfg_chk.show_ground_grid
@@ -814,10 +811,6 @@ class DibellasWardrobeWindow(QMainWindow):
         self.slider_specular, self.lbl_spec_val = self._add_slider_row(
             light_form, self._t("specular_scale"), 0, 300, int(round(cfg_light.specular_multiplier * 100)),
             f"{cfg_light.specular_multiplier:.2f}x", self._on_lighting_changed, "specular_scale",
-        )
-        self.slider_env, self.lbl_env_val = self._add_slider_row(
-            light_form, self._t("env_reflection"), 0, 300, int(round(cfg_light.env_reflection_multiplier * 100)),
-            f"{cfg_light.env_reflection_multiplier:.2f}x", self._on_lighting_changed, "env_reflection",
         )
         self.lbl_shader_preset = QLabel()
         self._bind_text(self.lbl_shader_preset, "shader_preset")
@@ -2016,14 +2009,12 @@ class DibellasWardrobeWindow(QMainWindow):
         key_i = self.slider_key_intensity.value() / 100.0
         amb_i = self.slider_ambient.value() / 100.0
         spec_m = self.slider_specular.value() / 100.0
-        env_m = self.slider_env.value() / 100.0
 
         self.lbl_azimuth_val.setText(f"{int(az)}°")
         self.lbl_elevation_val.setText(f"{int(el)}°")
         self.lbl_key_val.setText(f"{key_i:.2f}")
         self.lbl_ambient_val.setText(f"{amb_i:.2f}")
         self.lbl_spec_val.setText(f"{spec_m:.2f}x")
-        self.lbl_env_val.setText(f"{env_m:.2f}x")
 
         s = self.viewport.settings
         s.light_azimuth_deg = az
@@ -2031,7 +2022,6 @@ class DibellasWardrobeWindow(QMainWindow):
         s.light_intensity = key_i
         s.ambient_intensity = amb_i
         s.specular_multiplier = spec_m
-        s.env_reflection_multiplier = env_m
         self.viewport.update()
 
     def _reset_lighting_controls(self) -> None:
@@ -2041,7 +2031,6 @@ class DibellasWardrobeWindow(QMainWindow):
         self.slider_key_intensity.setValue(int(round(defaults.light_intensity * 100)))
         self.slider_ambient.setValue(int(round(defaults.ambient_intensity * 100)))
         self.slider_specular.setValue(int(round(defaults.specular_multiplier * 100)))
-        self.slider_env.setValue(int(round(defaults.env_reflection_multiplier * 100)))
         self._on_lighting_changed()
 
     def _on_shader_preset_changed(self, _index: int) -> None:
@@ -2105,7 +2094,6 @@ class DibellasWardrobeWindow(QMainWindow):
         light.light_intensity = self.slider_key_intensity.value() / 100.0
         light.ambient_intensity = self.slider_ambient.value() / 100.0
         light.specular_multiplier = self.slider_specular.value() / 100.0
-        light.env_reflection_multiplier = self.slider_env.value() / 100.0
 
         eff = self.config.effects
         eff.enable_smaa = self.chk_smaa.isChecked()
@@ -2120,7 +2108,6 @@ class DibellasWardrobeWindow(QMainWindow):
         c.show_ground_grid = self.chk_grid.isChecked()
 
         cb = self.config.cbpc
-        cb.enabled = self.viewport.cbpc.enabled
         cb.gravity = self.viewport.cbpc.gravity
         cb.softness = self.viewport.cbpc.softness.copy()
         self.config.smp.enabled = self.viewport.smp.enabled

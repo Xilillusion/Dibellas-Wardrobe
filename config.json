@@ -1,14 +1,13 @@
 {
   "default_folder": "E:\\Skyrim\\Dibellas-Wardrobe\\sample",
   "language": "en",
-  "shader_preset": "anime",
+  "shader_preset": "realistic",
   "lighting": {
     "light_azimuth_deg": 110.0,
     "light_elevation_deg": 28.0,
     "light_intensity": 0.85,
     "ambient_intensity": 0.45,
-    "specular_multiplier": 1.0,
-    "env_reflection_multiplier": 0.0
+    "specular_multiplier": 1.0
   },
   "effects": {
     "enable_smaa": true,
